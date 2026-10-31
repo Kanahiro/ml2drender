@@ -110,9 +110,52 @@ pub fn for_each_pixel(w: usize, h: usize, p: [[f64; 2]; 3], mut f: impl FnMut(us
         (base, ddx, ddy, if flip { -1.0 } else { 1.0 }, include)
     };
     let edges = [edge(0), edge(1), edge(2)];
-    for y in y0..=y1 {
+    'rows: for y in y0..=y1 {
         let cy = y as f64 + 0.5;
-        for x in x0..=x1 {
+        let (mut row_x0, mut row_x1) = (x0, x1);
+        // Direct testing is cheaper than span setup for short rows (e.g. glyph quads).
+        if x1 - x0 >= 16 {
+            // Each edge is monotone along a scanline. An intersection suggests its pixel
+            // boundary, but only the original edge predicate can confirm it. Binary search
+            // handles rounding/cancellation without changing coverage or shared-edge rules.
+            for &(a, dx, dy, sign, include) in &edges {
+                let value = |x: i64| sign * (dx * (cy - a[1]) - dy * (x as f64 + 0.5 - a[0]));
+                let outside = |e: f64| e < 0.0 || (e == 0.0 && !include);
+                let (left, right) = (value(row_x0), value(row_x1));
+                // Non-finite edge intermediates need the original per-pixel behavior.
+                if !left.is_finite() || !right.is_finite() {
+                    continue;
+                }
+                let (left_out, right_out) = (outside(left), outside(right));
+                if left_out == right_out {
+                    if left_out {
+                        continue 'rows;
+                    }
+                    continue;
+                }
+                let (mut lo, mut hi) = (row_x0, row_x1);
+                let crossing = a[0] + dx * (cy - a[1]) / dy - 0.5;
+                let hint = (if left_out { crossing.ceil() } else { crossing.floor() + 1.0 }) as i64;
+                if hint > lo && hint <= hi && outside(value(hint - 1)) == left_out && outside(value(hint)) != left_out {
+                    lo = hint - 1;
+                    hi = hint;
+                }
+                while hi - lo > 1 {
+                    let mid = lo + (hi - lo) / 2;
+                    if outside(value(mid)) == left_out {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                if left_out {
+                    row_x0 = hi;
+                } else {
+                    row_x1 = lo;
+                }
+            }
+        }
+        for x in row_x0..=row_x1 {
             let cx = x as f64 + 0.5;
             let mut wts = [0.0; 3];
             let mut inside = true;
@@ -214,6 +257,83 @@ pub fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Brute-force oracle: test every pixel, with no scanline bounds or incremental edges.
+    // Keep weights as bits so changing interpolation arithmetic cannot hide behind tolerances.
+    fn reference_pixels(w: usize, h: usize, p: [[f64; 2]; 3]) -> Vec<Option<[u64; 3]>> {
+        let mut out = vec![None; w * h];
+        let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]);
+        if area == 0.0 || !area.is_finite() {
+            return out;
+        }
+        let flip = area < 0.0;
+        let p = if flip { [p[0], p[2], p[1]] } else { p };
+        for y in 0..h {
+            for x in 0..w {
+                let center = [x as f64 + 0.5, y as f64 + 0.5];
+                if (0..2).any(|k| center[k] < p.iter().map(|v| v[k]).fold(f64::INFINITY, f64::min)
+                    || center[k] > p.iter().map(|v| v[k]).fold(f64::NEG_INFINITY, f64::max)) {
+                    continue;
+                }
+                let mut weights = [0.0; 3];
+                let mut inside = true;
+                for i in 0..3 {
+                    let (a, b) = (p[(i + 1) % 3], p[(i + 2) % 3]);
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let include = dy < 0.0 || (dy == 0.0 && dx < 0.0);
+                    let (base, dx, dy, sign) = if (b[0], b[1]) < (a[0], a[1]) { (b, -dx, -dy, -1.0) } else { (a, dx, dy, 1.0) };
+                    let e = sign * (dx * (center[1] - base[1]) - dy * (center[0] - base[0]));
+                    if e < 0.0 || (e == 0.0 && !include) {
+                        inside = false;
+                        break;
+                    }
+                    weights[i] = e / area.abs();
+                }
+                if inside {
+                    if flip {
+                        weights.swap(1, 2);
+                    }
+                    out[y * w + x] = Some(weights.map(f64::to_bits));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn scanlines_preserve_coverage_and_weight_bits() {
+        let (w, h) = (64, 32);
+        let check = |p| {
+            let mut actual = vec![None; w * h];
+            for_each_pixel(w, h, p, |x, y, b| {
+                assert!(actual[y * w + x].is_none());
+                actual[y * w + x] = Some(b.map(f64::to_bits));
+            });
+            assert_eq!(actual, reference_pixels(w, h, p), "triangle {p:?}");
+        };
+        let triangles = [
+            [[0.5, 0.5], [63.5, 31.5], [63.5, 31.50000000001]],
+            [[-100.0, -100.0], [300.0, 32.5], [0.5, 32.5]],
+            [[0.5, 0.5], [63.5, 0.5], [0.5, 31.5]],
+            [[0.0, 0.0], [0.0, 32.0], [0.0, 16.0]],
+            [[-1e150, -1e150], [1e150, 1e150], [1e150, -1e150]],
+            [[0.0, 0.0], [1e200, 1e200], [0.0, 1e200]],
+        ];
+        for p in triangles {
+            check(p);
+            check([p[0], p[2], p[1]]);
+        }
+        // Deterministic fractional and half-pixel coordinates exercise clipped triangles,
+        // both windings, thin slivers, horizontal edges, and exact boundary ties.
+        let mut seed = 0x12345678u32;
+        for i in 0..2000 {
+            let p = std::array::from_fn(|_| std::array::from_fn(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                if i % 2 == 0 { (seed % 256) as f64 - 64.5 } else { seed as f64 / u32::MAX as f64 * 256.0 - 64.0 }
+            }));
+            check(p);
+        }
+    }
 
     #[test]
     fn shared_edge_no_overlap_no_gap() {

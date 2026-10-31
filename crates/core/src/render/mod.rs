@@ -107,13 +107,17 @@ impl<'a> Ctx<'a> {
         let canonical = Some(Self::canonical(&tf.tile));
         let mut out = Vec::new();
         for (index, f) in tf.layer.features.iter().enumerate() {
-            let geometry: Vec<Vec<[f64; 2]>> =
-                f.geometry.iter().map(|l| l.iter().map(|p| [(p[0] as f64 * scale).round(), (p[1] as f64 * scale).round()]).collect()).collect();
+            let scale_geometry = || -> Vec<Vec<[f64; 2]>> {
+                f.geometry.iter().map(|l| l.iter().map(|p| [(p[0] as f64 * scale).round(), (p[1] as f64 * scale).round()]).collect()).collect()
+            };
+            // Most filters only inspect properties. Avoid allocating and transforming
+            // geometry for rejected features; geometry expressions still see EXTENT units.
+            let geometry = layer.needs_geometry.then(scale_geometry);
             let feature = ex::Feature {
                 id: f.id.clone(),
                 geom_type: Some(f.ty.name()),
                 properties: f.properties.clone(),
-                geometry: layer.needs_geometry.then(|| geometry.clone()),
+                geometry: geometry.clone(),
             };
             if let Some(filter) = &layer.filter {
                 let mut ctx = ex::EvalCtx {
@@ -126,6 +130,7 @@ impl<'a> Ctx<'a> {
                     continue;
                 }
             }
+            let geometry = geometry.unwrap_or_else(scale_geometry);
             let sort_key = match sort_key_prop.map(|p| layer.layout(p)) {
                 Some(p) if !p.is_constant() => num(&p.eval(zoom, Some(&feature), canonical, self.global_state)),
                 _ => 0.0,

@@ -115,9 +115,9 @@ struct Source {
     data: Data,
     /// Decoded tiles; `None` when the host could not fetch (or decode) it.
     tiles: HashMap<TileId, Option<TileData>>,
-    /// Shared by glyph discovery and all style layers. Include the data tile in the key
-    /// so slices from a fallback parent cannot be confused with another resolved tile.
-    slices: std::cell::RefCell<HashMap<(TileId, TileId), Rc<Vec<mvt::Layer>>>>,
+    /// GeoJSON tiles and overzoom slices shared by glyph discovery and all style layers.
+    /// Include the data tile so fallback parents cannot share the wrong slice.
+    vector_layers: std::cell::RefCell<HashMap<(TileId, TileId), Rc<Vec<mvt::Layer>>>>,
 }
 
 const ZOOM_LEVELS_TO_OVERSCALE: u8 = 4;
@@ -130,6 +130,8 @@ pub struct Renderer {
     glyphs: symbol::glyphs::Glyphs,
     /// Glyph range URLs last returned by `needs()`, so `provide()` need not re-evaluate text.
     glyph_urls: std::cell::RefCell<HashMap<String, (String, u32)>>,
+    /// Text dependencies depend on source data and camera, not on downloaded glyphs.
+    glyph_dependencies: std::cell::RefCell<Option<BTreeSet<(String, u32)>>>,
     view: View,
     /// MapLibre map option `maxZoom` (default 22).
     max_zoom: f64,
@@ -274,7 +276,7 @@ impl Renderer {
                 }
                 _ => Data::Failed,
             };
-            sources.insert(id.clone(), Source { ty, json: src.clone(), data, tiles: HashMap::new(), slices: Default::default() });
+            sources.insert(id.clone(), Source { ty, json: src.clone(), data, tiles: HashMap::new(), vector_layers: Default::default() });
         }
         let sprites = sprite::Sprites::new(&json["sprite"], view.pixel_ratio);
         let glyphs = symbol::glyphs::Glyphs::new(json["glyphs"].as_str());
@@ -285,6 +287,7 @@ impl Renderer {
             sprites,
             glyphs,
             glyph_urls: Default::default(),
+            glyph_dependencies: Default::default(),
             view,
             max_zoom: 22.0,
             cross_source_collisions: true,
@@ -295,6 +298,7 @@ impl Renderer {
 
     /// MapLibre's `maxZoom` map option: clamps the camera zoom and bounds tile slicing.
     pub fn set_max_zoom(&mut self, max_zoom: f64) {
+        *self.glyph_dependencies.get_mut() = None;
         self.max_zoom = max_zoom;
         let v = self.view;
         let zoom = v.zoom.clamp(-2.0, max_zoom);
@@ -426,6 +430,9 @@ impl Renderer {
         if self.glyphs.url.is_none() {
             return vec![];
         }
+        if let Some(deps) = self.glyph_dependencies.borrow().as_ref() {
+            return self.glyphs.needs(deps);
+        }
         let ctx = self.ctx();
         let mut deps = BTreeSet::new();
         let no_mask = render::raster::Mask { w: 0, bits: vec![] };
@@ -441,7 +448,9 @@ impl Renderer {
                 symbol::layout::glyph_dependencies(layer, &ctx, &tf, raw, &mut deps);
             }
         }
-        self.glyphs.needs(&deps)
+        let needs = self.glyphs.needs(&deps);
+        *self.glyph_dependencies.borrow_mut() = Some(deps);
+        needs
     }
 
     /// Resolved tiles of a vector/GeoJSON source with their decoded layers (sliced when
@@ -452,11 +461,14 @@ impl Renderer {
             .into_iter()
             .map(|(rt, data_id)| {
                 let layers = match &src.data {
-                    Data::GeoJson(g) => Some(Rc::new(vec![g.tile(rt.canonical.z, rt.canonical.x, rt.canonical.y)])),
+                    Data::GeoJson(g) => Some(Rc::clone(
+                        src.vector_layers.borrow_mut().entry((rt.canonical, rt.canonical))
+                            .or_insert_with(|| Rc::new(vec![g.tile(rt.canonical.z, rt.canonical.x, rt.canonical.y)])),
+                    )),
                     Data::Tiled(_) => match src.tiles.get(&data_id).cloned().flatten() {
                         Some(TileData::Vector(ls)) if data_id == rt.canonical => Some(ls),
                         Some(TileData::Vector(ls)) => Some(Rc::clone(
-                            src.slices.borrow_mut().entry((data_id, rt.canonical))
+                            src.vector_layers.borrow_mut().entry((data_id, rt.canonical))
                                 .or_insert_with(|| Rc::new(ls.iter().map(|l| mvt::slice_layer(l, data_id, rt.canonical)).collect())),
                         )),
                         _ => None,
@@ -481,7 +493,9 @@ impl Renderer {
     /// not fetch it (e.g. 404): a vector tile is then empty, a raster tile is replaced by an
     /// ancestor, a glyph range leaves its glyphs missing.
     pub fn provide(&mut self, url: &str, bytes: Option<&[u8]>) {
+        let image_count = self.sprites.images.len();
         self.sprites.provide(url, bytes);
+        let mut changed = self.sprites.images.len() != image_count;
         // Glyph ranges are recognized from the last `needs()` (evaluating text is costly).
         let glyph_key = self.glyph_urls.borrow().get(url).cloned();
         if let Some(key) = glyph_key {
@@ -492,6 +506,7 @@ impl Renderer {
             let src = self.sources.get_mut(&id).unwrap();
             match &mut src.data {
                 Data::Pending(u) if u == url => {
+                    changed = true;
                     let doc = bytes.and_then(|b| serde_json::from_slice::<J>(b).ok());
                     src.data = match (doc, src.ty.as_str()) {
                         (Some(doc), "geojson") => Data::GeoJson(geojson_index(&doc, &src.json)),
@@ -502,6 +517,7 @@ impl Renderer {
                 Data::Tiled(tj) => {
                     for t in fetch {
                         if tile::tile_url(&tj.tiles, t, tj.tms) == url {
+                            changed = true;
                             // Like MapLibre: a missing vector tile is just empty; a missing raster
                             // tile lets a parent show through, while an empty raster response
                             // (HTTP 204) is a transparent tile.
@@ -519,11 +535,15 @@ impl Renderer {
                     }
                 }
                 Data::Image { url: u, texture, .. } if u == url && texture.is_none() => {
+                    changed = true;
                     // Image sources are uploaded without mipmaps.
                     *texture = Some(bytes.and_then(image::Image::decode).map(|i| Rc::new(image::Texture::new(&i, false))));
                 }
                 _ => {}
             }
+        }
+        if changed {
+            *self.glyph_dependencies.get_mut() = None;
         }
     }
 
@@ -782,6 +802,38 @@ fn dem_from(img: &image::Image, src: &J, encoding: Option<&str>) -> Option<rende
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glyph_requests_follow_staged_sources_and_failed_ranges() {
+        let style = r#"{"version":8,"glyphs":"/glyphs/{fontstack}/{range}","sources":{"a":{"type":"geojson","data":"/a"},"b":{"type":"geojson","data":"/b"}},"layers":[{"id":"a","type":"symbol","source":"a","layout":{"text-field":["get","name"],"text-font":["Test Font"]}},{"id":"b","type":"symbol","source":"b","layout":{"text-field":["get","name"],"text-font":["Test Font"]}}]}"#;
+        let mut renderer = Renderer::new(style, View::tile(0, 0, 0, 128)).unwrap();
+        let urls = |r: &Renderer| r.needs().into_iter().map(|n| n.url).collect::<Vec<_>>();
+        assert_eq!(urls(&renderer), ["/a", "/b"]);
+        renderer.provide("/a", Some(br#"{"type":"Feature","properties":{"name":"A"},"geometry":{"type":"Point","coordinates":[0,0]}}"#));
+        let expected = ["/b", "/glyphs/Test Font/0-255"];
+        assert_eq!(urls(&renderer), expected);
+        assert_eq!(urls(&renderer), expected);
+        renderer.provide("/glyphs/Test Font/0-255", None);
+        assert_eq!(urls(&renderer), ["/b"]);
+        // Later source data can introduce a range after earlier glyphs have settled.
+        renderer.provide("/b", Some(r#"{"type":"Feature","properties":{"name":"あ"},"geometry":{"type":"Point","coordinates":[0,0]}}"#.as_bytes()));
+        assert_eq!(urls(&renderer), ["/glyphs/Test Font/12288-12543"]);
+        renderer.provide("/glyphs/Test Font/12288-12543", None);
+        assert!(renderer.needs().is_empty());
+        assert!(renderer.render().is_ok());
+    }
+
+    #[test]
+    fn glyph_requests_follow_camera_clamping_after_discovery() {
+        let style = r#"{"version":8,"glyphs":"/glyphs/{fontstack}/{range}","sources":{"a":{"type":"geojson","data":{"type":"Point","coordinates":[0,0]}}},"layers":[{"id":"a","type":"symbol","source":"a","layout":{"text-field":["step",["zoom"],"A",1,"あ"],"text-font":["Test Font"]}}]}"#;
+        let view = View { center: [0.0, 0.0], zoom: 2.0, width: 128, height: 128, ..View::tile(0, 0, 0, 128) };
+        let mut renderer = Renderer::new(style, view).unwrap();
+        assert_eq!(renderer.needs()[0].url, "/glyphs/Test Font/12288-12543");
+        renderer.provide("/glyphs/Test Font/12288-12543", None);
+        assert!(renderer.needs().is_empty());
+        renderer.set_max_zoom(0.0);
+        assert_eq!(renderer.needs()[0].url, "/glyphs/Test Font/0-255");
+    }
 
     #[test]
     fn overzoom_slices_are_shared_but_sources_and_children_are_distinct() {
