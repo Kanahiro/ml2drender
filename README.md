@@ -18,37 +18,38 @@ pnpm demo
 
 ## JavaScript API
 
-現在、配布用の JavaScript ラッパーはありません。`pnpm build:wasm` で生成される `target/wasm32-unknown-unknown/wasm/mlrender_wasm.wasm` を `WebAssembly.instantiate` し、以下の export を呼びます。具体的なホスト実装は [ブラウザのサンプル](examples/browser/src/main.ts)を参照してください。
+ブラウザ向けの [`MapRenderer`](src/index.ts) が、WASM のロード、リソース取得、画像生成をまとめて扱います。先に `pnpm build:wasm` を実行してください。現在のモジュールは Vite の `?url` アセット読み込みを使います。
 
-| export | 引数・戻り値 | 役割 |
-| --- | --- | --- |
-| `alloc(len)` | バイト数 → ポインタ | 入力用の WASM メモリを確保 |
-| `dealloc(ptr, len)` | ポインタ、確保時のバイト数 | 入力用メモリを解放 |
-| `renderer_new(stylePtr, styleLen, lng, lat, zoom, bearing, width, height, pixelRatio)` | UTF-8 の Style JSON、中心座標、ズーム、回転角、CSS ピクセル単位の幅・高さ、画素比 → ハンドル | レンダラを作成。失敗時は `0` |
-| `renderer_needs(handle)` | ハンドル → 必要な URL の数 | 取得が必要なリソースを列挙 |
-| `renderer_provide(handle, urlPtr, urlLen, dataPtr, dataLen, found)` | UTF-8 URL、取得したバイト列、成功時 `1`／失敗時 `0` | リソースの結果を渡す |
-| `renderer_render(handle)` | ハンドル → 成功時 `1`／失敗時 `0` | RGBA 画像を生成 |
-| `renderer_free(handle)` | ハンドル | レンダラを解放 |
-| `out_ptr()` / `out_len()` | ポインタ／バイト数 | 直近の結果バッファを参照 |
+```ts
+import { MapRenderer } from './src/index';
 
-`renderer_new` の `lng` / `lat` は度、`bearing` は時計回りの度数です。出力サイズは `round(width * pixelRatio) × round(height * pixelRatio)` ピクセルです。画像は各画素が **RGBA 8 bit、行優先**のバイト列です。
+const renderer = await MapRenderer.init('/style.json');
+const image = await renderer.render({
+  center: [139.767, 35.681], // [経度, 緯度]
+  zoom: 12,
+  width: 512,
+  height: 512,
+  pixelRatio: devicePixelRatio,
+});
 
-ホストは次の順で呼びます。
+const canvas = document.querySelector('canvas')!;
+canvas.width = image.width;
+canvas.height = image.height;
+canvas.getContext('2d')!.putImageData(
+  new ImageData(Uint8ClampedArray.from(image.data), image.width, image.height), 0, 0,
+);
+```
 
-1. Style JSON を取得して `renderer_new` に渡す。
-2. `renderer_needs` を呼び、戻り値が 0 になるまで、返された各 URL を取得して `renderer_provide` に渡す。URL は段階的に判明するため、この往復を繰り返す。
-3. `renderer_render` を呼び、結果の RGBA をコピーする。
-4. 最後に `renderer_free` を呼ぶ。
-
-`renderer_needs` の結果は `out_ptr()` / `out_len()` が示す UTF-8 バイト列で、URL を改行で区切ります。URL が相対パスなら Style JSON の URL を基準に解決します。ただし `renderer_provide` には **`renderer_needs` が返した元の URL** を渡してください。取得失敗時は `found = 0` として渡します。`renderer_new` の戻り値が `0` のとき、および `renderer_render` の戻り値が `0` のとき、出力バッファには UTF-8 のエラーメッセージが入ります。未取得のリソースが残る状態で `renderer_render` を呼ぶと失敗します。
-
-入力は `alloc` で確保した領域へコピーし、呼び出し後に `dealloc` してください。出力バッファは**次の WASM 関数呼び出しまで**有効なので、URL 一覧・画像・エラーはすぐに JavaScript 側へコピーしてください。`renderer_free` 後のハンドルは使えません。
+- `MapRenderer.init(styleUrl)`: Style JSON を取得し、WASM をロードします。相対 URL は現在のページを基準に解決します。
+- `renderer.render(view)`: 必要なタイル・画像・グリフを取得し、`Promise<RenderedImage>` を返します。同じインスタンスで異なる視点を繰り返し描画できます。
+- `view`: `center: [lng, lat]`、`zoom`、`width`、`height` は必須。`bearing`（時計回りの度数、既定 0）と `pixelRatio`（既定 1）は省略できます。幅・高さは CSS ピクセル単位です。
+- `RenderedImage`: `width`、`height`、行優先の 8 bit RGBA 画素列 `data: Uint8ClampedArray` を持ちます。取得や描画の失敗は例外になります。
 
 ## アーキテクチャ
 
 ```mermaid
 flowchart LR
-    Host[JavaScript ホスト<br/>Style・リソースの取得] -->|Style JSON・View| ABI[wasm<br/>C ABI・メモリ受け渡し]
+    Host[MapRenderer<br/>init・render・リソース取得] -->|Style JSON・View| ABI[wasm<br/>C ABI・メモリ受け渡し]
     ABI --> Core[core / Renderer<br/>必要リソースの管理]
     Core -->|needs: URL| Host
     Host -->|provide: バイト列| Core
@@ -62,7 +63,7 @@ flowchart LR
     ABI -->|RGBA| Host
 ```
 
-`core/` はネットワークやファイル I/O を持たない Rust ライブラリです。必要な URL を `needs()` で通知し、ホストから `provide()` で受け取ったデータを処理します。`wasm/` はこの API を薄い C ABI として公開し、`examples/browser/` が取得ループと Canvas への表示を実装しています。`cli/` はテストとネイティブでの検証に使います。
+`core/` はネットワークやファイル I/O を持たない Rust ライブラリです。必要な URL を `needs()` で通知し、ホストから `provide()` で受け取ったデータを処理します。`wasm/` はこの API を C ABI として公開し、`src/index.ts` の `MapRenderer` が WASM メモリ操作と取得ループを隠します。`examples/browser/` は公開クラスを使って Canvas に表示します。`cli/` はテストとネイティブでの検証に使います。
 
 ## 開発
 
