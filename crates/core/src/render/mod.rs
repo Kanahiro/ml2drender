@@ -12,6 +12,8 @@ use crate::mvt::{self, GeomType};
 use crate::style::{Layer, PropValue};
 use crate::tile::{RenderTile, Transform};
 use raster::{Mask, Rgba, Target};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 pub const EXTENT: f64 = 8192.0;
@@ -20,6 +22,9 @@ pub struct Ctx<'a> {
     pub transform: &'a Transform,
     pub global_state: &'a Rc<Object>,
     pub images: &'a std::collections::HashMap<String, Rc<crate::sprite::StyleImage>>,
+    // A context borrows one immutable transform and lives for one render. Keeping the
+    // cache here avoids stale masks after a camera clamp or a change in resolved tiles.
+    masks: RefCell<HashMap<(usize, usize, Vec<RenderTile>), Rc<Vec<Mask>>>>,
 }
 
 /// A tile's features for one style layer, with its clip mask.
@@ -39,7 +44,11 @@ pub struct BucketFeature {
     pub index: usize,
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
+    pub fn new(transform: &'a Transform, global_state: &'a Rc<Object>, images: &'a HashMap<String, Rc<crate::sprite::StyleImage>>) -> Self {
+        Self { transform, global_state, images, masks: RefCell::new(HashMap::new()) }
+    }
+
     pub fn tile_px(&self, tile: &RenderTile) -> f64 {
         self.transform.world_size / (1u64 << tile.canonical.z) as f64
     }
@@ -61,6 +70,29 @@ impl Ctx<'_> {
         let f = self.tile_to_world(tile);
         let q = [[0.0, 0.0], [EXTENT, 0.0], [EXTENT, EXTENT], [0.0, EXTENT]].map(|p| self.transform.world_to_screen(f(p)));
         Mask::from_quad(w, h, q)
+    }
+
+    /// A tile owns its quad except where a higher-zoom child covers it. The whole
+    /// ordered tile set matters: layers can share masks only for the same coverage.
+    pub fn masks(&self, tiles: &[RenderTile], w: usize, h: usize) -> Rc<Vec<Mask>> {
+        let key = (w, h, tiles.to_vec());
+        if let Some(cached) = self.masks.borrow().get(&key) {
+            return Rc::clone(cached);
+        }
+        let quads: Vec<Mask> = tiles.iter().map(|t| self.tile_mask(t, w, h)).collect();
+        let masks = Rc::new(tiles.iter().enumerate().map(|(i, t)| {
+            let mut m = Mask { w, bits: quads[i].bits.clone() };
+            for (j, u) in tiles.iter().enumerate() {
+                if u.canonical.z > t.canonical.z && u.wrap == t.wrap && u.canonical.parent_at(t.canonical.z) == t.canonical {
+                    for (b, &o) in m.bits.iter_mut().zip(&quads[j].bits) {
+                        *b = *b && !o;
+                    }
+                }
+            }
+            m
+        }).collect());
+        self.masks.borrow_mut().insert(key, Rc::clone(&masks));
+        masks
     }
 
     pub fn canonical(tile: &RenderTile) -> CanonicalTileId {
@@ -440,4 +472,51 @@ pub fn classify_rings(rings: &[Vec<[f64; 2]>], max_rings: usize) -> Vec<Vec<Vec<
             p.into_iter().map(|(_, r)| r).collect()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tile::TileId;
+
+    #[test]
+    fn masks_share_coverage_without_reusing_parent_only_or_wrapped_masks() {
+        let transform = Transform::new([0.0, 0.0], 0.0, 0.0, 32.0, 32.0, 1.0);
+        let state = Rc::new(Object::new());
+        let images = HashMap::new();
+        let ctx = Ctx::new(&transform, &state, &images);
+        let parent = RenderTile { overscaled_z: 0, wrap: 0, canonical: TileId { z: 0, x: 0, y: 0 } };
+        let child = RenderTile { overscaled_z: 1, wrap: 0, canonical: TileId { z: 1, x: 1, y: 1 } };
+        let parent_only = ctx.masks(&[parent], 32, 32);
+        let family = ctx.masks(&[parent, child], 32, 32);
+        assert!(Rc::ptr_eq(&family, &ctx.masks(&[parent, child], 32, 32)));
+        assert!(parent_only[0].get(24, 24));
+        assert!(!family[0].get(24, 24));
+        assert!(family[1].get(24, 24));
+        assert!(family[0].get(8, 8));
+        assert!(!family[1].get(8, 8));
+
+        let reversed = ctx.masks(&[child, parent], 32, 32);
+        assert_eq!(reversed[0].bits, family[1].bits);
+        assert_eq!(reversed[1].bits, family[0].bits);
+        let wrapped = ctx.masks(&[parent, RenderTile { wrap: 1, ..child }], 32, 32);
+        assert!(wrapped[0].get(24, 24));
+        assert!(!wrapped[1].get(24, 24));
+        let larger = ctx.masks(&[parent, child], 64, 32);
+        assert_eq!(larger[0].bits.len(), 64 * 32);
+        assert!(!Rc::ptr_eq(&family, &larger));
+    }
+
+    #[test]
+    fn new_render_context_reprojects_the_same_tile_set() {
+        let state = Rc::new(Object::new());
+        let images = HashMap::new();
+        let tile = RenderTile { overscaled_z: 1, wrap: 0, canonical: TileId { z: 1, x: 1, y: 1 } };
+        let first = Transform::new([0.0, 0.0], 0.0, 0.0, 32.0, 32.0, 1.0);
+        let second = Transform::new([30.0, 0.0], 0.0, 0.0, 32.0, 32.0, 1.0);
+        let a = Ctx::new(&first, &state, &images).masks(&[tile], 32, 32);
+        let b = Ctx::new(&second, &state, &images).masks(&[tile], 32, 32);
+        assert!(!a[0].get(8, 24));
+        assert!(b[0].get(8, 24));
+    }
 }

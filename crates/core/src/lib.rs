@@ -115,6 +115,9 @@ struct Source {
     data: Data,
     /// Decoded tiles; `None` when the host could not fetch (or decode) it.
     tiles: HashMap<TileId, Option<TileData>>,
+    /// Shared by glyph discovery and all style layers. Include the data tile in the key
+    /// so slices from a fallback parent cannot be confused with another resolved tile.
+    slices: std::cell::RefCell<HashMap<(TileId, TileId), Rc<Vec<mvt::Layer>>>>,
 }
 
 const ZOOM_LEVELS_TO_OVERSCALE: u8 = 4;
@@ -271,7 +274,7 @@ impl Renderer {
                 }
                 _ => Data::Failed,
             };
-            sources.insert(id.clone(), Source { ty, json: src.clone(), data, tiles: HashMap::new() });
+            sources.insert(id.clone(), Source { ty, json: src.clone(), data, tiles: HashMap::new(), slices: Default::default() });
         }
         let sprites = sprite::Sprites::new(&json["sprite"], view.pixel_ratio);
         let glyphs = symbol::glyphs::Glyphs::new(json["glyphs"].as_str());
@@ -414,7 +417,7 @@ impl Renderer {
     }
 
     fn ctx(&self) -> render::Ctx<'_> {
-        render::Ctx { transform: &self.transform, global_state: &self.style.global_state, images: &self.sprites.images }
+        render::Ctx::new(&self.transform, &self.style.global_state, &self.sprites.images)
     }
 
     /// Glyph ranges still to fetch for the text of the loaded tiles. Text is only known once
@@ -452,7 +455,10 @@ impl Renderer {
                     Data::GeoJson(g) => Some(Rc::new(vec![g.tile(rt.canonical.z, rt.canonical.x, rt.canonical.y)])),
                     Data::Tiled(_) => match src.tiles.get(&data_id).cloned().flatten() {
                         Some(TileData::Vector(ls)) if data_id == rt.canonical => Some(ls),
-                        Some(TileData::Vector(ls)) => Some(Rc::new(ls.iter().map(|l| mvt::slice_layer(l, data_id, rt.canonical)).collect())),
+                        Some(TileData::Vector(ls)) => Some(Rc::clone(
+                            src.slices.borrow_mut().entry((data_id, rt.canonical))
+                                .or_insert_with(|| Rc::new(ls.iter().map(|l| mvt::slice_layer(l, data_id, rt.canonical)).collect())),
+                        )),
                         _ => None,
                     },
                     _ => None,
@@ -521,27 +527,6 @@ impl Renderer {
         }
     }
 
-    /// Clip masks for tiles that may overlap (fallback parents): a tile owns the pixels of its
-    /// quad not covered by a higher-zoom tile in the set.
-    fn masks(&self, ctx: &render::Ctx, tiles: &[RenderTile], w: usize, h: usize) -> Vec<render::raster::Mask> {
-        let quads: Vec<render::raster::Mask> = tiles.iter().map(|t| ctx.tile_mask(t, w, h)).collect();
-        tiles
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let mut m = render::raster::Mask { w, bits: quads[i].bits.clone() };
-                for (j, u) in tiles.iter().enumerate() {
-                    if u.canonical.z > t.canonical.z && u.wrap == t.wrap && u.canonical.parent_at(t.canonical.z) == t.canonical {
-                        for (b, &o) in m.bits.iter_mut().zip(&quads[j].bits) {
-                            *b = *b && !o;
-                        }
-                    }
-                }
-                m
-            })
-            .collect()
-    }
-
     /// Non-premultiplied RGBA8, row-major.
     pub fn render(&mut self) -> Result<Vec<u8>, Error> {
         if !self.needs().is_empty() {
@@ -550,7 +535,7 @@ impl Renderer {
         let t = &self.transform;
         let (w, h) = ((t.width * t.pixel_ratio).round() as usize, (t.height * t.pixel_ratio).round() as usize);
         let mut target = render::raster::Target::new(w, h);
-        let ctx = render::Ctx { transform: t, global_state: &self.style.global_state, images: &self.sprites.images };
+        let ctx = self.ctx();
         let empty = mvt::Layer { name: String::new(), extent: 4096, features: vec![] };
         // Symbols are laid out and placed for all layers before drawing (placement runs from
         // the top layer down).
@@ -634,10 +619,10 @@ impl Renderer {
             }
             let layers_by_tile = self.tile_layers(src);
             let render_tiles: Vec<RenderTile> = layers_by_tile.iter().map(|r| r.0).collect();
-            let masks = self.masks(&ctx, &render_tiles, w, h);
+            let masks = ctx.masks(&render_tiles, w, h);
             let tiles: Vec<render::TileFeatures> = layers_by_tile
                 .iter()
-                .zip(&masks)
+                .zip(masks.iter())
                 .map(|((rt, tl), mask)| render::TileFeatures { tile: *rt, mask, layer: self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty) })
                 .collect();
             // `*-layer-opacity`: the layer is drawn offscreen, then composited.
@@ -739,7 +724,7 @@ impl Renderer {
         // Same-zoom tiles abut and are drawn without stencil; mixed zooms (fallback parents) are
         // clipped so that the higher zoom wins.
         let mixed = tiles.iter().any(|t| t.canonical.z != tiles[0].canonical.z);
-        let masks = if mixed { Some(self.masks(ctx, &tiles, w, h)) } else { None };
+        let masks = if mixed { Some(ctx.masks(&tiles, w, h)) } else { None };
         for (i, (rt, data_id)) in resolved.iter().enumerate() {
             if let Some(Some(TileData::Raster(tex))) = src.tiles.get(data_id) {
                 draw_quad(target, ctx, &Quad::tile(*rt), tex, &params, masks.as_ref().map(|m| &m[i]));
@@ -760,7 +745,7 @@ impl Renderer {
             }).collect();
         let tiles: Vec<RenderTile> = resolved.iter().map(|r| r.0).collect();
         let mixed = tiles.iter().any(|t| t.canonical.z != tiles[0].canonical.z);
-        let masks = if mixed { Some(self.masks(ctx, &tiles, w, h)) } else { None };
+        let masks = if mixed { Some(ctx.masks(&tiles, w, h)) } else { None };
         for (i, t) in tiles.iter().enumerate() {
             let Some(dem) = dems[i] else { continue };
             let mut dem = (**dem).clone();
@@ -797,6 +782,41 @@ fn dem_from(img: &image::Image, src: &J, encoding: Option<&str>) -> Option<rende
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overzoom_slices_are_shared_but_sources_and_children_are_distinct() {
+        let style = r#"{"version":8,"sources":{"a":{"type":"vector","tiles":["/a/{z}/{x}/{y}"],"maxzoom":1},"b":{"type":"vector","tiles":["/b/{z}/{x}/{y}"],"maxzoom":1}},"layers":[]}"#;
+        let view = View { width: 1024, ..View::tile(2, 1, 1, 512) };
+        let mut renderer = Renderer::new(style, view).unwrap();
+        let parent = TileId { z: 1, x: 0, y: 0 };
+        let child = TileId { z: 2, x: 1, y: 1 };
+        for (id, x) in [("a", 3072), ("b", 2560)] {
+            let layer = mvt::Layer { name: "points".into(), extent: 4096, features: vec![mvt::Feature {
+                id: None, ty: mvt::GeomType::Point, properties: Default::default(), geometry: vec![vec![[x, 3072]]],
+            }] };
+            renderer.sources.get_mut(id).unwrap().tiles.insert(parent, Some(TileData::Vector(Rc::new(vec![layer]))));
+        }
+        let layers = |id: &str, tile: TileId| {
+            renderer.tile_layers(&renderer.sources[id]).into_iter().find(|(t, _)| t.canonical == tile).unwrap().1.unwrap()
+        };
+        let a = layers("a", child);
+        assert!(Rc::ptr_eq(&a, &layers("a", child)));
+        assert_eq!(a[0].features[0].geometry, vec![vec![[2048, 2048]]]);
+        let b = layers("b", child);
+        assert!(!Rc::ptr_eq(&a, &b));
+        assert_eq!(b[0].features[0].geometry, vec![vec![[1024, 2048]]]);
+
+        // A sibling uses the same parent but needs its own clipping and coordinates.
+        let sibling = layers("a", TileId { z: 2, x: 0, y: 1 });
+        assert!(!Rc::ptr_eq(&a, &sibling));
+        assert!(sibling[0].features.is_empty());
+
+        // Once zoom is clamped to the source zoom, use the original decoded tile.
+        renderer.set_max_zoom(1.0);
+        let unsliced = renderer.tile_layers(&renderer.sources["a"]).into_iter()
+            .find(|(t, _)| t.canonical == parent).unwrap().1.unwrap();
+        assert_eq!(unsliced[0].features[0].geometry, vec![vec![[3072, 3072]]]);
+    }
 
     #[test]
     fn tile_view() {
