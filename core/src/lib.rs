@@ -56,6 +56,8 @@ pub struct View {
     pub width: u32,
     pub height: u32,
     pub pixel_ratio: f64,
+    /// CSS pixels rendered around the view before cropping to the requested output size.
+    pub margin: u32,
 }
 
 impl View {
@@ -71,6 +73,7 @@ impl View {
             width: tile_size,
             height: tile_size,
             pixel_ratio: 1.0,
+            margin: 0,
         }
     }
 }
@@ -232,6 +235,7 @@ impl Renderer {
         let v = self.view;
         let zoom = v.zoom.clamp(-2.0, max_zoom);
         self.transform = Transform::new(v.center, zoom, v.bearing, v.width as f64, v.height as f64, v.pixel_ratio);
+        self.transform.set_margin(v.margin);
     }
 
     /// MapLibre's `crossSourceCollisions` map option: when off, symbols only collide with
@@ -595,7 +599,19 @@ impl Renderer {
                 }
             }
         }
-        Ok(target.to_unpremultiplied())
+        let rgba = target.to_unpremultiplied();
+        let margin = (self.view.margin as f64 * t.pixel_ratio).round() as usize;
+        if margin == 0 {
+            return Ok(rgba);
+        }
+        let width = (self.view.width as f64 * t.pixel_ratio).round() as usize;
+        let height = (self.view.height as f64 * t.pixel_ratio).round() as usize;
+        let mut cropped = Vec::with_capacity(width * height * 4);
+        for y in margin..margin + height {
+            let start = (y * w + margin) * 4;
+            cropped.extend_from_slice(&rgba[start..start + width * 4]);
+        }
+        Ok(cropped)
     }
 
     fn draw_raster(&self, target: &mut render::raster::Target, layer: &style::Layer, ctx: &render::Ctx, src: &Source, w: usize, h: usize) {
@@ -651,9 +667,54 @@ mod tests {
     #[test]
     fn background_only() {
         let style = r##"{"version":8,"sources":{},"layers":[{"id":"bg","type":"background","paint":{"background-color":"#ff0000"}}]}"##;
-        let mut r = Renderer::new(style, View { center: [0.0, 0.0], zoom: 0.0, bearing: 0.0, width: 4, height: 4, pixel_ratio: 1.0 }).unwrap();
+        let mut r = Renderer::new(style, View { center: [0.0, 0.0], zoom: 0.0, bearing: 0.0, width: 4, height: 4, pixel_ratio: 1.0, margin: 0 }).unwrap();
         assert!(r.needs().is_empty());
         let px = r.render().unwrap();
         assert_eq!(&px[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn margin_fetches_neighbor_tiles_without_moving_camera() {
+        let style = r#"{"version":8,"sources":{"v":{"type":"vector","tiles":["/{z}/{x}/{y}"],"maxzoom":2}},"layers":[{"id":"s","type":"symbol","source":"v","source-layer":"points","layout":{"text-field":"label"}}]}"#;
+        let view = View::tile(2, 1, 0, 512);
+        let plain = Renderer::new(style, view).unwrap();
+        let mut padded = Renderer::new(style, View { margin: 32, ..view }).unwrap();
+        assert_eq!(plain.transform.center, padded.transform.center);
+        assert!(!plain.needs().iter().any(|r| r.url == "/2/2/0"));
+        assert!(padded.needs().iter().any(|r| r.url == "/2/2/0"));
+        padded.set_max_zoom(20.0);
+        assert_eq!(plain.transform.center, padded.transform.center);
+    }
+
+    #[test]
+    fn margin_renders_icon_anchored_in_neighbor_tile_and_crops_output() {
+        // The anchor is just east of this view's right edge (longitude 0). With no
+        // GeoJSON tile buffer, only loading the neighboring tile can recover the icon.
+        let style = r#"{"version":8,"sprite":"/sprite","sources":{"p":{"type":"geojson","buffer":0,"maxzoom":2,"data":{"type":"Point","coordinates":[1,40]}}},"layers":[{"id":"s","type":"symbol","source":"p","layout":{"icon-image":"marker","icon-allow-overlap":true}}]}"#;
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 32, 32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&[255, 0, 0, 255].repeat(32 * 32)).unwrap();
+        }
+        for ratio in [1.0, 1.25, 1.5, 2.0] {
+            for margin in [0, 31] {
+                let view = View { margin, pixel_ratio: ratio, ..View::tile(2, 1, 1, 512) };
+                let mut renderer = Renderer::new(style, view).unwrap();
+                let suffix = if ratio > 1.0 { "@2x" } else { "" };
+                renderer.provide(&format!("/sprite{suffix}.json"), Some(br#"{"marker":{"x":0,"y":0,"width":32,"height":32,"pixelRatio":1}}"#));
+                renderer.provide(&format!("/sprite{suffix}.png"), Some(&png));
+                assert!(renderer.needs().is_empty());
+                let rgba = renderer.render().unwrap();
+                let size = (512.0 * ratio).round() as usize;
+                assert_eq!(rgba.len(), size * size * 4);
+                let visible = rgba.chunks_exact(4).any(|p| p[3] > 0);
+                assert_eq!(visible, margin > 0, "ratio={ratio}, margin={margin}");
+                if margin > 0 {
+                    assert!(rgba.chunks_exact(size * 4).any(|row| row[(size - 1) * 4 + 3] > 0));
+                }
+            }
+        }
     }
 }

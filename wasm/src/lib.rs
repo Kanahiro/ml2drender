@@ -58,9 +58,10 @@ pub unsafe extern "C" fn renderer_new(
     width: u32,
     height: u32,
     pixel_ratio: f64,
+    margin: u32,
 ) -> *mut Renderer {
     let style = String::from_utf8_lossy(unsafe { bytes(style_ptr, style_len) });
-    let view = View { center: [lng, lat], zoom, bearing, width, height, pixel_ratio };
+    let view = View { center: [lng, lat], zoom, bearing, width, height, pixel_ratio, margin };
     match Renderer::new(&style, view) {
         Ok(r) => Box::into_raw(Box::new(r)),
         Err(e) => {

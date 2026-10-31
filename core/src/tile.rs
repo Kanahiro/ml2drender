@@ -46,6 +46,8 @@ pub struct Transform {
     pub width: f64,
     pub height: f64,
     pub pixel_ratio: f64,
+    /// Original viewport size, preserved for raster pixel alignment when adding coverage.
+    viewport_size: [f64; 2],
 }
 
 impl Transform {
@@ -61,7 +63,14 @@ impl Transform {
         } else {
             c[1] = world_size / 2.0;
         }
-        Transform { zoom, world_size, center: c, bearing_rad: -bearing_deg.to_radians(), width, height, pixel_ratio }
+        Transform { zoom, world_size, center: c, bearing_rad: -bearing_deg.to_radians(), width, height, pixel_ratio, viewport_size: [width, height] }
+    }
+
+    /// Extend coverage without constraining the camera again or shifting its pixel grid.
+    pub fn set_margin(&mut self, margin: u32) {
+        let margin = (margin as f64 * self.pixel_ratio).round() / self.pixel_ratio;
+        self.width = self.viewport_size[0] + 2.0 * margin;
+        self.height = self.viewport_size[1] + 2.0 * margin;
     }
 
     /// World pixel (CSS) → screen device pixel.
@@ -78,7 +87,7 @@ impl Transform {
     pub fn aligned_offset(&self) -> [f64; 2] {
         let round = crate::expression::value::js_round;
         let (x, y) = (self.center[0], self.center[1]);
-        let (x_shift, y_shift) = ((self.width % 2.0) / 2.0, (self.height % 2.0) / 2.0);
+        let (x_shift, y_shift) = ((self.viewport_size[0] % 2.0) / 2.0, (self.viewport_size[1] % 2.0) / 2.0);
         let bearing = -self.bearing_rad;
         let (cos, sin) = (bearing.cos(), (-bearing).sin());
         let dx = x - round(x) + cos * x_shift + sin * y_shift;
@@ -161,6 +170,26 @@ mod tests {
         assert!((back[0] - w[0]).abs() < 1e-6 && (back[1] - w[1]).abs() < 1e-6);
         let c = t.world_to_screen(t.center);
         assert!((c[0] - 512.0).abs() < 1e-9 && (c[1] - 256.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn margin_preserves_projection_and_raster_alignment() {
+        for ratio in [1.0, 1.25, 1.5, 2.0] {
+            for bearing in [0.0, 30.0] {
+                let plain = Transform::new([10.0, 85.0], 3.5, bearing, 511.0, 257.0, ratio);
+                let mut padded = plain;
+                padded.set_margin(31);
+                assert_eq!(plain.center, padded.center);
+                assert_eq!(plain.aligned_offset(), padded.aligned_offset());
+                let point = [1234.5, 987.25];
+                let a = plain.world_to_screen(point);
+                let b = padded.world_to_screen(point);
+                let offset = (31.0 * ratio).round();
+                for axis in 0..2 {
+                    assert!((b[axis] - a[axis] - offset).abs() < 1e-9);
+                }
+            }
+        }
     }
 
     #[test]

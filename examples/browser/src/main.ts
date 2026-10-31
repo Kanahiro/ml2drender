@@ -58,6 +58,7 @@ class WasmTiles extends L.GridLayer {
       width: TILE_SIZE,
       height: TILE_SIZE,
       pixelRatio: ratio,
+      margin: 128,
     }).then((image) => {
       if (generation === this.generation) {
         canvas.getContext('2d')!.putImageData(

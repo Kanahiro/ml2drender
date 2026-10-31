@@ -7,6 +7,8 @@ export interface View {
   width: number;
   height: number;
   pixelRatio?: number;
+  /** Non-negative integer CSS pixels of extra coverage, cropped from the output. Default: 0. */
+  margin?: number;
 }
 
 export interface RenderedImage {
@@ -37,7 +39,7 @@ interface WasmExports {
   dealloc(ptr: number, len: number): void;
   out_ptr(): number;
   out_len(): number;
-  renderer_new(stylePtr: number, styleLen: number, lng: number, lat: number, zoom: number, bearing: number, width: number, height: number, pixelRatio: number): number;
+  renderer_new(stylePtr: number, styleLen: number, lng: number, lat: number, zoom: number, bearing: number, width: number, height: number, pixelRatio: number, margin: number): number;
   renderer_needs(handle: number): number;
   renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
   renderer_render(handle: number): number;
@@ -156,10 +158,12 @@ export class MapRenderer {
 
   /** Fetch required resources and return a new RGBA image for the requested view. */
   async render(view: View): Promise<RenderedImage> {
+    const margin = nonnegative(view.margin ?? 0, 'margin');
+    if (!Number.isInteger(margin) || margin > 0xffffffff) throw new RangeError('margin must be a uint32 integer');
     const w = this.wasm;
     const handle = this.withBytes(this.style, (ptr, len) =>
       w.renderer_new(ptr, len, view.center[0], view.center[1], view.zoom, view.bearing ?? 0,
-        view.width, view.height, view.pixelRatio ?? 1));
+        view.width, view.height, view.pixelRatio ?? 1, margin));
     if (!handle) throw new Error(decoder.decode(this.output()));
     try {
       for (let round = 0; ; round++) {

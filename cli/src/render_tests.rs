@@ -101,6 +101,7 @@ fn run_one(dir: &Path, style: &Value, assets: &Path, out_dir: &Path) -> Outcome 
         width,
         height,
         pixel_ratio,
+        margin: 0,
     };
     let max_zoom = t["maxZoom"].as_f64();
     let cross_source = t["crossSourceCollisions"].as_bool().unwrap_or(true);
