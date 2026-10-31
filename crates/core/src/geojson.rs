@@ -48,11 +48,14 @@ pub struct Options {
     pub generate_id: bool,
     pub promote_id: Option<String>,
     pub line_metrics: bool,
+    /// `cluster: true`: point clustering instead of tiling.
+    pub cluster: Option<crate::supercluster::Options>,
 }
 
 pub struct GeoJsonIndex {
     features: Vec<GFeature>,
     options: Options,
+    cluster: Option<crate::supercluster::ClusterIndex>,
 }
 
 fn project_x(lng: f64) -> f64 {
@@ -149,7 +152,7 @@ fn convert_line(ring: &J, sq_tolerance: f64, is_polygon: bool) -> Option<Slice> 
 }
 
 impl GeoJsonIndex {
-    pub fn new(data: &J, options: Options) -> GeoJsonIndex {
+    pub fn new(data: &J, mut options: Options) -> GeoJsonIndex {
         let mut features = Vec::new();
         let sq_tolerance = (options.tolerance / ((1u64 << options.maxzoom) as f64 * EXTENT)).powi(2);
         let mut add = |f: &J, index: usize| convert_feature(&mut features, f, index, sq_tolerance, &options, 0);
@@ -173,7 +176,18 @@ impl GeoJsonIndex {
             merged.extend(right.into_iter().map(|f| shift(f, -1.0)));
             features = merged;
         }
-        GeoJsonIndex { features, options }
+        // Clustering only takes the (wrapped) points; other geometries are dropped.
+        let cluster = options.cluster.take().map(|o| {
+            let points = features
+                .iter()
+                .flat_map(|f| match &f.geom {
+                    Geom::Points(ps) => ps.iter().map(|p| crate::supercluster::Point { id: f.id.clone(), xy: [p[0], p[1]], props: f.props.clone() }).collect(),
+                    _ => vec![],
+                })
+                .collect();
+            crate::supercluster::ClusterIndex::new(points, o)
+        });
+        GeoJsonIndex { features, options, cluster }
     }
 
     pub fn maxzoom(&self) -> u8 {
@@ -182,6 +196,9 @@ impl GeoJsonIndex {
 
     /// The tile `z/x/y` as a single vector tile layer with extent 8192.
     pub fn tile(&self, z: u8, x: u32, y: u32) -> Layer {
+        if let Some(c) = &self.cluster {
+            return c.tile(z, x, y);
+        }
         let z2 = (1u64 << z) as f64;
         let b = self.options.buffer / EXTENT;
         let cx = clip(&self.features, (x as f64 - b) / z2, (x as f64 + 1.0 + b) / z2, Axis::X);

@@ -1,5 +1,7 @@
 //! Layer drawing: background, fill, line, circle, emulating MapLibre's buckets and shaders.
 
+pub mod dem;
+pub mod heatmap;
 mod line;
 mod pattern;
 pub mod raster;
@@ -171,12 +173,16 @@ pub fn draw_background(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serd
     };
     let Some(img) = image else {
         let c = color(&ctx.paint(layer, "background-color", None, &tile), opacity);
+        let opaque_pass = c[3] == 1.0;
         // Drawn over the covering tiles, i.e. only within the world's vertical extent.
         for y in 0..target.h {
             for x in 0..target.w {
                 let wy = t.screen_to_world([x as f64 + 0.5, y as f64 + 0.5])[1];
                 if (0.0..t.world_size).contains(&wy) {
                     target.blend(y * target.w + x, c);
+                    if opaque_pass {
+                        target.mark_opaque(y * target.w + x);
+                    }
                 }
             }
         }
@@ -306,6 +312,7 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
                             raster::for_each_pixel(target.w, target.h, p, |x, y, _| {
                                 if tf.mask.get(x, y) {
                                     covered[y * w + x] = true;
+                                    target.mark_opaque(y * w + x);
                                 }
                             });
                         }

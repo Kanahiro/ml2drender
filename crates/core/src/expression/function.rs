@@ -310,6 +310,12 @@ fn interpolate(spec_type: &str, a: &Value, b: &Value, t: f64, space: ColorSpace)
         ("number", Value::Number(x), Value::Number(y)) => Value::Number(lerp(*x, *y)),
         ("color", Value::Color(x), Value::Color(y)) => Value::Color(Color::interpolate(x, y, t, space)),
         ("padding", Value::Padding(x), Value::Padding(y)) => Value::Padding(std::array::from_fn(|i| lerp(x[i], y[i]))),
+        ("numberArray", Value::NumberArray(x), Value::NumberArray(y)) if x.len() == y.len() => {
+            Value::NumberArray(Rc::new(x.iter().zip(y.iter()).map(|(p, q)| lerp(*p, *q)).collect()))
+        }
+        ("colorArray", Value::ColorArray(x), Value::ColorArray(y)) if x.len() == y.len() => {
+            Value::ColorArray(Rc::new(x.iter().zip(y.iter()).map(|(p, q)| Color::interpolate(p, q, t, space)).collect()))
+        }
         ("array", Value::Array(x), Value::Array(y)) => Value::Array(Rc::new(
             x.iter().zip(y.iter()).map(|(p, q)| Value::Number(lerp(p.as_f64().unwrap_or(f64::NAN), q.as_f64().unwrap_or(f64::NAN)))).collect(),
         )),

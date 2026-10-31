@@ -1,6 +1,6 @@
 //! Plain C-ABI exports for wasm32-unknown-unknown (no wasm-bindgen).
 //!
-//! Byte results (needs list, RGBA, error messages) go to a shared output buffer read via
+//! Byte results (needs list, RGBA, PNG, error messages) go to a shared output buffer read via
 //! `out_ptr`/`out_len`; it stays valid until the next call. Inputs are copied in via `alloc`.
 
 use ml2drender::{Renderer, View};
@@ -109,6 +109,24 @@ pub unsafe extern "C" fn renderer_render(r: *mut Renderer) -> u32 {
     match unsafe { &mut *r }.render() {
         Ok(rgba) => {
             set_out(rgba);
+            1
+        }
+        Err(e) => {
+            set_out(e.to_string().into_bytes());
+            0
+        }
+    }
+}
+
+/// Returns 1 with PNG in the output buffer, or 0 with an error message.
+///
+/// # Safety
+/// `r` must be a live handle from `renderer_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn renderer_render_png(r: *mut Renderer) -> u32 {
+    match unsafe { &mut *r }.render_png() {
+        Ok(png) => {
+            set_out(png);
             1
         }
         Err(e) => {

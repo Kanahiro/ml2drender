@@ -7,7 +7,7 @@ export type WorkerRequest =
 
 export type WorkerResponse =
   | { kind: 'ready'; generation: number }
-  | { kind: 'image'; generation: number; id: number; width: number; height: number; data: ArrayBuffer }
+  | { kind: 'image'; generation: number; id: number; bitmap: ImageBitmap }
   | { kind: 'error'; generation: number; id?: number; message: string };
 
 let generation = 0;
@@ -35,10 +35,19 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const active = renderer;
   if (request.generation !== generation || !active) return;
   void active.render(request.view)
-    .then((image) => {
+    .then(async (image) => {
       if (request.generation !== generation) return;
-      const data = image.data.buffer as ArrayBuffer;
-      worker.postMessage({ kind: 'image', generation, id: request.id, width: image.width, height: image.height, data } satisfies WorkerResponse, [data]);
+      const bitmap = await createImageBitmap(new ImageData(image.data, image.width, image.height));
+      if (request.generation !== generation) {
+        bitmap.close();
+        return;
+      }
+      try {
+        worker.postMessage({ kind: 'image', generation, id: request.id, bitmap } satisfies WorkerResponse, [bitmap]);
+      } catch (error) {
+        bitmap.close();
+        throw error;
+      }
     })
     .catch((error: unknown) => {
       if (request.generation === generation) {

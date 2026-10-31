@@ -3,7 +3,7 @@
 import {readFileSync} from 'node:fs';
 
 const KEEP = ['type', 'value', 'length', 'default', 'values', 'property-type', 'expression', 'tokens'];
-const LAYERS = ['background', 'fill', 'line', 'circle', 'raster', 'symbol'];
+const LAYERS = ['background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap'];
 
 const v8 = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const out: Record<string, Record<string, Record<string, unknown>>> = {};

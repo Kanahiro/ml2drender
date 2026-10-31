@@ -1,6 +1,6 @@
 # STATUS
 
-最終更新: 2026-10-31(フェーズ2・3・4・6 完了。フェーズ5の人間レビューを経ずに、指示によりフェーズ6(symbol)を先行実施)
+最終更新: 2026-10-31(フェーズ2・3・4・6 完了。クラスタ・DEM・WASM最適化を現構成へ統合。PNG出力・Workersロード対応を追加。フェーズ5の人間レビューを経ずに、指示によりフェーズ6(symbol)を先行実施)
 
 ## スコープ決定(2026-10-31、人間判断)
 
@@ -13,20 +13,50 @@
 
 Expression: **581 / 583(99.7%)**
 
-Render: **pass 889 / fail 23 / skip 823**(in scope 912 中 97.5%)。pass のうち 834 件は差分 0(ピクセル完全一致)。
+Render: **pass 988 / fail 20 / skip 727**(in scope 1008 中 98.0%)。クラスタ・DEM 復元後に全1735件を再実行。
 
 | layer type | pass | fail | skip | 通過率 |
 |---|---|---|---|---|
-| background | 352 | 7 | 411 | 98.1% |
-| circle | 149 | 4 | 132 | 97.4% |
-| fill | 121 | 2 | 100 | 98.4% |
-| line | 202 | 2 | 84 | 99.0% |
-| raster | 83 | 0 | 81 | 100.0% |
-| symbol | 418 | 23 | 245 | 94.8% |
+| background | 406 | 7 | 357 | 98.3% |
+| circle | 156 | 1 | 128 | 99.4% |
+| fill | 131 | 2 | 90 | 98.5% |
+| line | 206 | 2 | 80 | 99.0% |
+| raster | 87 | 0 | 77 | 100.0% |
+| symbol | 425 | 20 | 241 | 95.5% |
+| hillshade | 49 | 0 | 12 | 100.0% |
+| color-relief | 15 | 0 | 0 | 100.0% |
+| heatmap | 38 | 0 | 6 | 100.0% |
 
-(1テストは使用する全レイヤ種別に計上。fail 23 はすべて symbol レイヤを含むテスト。内訳は「未対応・既知の問題」)
+(1テストは使用する全レイヤ種別に計上。fail 20 はすべて symbol レイヤを含むテスト。内訳は「未対応・既知の問題」)
 
 ## 実装済み
+
+### PNG出力・Cloudflare Workersロード (2026-10-31)
+
+- Rust `Renderer::render_png()` とC ABI `renderer_render_png` を追加。既存の描画・margin切り出し後にRGBA8 PNGへ可逆圧縮し、共有出力バッファへ返す。純Rustの既存 `png` クレートを使用し、CPU時間を優先する `Compression::Fast` を選択。
+- `MapRenderer.renderPng(view)` は独立した `Uint8Array<ArrayBuffer>` を返す。RGBAの `render()` とリソース取得・エラー処理を共有し、JSへのRGBA全体のコピーを挟まずPNGだけをコピーする。
+- `MapRenderer.init(styleUrl, { wasm: WebAssembly.Module })` を追加。指定時は実行時のWASM取得・コンパイルを行わず、専用インスタンスを生成する。未指定のブラウザでは `new URL(..., import.meta.url)` のアセットを取得するため、公開APIからVite専用の `?url` importを除去。
+- `ml2drender/renderer.wasm` を型定義付きで公開。WranglerがCompiledWasmとして認識できるよう、公開パスにも `.wasm` 拡張子を含める。
+- `examples/workers/` にWranglerサンプルを追加。`pnpm demo:workers` でローカル起動し、`pnpm --filter demo-workers build` でデプロイせずバンドルを確認できる。コンパイル済みモジュールのみ共有し、リクエストごとにレンダラ・WASMメモリを作る。
+- Rust単体テスト29件成功。半透明・小数DPR・marginのPNGラウンドトリップ、未取得リソースのエラーを確認。公開型・両サンプルの型チェック、Vite本番ビルド、Wrangler dry-run成功。
+- ローカルworkerdで3並行リクエストのPNGレスポンス（Content-Type・PNG署名）を確認。ChromeでWorkers出力とRGBAの全画素一致、DPR 1 / 1.5 / 2 × margin 0 / 64 のPNG寸法・画素一致、既存Bitmap Workerを確認。モジュール注入時にWASM fetch・compileが呼ばれないこと、PNGバッファの保持、RGBA/PNG並行呼び出し、入力・スタイルのエラーも確認。
+- WASMは1,880,411 bytes（約1.88 MB）。Cloudflare本番へのデプロイは行っていない。上記の上流描画・式評価テストの通過率はクラスタ統合時の全件実行結果。
+
+### GeoJSONクラスタ・WASM最適化の統合 (2026-10-31)
+
+- `995fc7e` の supercluster / kdbush、`clusterProperties` の map/reduce、GeoJSON ソース `filter` を現構成へ取り込み。ソース filter はクラスタ生成より前に適用し、非クラスタのソースにも適用する。
+- クラスタ・集約プロパティ・ソースfilterの上流テスト3件が成功に変わり、描画テストは上記の通過率へ改善。単体テスト27件成功、式評価は581/583で変化なし。
+- `713b451` の専用 `wasm` プロファイル（opt-level 3 / fat LTO / codegen-units 1 / panic abort / strip）と simd128 を取り込み。`pnpm build:wasm` は新プロファイルでビルドし、`target/wasm32-unknown-unknown/wasm/` の成果物を公開パッケージへコピーする。
+- 最適化WASMは1,827,396 bytes（約1.83 MB）。型チェック・ブラウザ用本番ビルド成功。Chromeでクラスタ・集約プロパティ・ソースfilter・Hillshadeの各fixtureを margin 0 / 64 で描画し、Workerとメインで生成したBitmapの全画素一致を確認。
+- 統合時に `phase6-symbol` のcore実装・WASM設定を再比較。機能の未取り込みは解消し、残る差は現在側の名称・配置・margin・追加テスト・インデント修正。JS API・Worker・デモは現在側の拡張を維持。
+
+### DEM・Hillshade の復元 (2026-10-31)
+
+- 別履歴の `54640b6` にあった `raster-dem` / hillshade / color-relief / heatmap の実装を、現在の `crates/` 構成へ復元。現ブランチではソース・描画処理・spec・テスト除外ルールが未反映で、JS API の対応レイヤ一覧と README だけが対応済みになっていた。
+- DEM は mapbox / terrarium / custom encoding、TileJSON の tileSize・encoding、隣接タイルの境界補完、親タイルへのフォールバックに対応。既存の margin による切り出しを維持。
+- DEM 取得から陰影描画までの回帰テストを追加し、margin 0 / 8 で確認。復元直後の Rust 単体テスト25件成功。現在の上流描画テスト結果は上記を参照。
+- WASM 再ビルド済み。Chrome で上流の実DEMタイルを使い、margin 0 / 64 の両方で Worker の ImageBitmap と直接RGBA出力の全画素一致、陰影表示を確認。
+- コピー削減・Worker 内 Bitmap 化を維持。受信側が破棄する Bitmap は `close()` する。
 
 ### 描画余白 (`margin`)
 
@@ -78,12 +108,11 @@ Render: **pass 889 / fail 23 / skip 823**(in scope 912 中 97.5%)。pass のう�
 
 ## 未対応・既知の問題
 
-### symbol の残り失敗 23 件
+### symbol の残り失敗 20 件
 
 | 件数 | テスト | 原因 |
 |---|---|---|
 | 9 | `text-arabic/*`, `text-field/formatted-arabic`, `text-writing-mode/point_label/cjk-arabic-vertical-mode` | 双方向テキスト(bidi)とアラビア文字の字形整形が未実装(論理順のまま並べる)。 |
-| 3 | `geojson/clustered*` | GeoJSON の `cluster`(supercluster)未移植。 |
 | 5 | `is-supported-script/*`, `text-local-glyphs/complex-script`, `regressions/mapbox-gl-native#11729`, `geometry-type/all-geometries` | MapLibre 6 は複合文字スクリプト(デーヴァナーガリー、クメール等)や取得できなかったグリフ範囲をブラウザのフォントで描く(TinySDF)。フォントを持たないため再現不可(グリフは欠落扱い)。 |
 | 1 | `text-variable-anchor/rotated-offset` | 上流はタイルが届くたびに再配置し、前回のアンカーを優先して試す(`prevAnchor`)。1 回の配置ではこの履歴依存を再現できない。 |
 | 5 | `visibility/symbol/visible`(0.0027), `symbol-placement/line-overlap`(0.0041), `text-field/formatted-images`(0.00043), `symbol-placement/point-polygon-high-zoom`(0.00026), `combinations/symbol-translucent--fill-translucent`(0.00098) | 小差分。visible は期待画像で一部アイコンの上下 1px が欠ける(原因未特定、NEAREST の texel 境界を疑ったが丸めでは変わらず)。line-overlap は z22 の line ラベルが約 0.5px ずれる(未特定)。translucent は fill のアウトライン右端の AA。 |
@@ -91,17 +120,16 @@ Render: **pass 889 / fail 23 / skip 823**(in scope 912 中 97.5%)。pass のう�
 ### その他
 
 1. composite 式(zoom と feature の両方に依存)は表示ズームで直接評価している。MapLibre はタイルズームの前後で評価してシェーダで補間するため、指数補間などでわずかに差が出うる(symbol のサイズは上流どおりパックして補間)。
-2. GeoJSON の `cluster` 未対応(上記)。
-3. タイル欠落時の親/子タイルでの穴埋め(MapLibre の retained tiles)未対応。symbol の CrossTileSymbolIndex(ズーム間の重複除去)も未実装(同一ズームのタイル間では不要)。
-4. feature-state は常に空(静的レンダリングのため仕様上も対象外)。
-5. 照合はルート照合のみ。`number-format` は en-US の書式のみ(通貨・単位は主要なもの)。
-6. `is-supported-script` は常に true。
-7. symbol: グラフェムクラスタは 1 コードポイントずつ扱う(MapLibre もグリフファイルに無いクラスタはそうする)。単語区切りの無いスクリプト(タイ語等)の改行位置は未対応。`font-faces` と縦書き用グリフ variant は対象外。pitch 前提のコード(遠近補正、pitched label plane)は pitch 0 に簡約。
-8. Unicode 文字種判定(縦書きの upright/neutral、句読点・記号、Nd/Lu)は範囲表と std の近似。
+2. タイル欠落時の親/子タイルでの穴埋め(MapLibre の retained tiles)未対応。symbol の CrossTileSymbolIndex(ズーム間の重複除去)も未実装(同一ズームのタイル間では不要)。
+3. feature-state は常に空(静的レンダリングのため仕様上も対象外)。
+4. 照合はルート照合のみ。`number-format` は en-US の書式のみ(通貨・単位は主要なもの)。
+5. `is-supported-script` は常に true。
+6. symbol: グラフェムクラスタは 1 コードポイントずつ扱う(MapLibre もグリフファイルに無いクラスタはそうする)。単語区切りの無いスクリプト(タイ語等)の改行位置は未対応。`font-faces` と縦書き用グリフ variant は対象外。pitch 前提のコード(遠近補正、pitched label plane)は pitch 0 に簡約。
+7. Unicode 文字種判定(縦書きの upright/neutral、句読点・記号、Nd/Lu)は範囲表と std の近似。
 
 ## 次フェーズの前提
 
 - フェーズ5(sans-IO API の確定 + WASM + JS ホスト)の人間レビューが未実施。`needs()` の段階は style → (TileJSON / GeoJSON / sprite json+png / image) → タイル → (欠落 raster の祖先 / グリフ範囲)。グリフ範囲はデコード済みタイルの text 評価で確定するため、`needs()` の度に symbol レイヤのテキストを評価する(`provide()` は直前の `needs()` が返したグリフ URL を引くだけ。したがってグリフ範囲は `needs()` が返した URL でのみ受け付ける)。
 - 現 API: `Renderer::new(style, View)` / `set_max_zoom` / `set_cross_source_collisions` / `needs()` / `provide(url, Option<bytes>)` / `render()`。`provide(None)` の意味は上流の 404 に合わせている(vector は空、raster は祖先、グリフ範囲は欠落)。
-- WASM 1.86 MB: `opt-level="z"`、`wasm-opt`、LTO、spec.json の縮小、画像デコーダの feature 化などで削減余地。
+- WASM は専用 `wasm` プロファイルと simd128 でビルド（上記）。spec.json の縮小や画像デコーダの feature 化は将来のサイズ削減候補。
 - CLI ランナーはハーネス依存の挙動(maxCanvasSize による DPR 縮小、`readPixels` の左下切り出し、`maxZoom`、`crossSourceCollisions`、`sparse204` の 204 応答)を再現済み。

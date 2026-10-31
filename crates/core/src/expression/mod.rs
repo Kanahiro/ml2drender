@@ -82,6 +82,14 @@ impl Expression {
         }
     }
 
+    /// Stop inputs of a top-level `interpolate` (e.g. the elevation stops of `color-relief-color`).
+    pub fn interpolate_labels(&self) -> Option<&[f64]> {
+        match &self.expr.node {
+            Node::Interpolate { labels, .. } => Some(labels),
+            _ => None,
+        }
+    }
+
     pub fn interpolation_factor(&self, input: f64, lower: f64, upper: f64) -> f64 {
         self.interpolation.map_or(0.0, |i| i.factor(input, lower, upper))
     }

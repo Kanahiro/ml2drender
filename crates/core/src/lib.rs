@@ -10,6 +10,7 @@ mod sprite;
 mod mvt;
 mod render;
 mod style;
+mod supercluster;
 mod symbol;
 mod tile;
 
@@ -21,6 +22,7 @@ use tile::{RenderTile, TileId, Transform};
 #[derive(Debug)]
 pub enum Error {
     Style(String),
+    ImageEncoding(String),
     /// `render` called while `needs()` is non-empty.
     NotReady,
     Unsupported(String),
@@ -30,6 +32,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Style(m) => write!(f, "style error: {m}"),
+            Error::ImageEncoding(m) => write!(f, "image encoding error: {m}"),
             Error::NotReady => write!(f, "render called with outstanding needs()"),
             Error::Unsupported(m) => write!(f, "unsupported: {m}"),
         }
@@ -84,6 +87,9 @@ struct TileJson {
     maxzoom: u8,
     tms: bool,
     bounds: Option<[f64; 4]>,
+    tile_size: f64,
+    /// raster-dem `encoding`.
+    encoding: Option<String>,
 }
 
 enum Data {
@@ -100,6 +106,7 @@ enum Data {
 enum TileData {
     Vector(Rc<Vec<mvt::Layer>>),
     Raster(Rc<image::Texture>),
+    Dem(Rc<render::dem::Dem>),
 }
 
 struct Source {
@@ -135,15 +142,69 @@ fn tilejson_from(json: &J, overrides: &J) -> TileJson {
         maxzoom: get("maxzoom").and_then(J::as_f64).unwrap_or(22.0) as u8,
         tms: get("scheme").and_then(J::as_str) == Some("tms"),
         bounds: get("bounds").and_then(J::as_array).and_then(|b| Some([b.first()?.as_f64()?, b.get(1)?.as_f64()?, b.get(2)?.as_f64()?, b.get(3)?.as_f64()?])),
+        // Like MapLibre's `loadTileJSON`, `tileSize` and `encoding` may come from the TileJSON
+        // too (the style's source options win).
+        tile_size: get("tileSize").and_then(J::as_f64).unwrap_or(512.0),
+        encoding: get("encoding").and_then(J::as_str).map(String::from),
     }
 }
 
+/// `clusterProperties`: `{name: [reduce operator or expression, map expression]}`.
+fn cluster_properties(props: &J) -> supercluster::ClusterProperties {
+    let mut out = Vec::new();
+    for (key, v) in props.as_object().into_iter().flatten() {
+        let (Some(op), Some(map)) = (v.get(0), v.get(1)) else { continue };
+        let reduce = match op {
+            J::String(op) => serde_json::json!([op, ["accumulated"], ["get", key]]),
+            e => e.clone(),
+        };
+        let parse = |e: &J| expression::create_expression(e, &J::Null, None).ok();
+        if let (Some(m), Some(r)) = (parse(map), parse(&reduce)) {
+            out.push((key.clone(), m, r));
+        }
+    }
+    out
+}
+
+/// The source `filter`: features of a FeatureCollection are kept where it evaluates to true
+/// (at zoom 0, against the GeoJSON properties and id).
+fn filter_geojson(data: &J, filter: &J) -> Option<J> {
+    if data["type"] != "FeatureCollection" || !(filter.is_boolean() || filter.as_array().is_some_and(|a| !a.is_empty())) {
+        return None;
+    }
+    let e = expression::create_expression(filter, &serde_json::json!({"type": "boolean"}), None).ok()?;
+    let keep = |f: &J| {
+        let properties = match expression::Value::from_json(&f["properties"]) {
+            expression::Value::Object(o) => o,
+            _ => Default::default(),
+        };
+        let feature = expression::Feature { id: f.get("id").filter(|v| !v.is_null()).map(expression::Value::from_json), properties, ..Default::default() };
+        let mut ctx = expression::EvalCtx { globals: expression::Globals { zoom: 0.0, ..Default::default() }, feature: Some(&feature), ..Default::default() };
+        matches!(e.evaluate(&mut ctx), expression::Value::Bool(true))
+    };
+    let features: Vec<J> = data["features"].as_array().into_iter().flatten().filter(|f| keep(f)).cloned().collect();
+    Some(serde_json::json!({"type": "FeatureCollection", "features": features}))
+}
+
 fn geojson_index(data: &J, src: &J) -> geojson::GeoJsonIndex {
+    let filtered = filter_geojson(data, &src["filter"]);
+    let data = filtered.as_ref().unwrap_or(data);
     let scale = geojson::EXTENT / 512.0;
+    let maxzoom = src["maxzoom"].as_f64().unwrap_or(18.0);
+    let cluster = src["cluster"].as_bool().unwrap_or(false).then(|| supercluster::Options {
+        // `clusterMaxZoom` (0 counts as unset), else one below the source maxzoom.
+        max_zoom: src["clusterMaxZoom"].as_f64().filter(|&z| z != 0.0).map_or(maxzoom - 1.0, expression::value::js_round).clamp(0.0, 30.0) as u8,
+        min_points: src["clusterMinPoints"].as_f64().filter(|&v| v != 0.0).unwrap_or(2.0).max(2.0) as u32,
+        radius: src["clusterRadius"].as_f64().filter(|&v| v != 0.0).unwrap_or(50.0) * scale,
+        extent: geojson::EXTENT,
+        generate_id: src["generateId"].as_bool().unwrap_or(false),
+        properties: cluster_properties(&src["clusterProperties"]),
+    });
     geojson::GeoJsonIndex::new(
         data,
         geojson::Options {
-            maxzoom: src["maxzoom"].as_f64().unwrap_or(18.0) as u8,
+            cluster,
+            maxzoom: maxzoom as u8,
             buffer: src["buffer"].as_f64().unwrap_or(128.0) * scale,
             tolerance: src["tolerance"].as_f64().unwrap_or(0.375) * scale,
             generate_id: src["generateId"].as_bool().unwrap_or(false),
@@ -196,7 +257,7 @@ impl Renderer {
         for (id, src) in json["sources"].as_object().into_iter().flatten() {
             let ty = src["type"].as_str().unwrap_or("").to_string();
             let data = match ty.as_str() {
-                "vector" | "raster" => match src["url"].as_str() {
+                "vector" | "raster" | "raster-dem" => match src["url"].as_str() {
                     Some(url) if src.get("tiles").is_none() => Data::Pending(url.to_string()),
                     _ => Data::Tiled(tilejson_from(src, &J::Null)),
                 },
@@ -257,11 +318,11 @@ impl Renderer {
     /// Ideal tiles of a tiled source for the current view (MapLibre `coveringTiles`).
     fn covering(&self, src: &Source) -> Vec<RenderTile> {
         let (tile_size, minzoom, maxzoom, bounds) = match &src.data {
-            Data::Tiled(tj) => (src.json["tileSize"].as_f64().unwrap_or(512.0), tj.minzoom, tj.maxzoom, tj.bounds),
+            Data::Tiled(tj) => (tj.tile_size, tj.minzoom, tj.maxzoom, tj.bounds),
             Data::GeoJson(g) => (512.0, 0, g.maxzoom(), None),
             _ => return vec![],
         };
-        let z = self.transform.covering_zoom(tile_size, src.ty == "raster");
+        let z = self.transform.covering_zoom(tile_size, matches!(src.ty.as_str(), "raster" | "raster-dem"));
         if z < minzoom as i32 {
             return vec![];
         }
@@ -438,16 +499,15 @@ impl Renderer {
                             // Like MapLibre: a missing vector tile is just empty; a missing raster
                             // tile lets a parent show through, while an empty raster response
                             // (HTTP 204) is a transparent tile.
+                            // A DEM tile that fails to decode also lets a parent show through.
+                            let raster = src.ty == "raster" || src.ty == "raster-dem";
                             let decoded = match (src.ty.as_str(), bytes) {
-                                ("raster", Some([])) => Some(image::Image { w: 1, h: 1, data: vec![0; 4] }),
-                                ("raster", Some(b)) => image::Image::decode(b),
-                                _ => None,
-                            }
-                            .map(|i| TileData::Raster(Rc::new(image::Texture::new(&i, true))))
-                            .or_else(|| match src.ty.as_str() {
-                                "raster" => None,
+                                (_, Some([])) if raster => Some(TileData::Raster(Rc::new(image::Texture::new(&image::Image { w: 1, h: 1, data: vec![0; 4] }, true)))),
+                                ("raster", Some(b)) => image::Image::decode(b).map(|i| TileData::Raster(Rc::new(image::Texture::new(&i, true)))),
+                                ("raster-dem", Some(b)) => image::Image::decode(b).and_then(|i| dem_from(&i, &src.json, tj.encoding.as_deref())).map(|d| TileData::Dem(Rc::new(d))),
+                                _ if raster => None,
                                 _ => Some(TileData::Vector(Rc::new(bytes.and_then(mvt::decode).unwrap_or_default()))),
-                            });
+                            };
                             src.tiles.insert(t, decoded);
                         }
                     }
@@ -536,9 +596,16 @@ impl Renderer {
             })
             .collect();
         let placements = symbol::placement::place(&ctx, &placement_input);
+        // Heatmaps drawn so far: MapLibre draws them without depth test, so they stay on top of
+        // the opaque-pass pixels (opaque backgrounds and fill interiors) of layers above them.
+        let mut heatmaps: Vec<Vec<render::raster::Rgba>> = Vec::new();
         for layer in &self.style.layers {
             if layer.is_hidden(t.zoom, &self.style.global_state) {
                 continue;
+            }
+            if !heatmaps.is_empty() {
+                render::heatmap::reapply(&mut target, &heatmaps);
+                target.opaque = vec![false; w * h];
             }
             let raw = self.style.layer_json(&layer.id);
             if layer.ty == "background" {
@@ -551,7 +618,13 @@ impl Renderer {
                 }
                 continue;
             }
-            if !matches!(layer.ty.as_str(), "fill" | "line" | "circle" | "raster") {
+            if layer.ty == "hillshade" || layer.ty == "color-relief" {
+                if let Some(src) = layer.source.as_deref().and_then(|s| self.sources.get(s)) {
+                    self.draw_dem_layer(&mut target, layer, &ctx, src, w, h);
+                }
+                continue;
+            }
+            if !matches!(layer.ty.as_str(), "fill" | "line" | "circle" | "raster" | "heatmap") {
                 continue;
             }
             let Some(src) = layer.source.as_deref().and_then(|s| self.sources.get(s)) else { continue };
@@ -589,6 +662,11 @@ impl Renderer {
                     render::draw_line(dest, layer, &ctx, &tiles, source_maxzoom, self.max_zoom, has_gradient, has_pattern)
                 }
                 "circle" => render::draw_circle(dest, layer, &ctx, &tiles),
+                "heatmap" => {
+                    let colors = render::heatmap::draw_heatmap(dest, layer, &ctx, &tiles);
+                    render::heatmap::blend(dest, &colors, None);
+                    heatmaps.push(colors);
+                }
                 _ => {}
             }
             if let (Some(off), Some(o)) = (offscreen, layer_opacity) {
@@ -599,6 +677,7 @@ impl Renderer {
                 }
             }
         }
+        render::heatmap::reapply(&mut target, &heatmaps);
         let rgba = target.to_unpremultiplied();
         let margin = (self.view.margin as f64 * t.pixel_ratio).round() as usize;
         if margin == 0 {
@@ -612,6 +691,26 @@ impl Renderer {
             cropped.extend_from_slice(&rgba[start..start + width * 4]);
         }
         Ok(cropped)
+    }
+
+    /// Lossless RGBA PNG of the requested viewport, with any render margin cropped out.
+    pub fn render_png(&mut self) -> Result<Vec<u8>, Error> {
+        let rgba = self.render()?;
+        let width = (self.view.width as f64 * self.view.pixel_ratio).round() as u32;
+        let height = (self.view.height as f64 * self.view.pixel_ratio).round() as u32;
+        let mut bytes = Vec::new();
+        let mut encode = || -> Result<(), png::EncodingError> {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            // Encoding is on the request's CPU budget; favor speed over minimum file size.
+            encoder.set_compression(png::Compression::Fast);
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(&rgba)?;
+            writer.finish()
+        };
+        encode().map_err(|e| Error::ImageEncoding(e.to_string()))?;
+        Ok(bytes)
     }
 
     fn draw_raster(&self, target: &mut render::raster::Target, layer: &style::Layer, ctx: &render::Ctx, src: &Source, w: usize, h: usize) {
@@ -647,6 +746,52 @@ impl Renderer {
             }
         }
     }
+
+    /// Hillshade / color-relief: each drawn DEM tile takes its 2px border from the drawn tiles
+    /// around it (MapLibre's `backfillDEM` over the renderable tiles), then is drawn.
+    fn draw_dem_layer(&self, target: &mut render::raster::Target, layer: &style::Layer, ctx: &render::Ctx, src: &Source, w: usize, h: usize) {
+        let hillshade = (layer.ty == "hillshade").then(|| render::dem::HillshadeParams::new(layer, ctx));
+        let ramp = (layer.ty == "color-relief").then(|| render::dem::ColorRamp::new(layer, ctx));
+        let resolved = self.resolve(src).0;
+        let dems: Vec<Option<&Rc<render::dem::Dem>>> =
+            resolved.iter().map(|(_, id)| match src.tiles.get(id) {
+                Some(Some(TileData::Dem(d))) => Some(d),
+                _ => None,
+            }).collect();
+        let tiles: Vec<RenderTile> = resolved.iter().map(|r| r.0).collect();
+        let mixed = tiles.iter().any(|t| t.canonical.z != tiles[0].canonical.z);
+        let masks = if mixed { Some(self.masks(ctx, &tiles, w, h)) } else { None };
+        for (i, t) in tiles.iter().enumerate() {
+            let Some(dem) = dems[i] else { continue };
+            let mut dem = (**dem).clone();
+            let n = 1i64 << t.canonical.z;
+            let world_x = |t: &RenderTile| t.wrap as i64 * n + t.canonical.x as i64;
+            for (j, u) in tiles.iter().enumerate() {
+                let (dx, dy) = (world_x(u) - world_x(t), u.canonical.y as i64 - t.canonical.y as i64);
+                let neighbor = u.overscaled_z == t.overscaled_z && u.canonical.z == t.canonical.z && dx.abs() <= 1 && dy.abs() <= 1 && (dx, dy) != (0, 0);
+                if let (true, Some(b)) = (neighbor, dems[j]) {
+                    dem.backfill(b, dx as isize, dy as isize);
+                }
+            }
+            let mask = masks.as_ref().map(|m| &m[i]);
+            if let Some(params) = &hillshade {
+                // Raster sources are not reparsed when overzoomed: their tiles keep
+                // `overscaledZ` = the canonical zoom.
+                let tex = dem.prepare(t.canonical.z as f64);
+                render::dem::draw_hillshade_tile(target, ctx, t, &tex, params, mask);
+            }
+            if let Some(ramp) = &ramp {
+                render::dem::draw_color_relief_tile(target, ctx, t, &dem, ramp, mask);
+            }
+        }
+    }
+}
+
+/// Decode a raster-dem tile with the source's `encoding` (and custom factors).
+fn dem_from(img: &image::Image, src: &J, encoding: Option<&str>) -> Option<render::dem::Dem> {
+    let f = |k: &str, d: f64| src[k].as_f64().unwrap_or(d);
+    let factors = [f("redFactor", 1.0), f("greenFactor", 1.0), f("blueFactor", 1.0), f("baseShift", 0.0)];
+    render::dem::Dem::new(img, encoding.unwrap_or("mapbox"), factors)
 }
 
 #[cfg(test)]
@@ -662,6 +807,100 @@ mod tests {
         assert_eq!(v.zoom, 0.0);
         assert_eq!(v.center[0], 90.0);
         assert!((v.center[1] - 66.51326).abs() < 1e-5);
+    }
+
+    #[test]
+    fn png_roundtrip_preserves_rgba_dimensions_and_margin_crop() {
+        let style = r##"{"version":8,"sources":{"p":{"type":"geojson","data":{"type":"Point","coordinates":[0,0]}}},"layers":[{"id":"bg","type":"background","paint":{"background-color":"rgba(32,64,128,0.5)"}},{"id":"point","type":"circle","source":"p","paint":{"circle-radius":10,"circle-color":"rgba(255,0,0,0.5)"}}]}"##;
+        for pixel_ratio in [1.0, 1.5, 2.0] {
+            for margin in [0, 8] {
+                let view = View { center: [0.0, 0.0], zoom: 1.0, bearing: 0.0, width: 63, height: 47, pixel_ratio, margin };
+                let mut renderer = Renderer::new(style, view).unwrap();
+                let rgba = renderer.render().unwrap();
+                let png = renderer.render_png().unwrap();
+                let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+                let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+                let info = reader.next_frame(&mut decoded).unwrap();
+                assert_eq!((info.width, info.height), ((view.width as f64 * pixel_ratio).round() as u32, (view.height as f64 * pixel_ratio).round() as u32));
+                assert_eq!(info.color_type, png::ColorType::Rgba);
+                assert_eq!(&decoded[..info.buffer_size()], &rgba);
+            }
+        }
+    }
+
+    #[test]
+    fn png_requires_resources_before_encoding() {
+        let style = r#"{"version":8,"sources":{"r":{"type":"raster","tiles":["/{z}/{x}/{y}.png"]}},"layers":[{"id":"r","type":"raster","source":"r"}]}"#;
+        let mut renderer = Renderer::new(style, View::tile(0, 0, 0, 64)).unwrap();
+        assert!(matches!(renderer.render_png(), Err(Error::NotReady)));
+    }
+
+    #[test]
+    fn source_filter_precedes_clustering_and_property_reduction() {
+        let data = serde_json::json!({
+            "type": "FeatureCollection",
+            "features": [
+                {"type":"Feature","properties":{"keep":true,"amount":3},"geometry":{"type":"Point","coordinates":[0,0]}},
+                {"type":"Feature","properties":{"keep":true,"amount":5},"geometry":{"type":"Point","coordinates":[0.1,0]}},
+                {"type":"Feature","properties":{"keep":false,"amount":100},"geometry":{"type":"Point","coordinates":[0.2,0]}}
+            ]
+        });
+        let mut source = serde_json::json!({
+            "type": "geojson", "filter": ["==", ["get", "keep"], true],
+            "cluster": true, "clusterProperties": {"total": ["+", ["get", "amount"]]}
+        });
+        let clustered = geojson_index(&data, &source).tile(0, 0, 0);
+        assert_eq!(clustered.features.len(), 1);
+        let props = &clustered.features[0].properties;
+        assert_eq!(props.get("point_count").and_then(expression::Value::as_f64), Some(2.0));
+        assert_eq!(props.get("total").and_then(expression::Value::as_f64), Some(8.0));
+        // Source filtering also applies when clustering is disabled.
+        source["cluster"] = J::Bool(false);
+        let unclustered = geojson_index(&data, &source).tile(0, 0, 0);
+        assert_eq!(unclustered.features.len(), 2);
+    }
+
+    #[test]
+    fn tilejson_tile_size_and_encoding() {
+        // The TileJSON may carry `tileSize`/`encoding` (e.g. terrarium DEMs); the style wins.
+        let tj = serde_json::json!({"tiles": ["t/{z}/{x}/{y}.webp"], "tileSize": 512, "encoding": "terrarium"});
+        let from_tilejson = tilejson_from(&tj, &serde_json::json!({"type": "raster-dem", "url": "x"}));
+        assert_eq!((from_tilejson.tile_size, from_tilejson.encoding.as_deref()), (512.0, Some("terrarium")));
+        let overridden = tilejson_from(&tj, &serde_json::json!({"tileSize": 256, "encoding": "mapbox"}));
+        assert_eq!((overridden.tile_size, overridden.encoding.as_deref()), (256.0, Some("mapbox")));
+    }
+
+    #[test]
+    fn hillshade_requests_dem_and_renders_with_margin() {
+        let style = r##"{"version":8,"sources":{"dem":{"type":"raster-dem","tiles":["/dem/{z}/{x}/{y}.png"],"tileSize":64,"maxzoom":10}},"layers":[{"id":"bg","type":"background","paint":{"background-color":"white"}},{"id":"shade","type":"hillshade","source":"dem"}]}"##;
+        // A curved elevation surface must produce visible, varying shading. This exercises
+        // the entire source/provide/draw path, rather than only the DEM slope calculation.
+        let data: Vec<u8> = (0..64).flat_map(|_| (0..64).flat_map(|x| {
+            let elevation = (x as f64 / 63.0 * std::f64::consts::PI).sin() * 4000.0;
+            let packed = ((elevation + 10000.0) * 10.0).round() as u32;
+            [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8, 255]
+        })).collect();
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 64, 64);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&data).unwrap();
+        }
+        for margin in [0, 8] {
+            let view = View { margin, ..View::tile(10, 512, 512, 64) };
+            let mut renderer = Renderer::new(style, view).unwrap();
+            assert!(!renderer.needs().is_empty(), "DEM tiles must be requested");
+            for resource in renderer.needs() {
+                renderer.provide(&resource.url, Some(&png));
+            }
+            assert!(renderer.needs().is_empty());
+            let rgba = renderer.render().unwrap();
+            assert_eq!(rgba.len(), 64 * 64 * 4);
+            let center_row = &rgba[32 * 64 * 4..33 * 64 * 4];
+            assert!(center_row.chunks_exact(4).any(|p| p != [255; 4]), "Hillshade must change the white background");
+            assert!(center_row.chunks_exact(4).any(|p| p != &center_row[..4]), "A curved DEM must have varying shading");
+        }
     }
 
     #[test]

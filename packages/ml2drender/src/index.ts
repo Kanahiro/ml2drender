@@ -1,5 +1,4 @@
 import type { FillExtrusionLayerSpecification, LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
-import wasmUrl from '../wasm/ml2drender_wasm.wasm?url';
 
 export interface View {
   center: [lng: number, lat: number];
@@ -16,7 +15,7 @@ export interface RenderedImage {
   width: number;
   height: number;
   /** Row-major, 8-bit RGBA pixels. */
-  data: Uint8ClampedArray;
+  data: Uint8ClampedArray<ArrayBuffer>;
 }
 
 /** Style Spec layers supported by the 2D renderer. */
@@ -25,6 +24,8 @@ export type StyleLayer = Exclude<LayerSpecification, FillExtrusionLayerSpecifica
 export type FillExtrusionLayer = FillExtrusionLayerSpecification;
 
 export interface InitOptions {
+  /** Precompiled WASM (required on Cloudflare Workers). Defaults to the bundled asset in browsers. */
+  wasm?: WebAssembly.Module;
   /** Resource cache. ttlMs = 0 disables it; Infinity never expires. Defaults: 5 minutes, 64 MiB. */
   cache?: { ttlMs?: number; maxBytes?: number };
   /** Replace each fill-extrusion layer before the style reaches the renderer. */
@@ -41,6 +42,7 @@ interface WasmExports {
   renderer_needs(handle: number): number;
   renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
   renderer_render(handle: number): number;
+  renderer_render_png(handle: number): number;
   renderer_free(handle: number): void;
 }
 
@@ -51,6 +53,19 @@ const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 const SUPPORTED_LAYERS = new Set<string>([
   'background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap',
 ] satisfies StyleLayer['type'][]);
+
+async function loadWasm(module?: WebAssembly.Module): Promise<WasmExports> {
+  if (!module) {
+    // Vite bundles this asset for browsers. Workers supply their imported module and
+    // never fetch or compile WASM at runtime.
+    const url = new URL('../wasm/ml2drender_wasm.wasm', import.meta.url);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`WASM fetch failed: ${response.status} ${url}`);
+    module = await WebAssembly.compile(await response.arrayBuffer());
+  }
+  const instance = await WebAssembly.instantiate(module);
+  return instance.exports as unknown as WasmExports;
+}
 
 function nonnegative(value: number, name: string): number {
   if (!Number.isFinite(value) || value < 0) throw new RangeError(`${name} must be a finite, non-negative number`);
@@ -132,7 +147,7 @@ function prepareStyle(bytes: ArrayBuffer, transform?: InitOptions['transformFill
   return encoder.encode(JSON.stringify(style));
 }
 
-/** Render a MapLibre Style as a static 2D RGBA image. */
+/** Render a MapLibre Style as a static 2D RGBA image or PNG. */
 export class MapRenderer {
   private constructor(
     private readonly wasm: WasmExports,
@@ -147,17 +162,27 @@ export class MapRenderer {
     if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
     const maxBytes = nonnegative(options.cache?.maxBytes ?? DEFAULT_MAX_BYTES, 'cache.maxBytes');
     const url = new URL(styleUrl, globalThis.location?.href);
-    const [styleResponse, wasmResponse] = await Promise.all([fetch(url), fetch(wasmUrl)]);
+    const [styleResponse, wasm] = await Promise.all([fetch(url), loadWasm(options.wasm)]);
     if (!styleResponse.ok) throw new Error(`Style fetch failed: ${styleResponse.status} ${url}`);
-    if (!wasmResponse.ok) throw new Error(`WASM fetch failed: ${wasmResponse.status} ${wasmUrl}`);
-    const [style, wasmBytes] = await Promise.all([styleResponse.arrayBuffer(), wasmResponse.arrayBuffer()]);
-    const instance = await WebAssembly.instantiate(wasmBytes);
-    return new MapRenderer(instance.instance.exports as unknown as WasmExports,
+    const style = await styleResponse.arrayBuffer();
+    return new MapRenderer(wasm,
       prepareStyle(style, options.transformFillExtrusion), url.href, new ResourceCache(ttlMs, maxBytes));
   }
 
   /** Fetch required resources and return a new RGBA image for the requested view. */
   async render(view: View): Promise<RenderedImage> {
+    const bytes = await this.renderOutput(view, 'rgba');
+    const width = Math.round(view.width * (view.pixelRatio ?? 1));
+    const height = Math.round(view.height * (view.pixelRatio ?? 1));
+    return { width, height, data: new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength) };
+  }
+
+  /** Fetch required resources and return an owned, lossless PNG encoded inside WASM. */
+  renderPng(view: View): Promise<Uint8Array<ArrayBuffer>> {
+    return this.renderOutput(view, 'png');
+  }
+
+  private async renderOutput(view: View, format: 'rgba' | 'png'): Promise<Uint8Array<ArrayBuffer>> {
     const margin = nonnegative(view.margin ?? 0, 'margin');
     if (!Number.isInteger(margin) || margin > 0xffffffff) throw new RangeError('margin must be a uint32 integer');
     const w = this.wasm;
@@ -176,16 +201,16 @@ export class MapRenderer {
           this.withBytes(resources[i] ?? new Uint8Array(), (dataPtr, dataLen) =>
             w.renderer_provide(handle, urlPtr, urlLen, dataPtr, dataLen, resources[i] ? 1 : 0))));
       }
-      if (!w.renderer_render(handle)) throw new Error(decoder.decode(this.output()));
-      const width = Math.round(view.width * (view.pixelRatio ?? 1));
-      const height = Math.round(view.height * (view.pixelRatio ?? 1));
-      return { width, height, data: new Uint8ClampedArray(this.output()) };
+      const ok = format === 'png' ? w.renderer_render_png(handle) : w.renderer_render(handle);
+      if (!ok) throw new Error(decoder.decode(this.output()));
+      // Own the bytes before another render can overwrite or grow WASM memory.
+      return this.output();
     } finally {
       w.renderer_free(handle);
     }
   }
 
-  private output(): Uint8Array {
+  private output(): Uint8Array<ArrayBuffer> {
     const w = this.wasm;
     return new Uint8Array(w.memory.buffer, w.out_ptr(), w.out_len()).slice();
   }

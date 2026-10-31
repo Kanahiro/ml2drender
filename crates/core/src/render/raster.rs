@@ -8,6 +8,9 @@ pub struct Target {
     pub w: usize,
     pub h: usize,
     pub px: Vec<[u8; 4]>,
+    /// When non-empty, pixels written by MapLibre's opaque pass (opaque backgrounds and fill
+    /// interiors), which depth-test-free layers drawn later (heatmaps) end up on top of.
+    pub opaque: Vec<bool>,
 }
 
 /// Premultiplied color in 0..1.
@@ -15,7 +18,7 @@ pub type Rgba = [f32; 4];
 
 impl Target {
     pub fn new(w: usize, h: usize) -> Target {
-        Target { w, h, px: vec![[0; 4]; w * h] }
+        Target { w, h, px: vec![[0; 4]; w * h], opaque: Vec::new() }
     }
 
     /// `gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA)` into a unorm8 target.
@@ -26,6 +29,12 @@ impl Target {
         for k in 0..4 {
             let v = c[k].clamp(0.0, 1.0) + d[k] as f32 / 255.0 * inv;
             d[k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    pub fn mark_opaque(&mut self, i: usize) {
+        if let Some(o) = self.opaque.get_mut(i) {
+            *o = true;
         }
     }
 

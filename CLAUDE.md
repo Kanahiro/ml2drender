@@ -14,9 +14,9 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 
 対象:
 - style-spec のパース(serde)と式(expression)評価
-- ソース: vector(MVT), raster, geojson, image
+- ソース: vector(MVT), raster, raster-dem, geojson, image
 - 投影: Web Mercator のみ。カメラは center / zoom / bearing(2D 回転)
-- レイヤ: background / fill / line / circle / raster / symbol(段階的)
+- レイヤ: background / fill / line / circle / raster / symbol / hillshade / color-relief / heatmap
 - sprite(fill-pattern, line-pattern, icon)、glyph(SDF PBF)
 
 非対象(手を出さない): fill-extrusion / 3D / pitch / terrain / globe・非mercator投影 / sky / light、実行時のスタイル・カメラ変更(setPaintProperty / setStyle / setFeatureState 等。render テストの `operations` は wait 系以外を含めば skip)、ネットワーク取得・キャッシュ・PMTiles 読み出し(ホストの責務)。
@@ -39,14 +39,15 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 - `crates/core/` — crate `ml2drender`。純粋ロジック(sans-IO)。
   - `expression/` — style-spec 式の移植(パース・型検査・評価)、`function.rs` は実行時の legacy function。
   - `style/` — レイヤ・プロパティのコンパイル、フィルタ。`spec.json` は v8.json の必要部分(`scripts/trim-spec.ts` で生成)。
-  - `mvt.rs`(MVT デコード、overzoom 分割)、`geojson.rs`(geojson-vt 移植)、`tile.rs`(Transform・タイル被覆・URL)、`image.rs`(画像デコード・GL 風テクスチャ)、`sprite.rs`(sprite 読み込み)。
+  - `mvt.rs`(MVT デコード、overzoom 分割)、`geojson.rs`(geojson-vt 移植)、`supercluster.rs`(GeoJSON クラスタ)、`tile.rs`(Transform・タイル被覆・URL)、`image.rs`(画像デコード・GL 風テクスチャ)、`sprite.rs`(sprite 読み込み)。
   - `render/` — `raster.rs` がソフトウェア GL(三角形・GL ライン・合成・マスク)、`mod.rs` / `line.rs` / `raster_layer.rs` / `pattern.rs` が各レイヤのバケット生成とシェーダ再現。
   - `symbol/` — `glyphs.rs`(PBF グリフ)、`shaping.rs`、`layout.rs`(バケット・quad・衝突ボックス)、`placement.rs`(衝突判定)、`projection.rs`(line ラベル)、`draw.rs`(SDF/アイコンのシェーダ)。
   - 方針: MapLibre の **バケット生成とシェーダをそのまま移植**し、GL と同じ規則でラスタライズする(tiny-skia は使わない)。上流の量子化・桁あふれ等の癖も再現する。
 - `crates/cli/` — crate `ml2drender-cli`、バイナリ `ml2drender`。テストランナー兼ネイティブ検証用。
-- `crates/wasm/` — crate `ml2drender-wasm`。wasm-bindgen なしの素の C-ABI export(`renderer_new/needs/provide/render/free`, `alloc/dealloc`, 結果は `out_ptr/out_len` の共有バッファ)。
-- `packages/ml2drender/` — TypeScript の公開 API と型テスト。`src/index.ts` が WASM のロード・メモリ操作・リソース取得を隠す。
+- `crates/wasm/` — crate `ml2drender-wasm`。wasm-bindgen なしの素の C-ABI export(`renderer_new/needs/provide/render/render_png/free`, `alloc/dealloc`, RGBA / PNG・エラー等の結果は `out_ptr/out_len` の共有バッファ)。
+- `packages/ml2drender/` — TypeScript の公開 API と型テスト。`src/index.ts` が WASM のロード・メモリ操作・リソース取得を隠す。RGBAの `render()` とWASM内PNG化の `renderPng()` を提供し、`init(..., { wasm })` でコンパイル済みモジュールを渡せる。
 - `examples/browser/` — pnpm パッケージ `demo-browser`(Vite + TypeScript、maplibre-gl は npm 依存)。左に MapLibre GL JS(参照)、右に WASM 出力。`needs`→fetch→`provide` ループのホスト実装例を兼ねる。JS API は `ml2drender` を `workspace:*` で参照。WASM は `pnpm build:wasm` で `packages/ml2drender/wasm/` にコピーし、API 内で `?url` import。社内標準のフロントエンド既定は SvelteKit だが、1画面の検証用ツールなので素の Vite にしている。
+- `examples/workers/` — Wranglerサンプル。`ml2drender/renderer.wasm` をコンパイル済みモジュールとしてimportし、リクエスト内で `renderPng()` してPNGレスポンスを返す。`pnpm demo:workers` はローカル起動、サンプルの `build` はdry-runのみ。
 - `crates/cli/tests/exclusions.json` — 対象外 render テストの除外ルール(理由付き)。pitch/roll/非mercator/operations はランナー内にハードコード。
 - `fixtures/` — 上流テスト(gitignore)。`scripts/fetch-fixtures.sh` が固定コミットから取得し LICENSE を同梱する。
 
@@ -88,4 +89,4 @@ pnpm typecheck                     # tsc --noEmit(全パッケージ)
 
 - symbol が工数の大半。最後に回し、未対応範囲を `STATUS.md` に明示する。
 - アンチエイリアスやジョイン形状は MapLibre(GPU)と差が出る。許容差で吸収し、差が大きいものは個別に調査。
-- WASM のサイズと速度: simd128、`opt-level="z"`、`wasm-opt` を検討。単一スレッドでネイティブの1.5〜2倍遅い程度を想定。
+- WASM は `pnpm build:wasm` で専用 `wasm` プロファイル（opt-level 3 / fat LTO / codegen-units 1 / panic abort / strip）と simd128 を使用。成果物は `target/wasm32-unknown-unknown/wasm/` から公開パッケージへコピーする。

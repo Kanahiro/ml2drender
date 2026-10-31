@@ -38,7 +38,7 @@ addProtocol('ml2drender', async (request, controller) => {
   const n = 2 ** z;
   const lng = ((x + 0.5) / n) * 360 - 180;
   const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
-  const image = await tileWorker.render({
+  const bitmap = await tileWorker.render({
     center: [lng, lat],
     // A 256px XYZ tile is one zoom below MapLibre's 512px world convention.
     zoom: z - 1,
@@ -47,8 +47,6 @@ addProtocol('ml2drender', async (request, controller) => {
     pixelRatio: devicePixelRatio,
     margin: MARGIN,
   });
-  checkActive();
-  const bitmap = await createImageBitmap(new ImageData(Uint8ClampedArray.from(image.data), image.width, image.height));
   try {
     checkActive();
     return { data: bitmap };

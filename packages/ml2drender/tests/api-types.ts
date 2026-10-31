@@ -1,5 +1,12 @@
 import type { FillLayerSpecification, LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
-import type { FillExtrusionLayer, InitOptions, StyleLayer } from '../src/index';
+import { MapRenderer, type FillExtrusionLayer, type InitOptions, type StyleLayer } from '../src/index';
+import wasm from 'ml2drender/renderer.wasm';
+
+async function pngResponse() {
+  const renderer = await MapRenderer.init('https://example.com/style.json', { wasm });
+  const png: Uint8Array<ArrayBuffer> = await renderer.renderPng({ center: [0, 0], zoom: 0, width: 256, height: 256 });
+  return new Response(png, { headers: { 'Content-Type': 'image/png' } });
+}
 
 const transform: NonNullable<InitOptions['transformFillExtrusion']> = (layer) => ({
   id: layer.id,

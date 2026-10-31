@@ -1,0 +1,17 @@
+{
+  "name": "demo-workers",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ml2drender": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "wrangler": "4.152.0"
+  }
+}

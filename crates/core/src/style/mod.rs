@@ -58,6 +58,15 @@ impl PropValue {
         }
     }
 
+    /// Evaluate with given globals (e.g. `heatmap-density`, `elevation`).
+    pub fn eval_globals(&self, mut globals: Globals) -> Value {
+        match self {
+            PropValue::Constant(v) => v.clone(),
+            PropValue::Expr(e) => e.evaluate(&mut EvalCtx { globals: { globals.global_state.get_or_insert_with(Default::default); globals }, ..Default::default() }),
+            PropValue::Function(f) => f.evaluate(globals.zoom, None),
+        }
+    }
+
     pub fn is_feature_constant(&self) -> bool {
         match self {
             PropValue::Constant(_) => true,
@@ -181,7 +190,12 @@ impl Style {
                 for (name, pspec) in props {
                     let given = l[kind].get(name);
                     let compiled = given.and_then(|v| compile_property(v, pspec, &state_json));
-                    let value = compiled.unwrap_or_else(|| PropValue::Constant(ex::default_value(pspec)));
+                    // Some defaults are expressions themselves (`heatmap-color`).
+                    let default = || match &pspec["default"] {
+                        d if ex::is_expression(d) => compile_property(d, pspec, &state_json),
+                        _ => None,
+                    };
+                    let value = compiled.or_else(default).unwrap_or_else(|| PropValue::Constant(ex::default_value(pspec)));
                     map.insert(name.clone(), value);
                 }
             }
