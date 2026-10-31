@@ -1,11 +1,10 @@
-import { Map as MapLibreMap, setWorkerUrl } from 'maplibre-gl';
+import { addProtocol, Map as MapLibreMap, setWorkerUrl, type StyleSpecification } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
-import * as L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
 import { TileWorker } from './worker-client';
 
 const TILE_SIZE = 256;
+const MARGIN = 64;
 const form = document.getElementById('controls') as HTMLFormElement;
 const input = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
 const logEl = document.getElementById('log')!;
@@ -22,119 +21,108 @@ const fail = (error: unknown) => {
 window.addEventListener('error', (event) => fail(event.error ?? event.message));
 window.addEventListener('unhandledrejection', (event) => fail(event.reason));
 
-/** Leaflet's zoom 0 has a 256px world; MapLibre's has a 512px world. */
-const leafletZoom = (mapLibreZoom: number) => mapLibreZoom + 1;
-const mapLibreZoom = (leafletZoomValue: number) => leafletZoomValue - 1;
+const tileWorker = new TileWorker();
+let styleGeneration = 0;
+let tileRevision = 0;
+let ready = false;
 
-class WasmTiles extends L.GridLayer {
-  private ready = false;
-  private generation = 0;
-
-  constructor(private readonly worker: TileWorker, options: L.GridLayerOptions) {
-    super(options);
+addProtocol('ml2drender', async (request, controller) => {
+  const url = new URL(request.url);
+  const generation = Number(url.hostname);
+  const checkActive = () => {
+    controller.signal.throwIfAborted();
+    if (!ready || generation !== styleGeneration) throw new DOMException('Style changed', 'AbortError');
+  };
+  checkActive();
+  const [z, x, y] = url.pathname.slice(1).split('/').map(Number);
+  const n = 2 ** z;
+  const lng = ((x + 0.5) / n) * 360 - 180;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
+  const image = await tileWorker.render({
+    center: [lng, lat],
+    // A 256px XYZ tile is one zoom below MapLibre's 512px world convention.
+    zoom: z - 1,
+    width: TILE_SIZE,
+    height: TILE_SIZE,
+    pixelRatio: devicePixelRatio,
+    margin: MARGIN,
+  });
+  checkActive();
+  const bitmap = await createImageBitmap(new ImageData(Uint8ClampedArray.from(image.data), image.width, image.height));
+  try {
+    checkActive();
+    return { data: bitmap };
+  } catch (error) {
+    bitmap.close();
+    throw error;
   }
-
-  setReady(ready: boolean) {
-    this.ready = ready;
-    this.generation++;
-    this.redraw();
-  }
-
-  createTile(coords: L.Coords, done: L.DoneCallback): HTMLElement {
-    const canvas = document.createElement('canvas');
-    const ratio = devicePixelRatio;
-    canvas.width = canvas.height = Math.round(TILE_SIZE * ratio);
-    const generation = this.generation;
-    if (!this.ready) {
-      done(undefined, canvas);
-      return canvas;
-    }
-    const n = 2 ** coords.z;
-    const lng = ((coords.x + 0.5) / n) * 360 - 180;
-    const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (coords.y + 0.5) / n))) * 180 / Math.PI;
-    void this.worker.render({
-      center: [lng, lat],
-      zoom: mapLibreZoom(coords.z),
-      width: TILE_SIZE,
-      height: TILE_SIZE,
-      pixelRatio: ratio,
-      margin: 128,
-    }).then((image) => {
-      if (generation === this.generation) {
-        canvas.getContext('2d')!.putImageData(
-          new ImageData(Uint8ClampedArray.from(image.data), image.width, image.height), 0, 0,
-        );
-      }
-      done(undefined, canvas);
-    }).catch((error: unknown) => {
-      if (generation !== this.generation) {
-        done(undefined, canvas);
-        return;
-      }
-      fail(error);
-      done(error instanceof Error ? error : new Error(String(error)), canvas);
-    });
-    return canvas;
-  }
-}
+});
 
 setWorkerUrl(workerUrl);
-const map = new MapLibreMap({
-  container: 'map',
-  style: input('style').value,
-  center: [0, 0],
+const camera = {
+  center: [0, 0] as [number, number],
   zoom: 1,
   minZoom: 0,
+  maxZoom: 22,
   maxPitch: 0,
   dragRotate: false,
   pitchWithRotate: false,
-  attributionControl: false,
-});
-const leaflet = L.map('out', {
-  center: [0, 0],
-  zoom: leafletZoom(1),
-  minZoom: 1,
-  maxZoom: 23,
-  zoomSnap: 0,
-  zoomControl: false,
-  attributionControl: false,
-});
-const tileWorker = new TileWorker();
-const tiles = new WasmTiles(tileWorker, { tileSize: TILE_SIZE, noWrap: true, updateWhenIdle: true }).addTo(leaflet);
+  attributionControl: false as const,
+};
+const emptyStyle = (): StyleSpecification => ({ version: 8, sources: {}, layers: [] });
+const map = new MapLibreMap({ ...camera, container: 'map', style: input('style').value });
+const rasterMap = new MapLibreMap({ ...camera, container: 'out', style: emptyStyle() });
+for (const view of [map, rasterMap]) {
+  view.touchZoomRotate.disableRotation();
+  view.keyboard.disableRotation();
+  view.on('error', (event) => {
+    if (!(event.error instanceof Error && event.error.name === 'AbortError')) fail(event.error);
+  });
+}
 
-// Both maps use Web Mercator. The guard prevents the programmatic move from echoing back.
+// Both views use the same camera convention; the guard prevents move events echoing back.
 let syncing = false;
-map.on('move', () => {
-  if (syncing) return;
-  syncing = true;
-  try {
-    const center = map.getCenter();
-    leaflet.setView([center.lat, center.lng], leafletZoom(map.getZoom()), { animate: false });
-  } finally {
-    syncing = false;
-  }
-});
-leaflet.on('move', () => {
-  if (syncing) return;
-  syncing = true;
-  try {
-    const center = leaflet.getCenter();
-    map.jumpTo({ center: [center.lng, center.lat], zoom: mapLibreZoom(leaflet.getZoom()), bearing: 0 });
-  } finally {
-    syncing = false;
-  }
-});
+for (const [source, destination] of [[map, rasterMap], [rasterMap, map]]) {
+  source.on('move', () => {
+    if (syncing) return;
+    syncing = true;
+    try {
+      destination.jumpTo({ center: source.getCenter(), zoom: source.getZoom(), bearing: source.getBearing() });
+    } finally {
+      syncing = false;
+    }
+  });
+}
 
-let styleGeneration = 0;
+function redraw() {
+  if (!ready) return;
+  status('rendering tiles…');
+  // A new URL revision bypasses GL JS's tile cache on explicit redraw.
+  rasterMap.setStyle({
+    version: 8,
+    sources: {
+      rendered: {
+        type: 'raster',
+        tiles: [`ml2drender://${styleGeneration}/{z}/{x}/{y}?revision=${++tileRevision}`],
+        tileSize: TILE_SIZE,
+        maxzoom: 23,
+      },
+    },
+    layers: [{ id: 'rendered', type: 'raster', source: 'rendered', paint: { 'raster-fade-duration': 0 } }],
+  }, { diff: false });
+}
+
 async function loadStyle() {
   const generation = ++styleGeneration;
-  tiles.setReady(false);
+  ready = false;
+  rasterMap.setStyle(emptyStyle(), { diff: false });
+  logEl.textContent = '';
   status('loading style and WASM…');
   try {
     await tileWorker.init(new URL(input('style').value, location.href).href);
     if (generation !== styleGeneration) return;
-    tiles.setReady(true);
-    status('rendering tiles…');
+    ready = true;
+    redraw();
   } catch (error) {
     if (generation === styleGeneration) fail(error);
   }
@@ -153,7 +141,11 @@ document.getElementById('tile')!.onclick = () => {
 };
 form.onsubmit = (event) => {
   event.preventDefault();
-  tiles.redraw();
+  redraw();
 };
-tiles.on('load', () => status(`tiles ready (zoom ${map.getZoom().toFixed(2)})`));
+rasterMap.on('idle', () => {
+  if (ready && rasterMap.getSource('rendered') && rasterMap.isSourceLoaded('rendered') && !statusEl.classList.contains('error')) {
+    status(`tiles ready (zoom ${map.getZoom().toFixed(2)})`);
+  }
+});
 void loadStyle();

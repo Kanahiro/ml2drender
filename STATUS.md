@@ -31,8 +31,9 @@ Render: **pass 889 / fail 23 / skip 823**(in scope 912 中 97.5%)。pass のう�
 ### 描画余白 (`margin`)
 
 - `MapRenderer.render(view)` / Rust `View` に `margin` を追加（非負整数の CSS ピクセル、既定 0）。余白を含むタイル取得・symbol 配置・描画後に、元の出力サイズへ切り出す。WASM ABI の `renderer_new` にも引数を追加したため、ホストと WASM は一緒に更新する。
-- 元のカメラ中心・ラスターのピクセル整列を保持。小数 DPR は余白をデバイスピクセルへ丸める。ブラウザデモは `margin: 128` を使用。
+- 元のカメラ中心・ラスターのピクセル整列を保持。小数 DPR は余白をデバイスピクセルへ丸める。ブラウザデモは `margin: 64` CSS ピクセルを使用。
 - 隣接タイルのアイコン、余白分のタイル取得、極域の中心維持、小数 DPR・回転時の射影とピクセル整列を単体テストで確認。margin はタイル間の独立した衝突判定による配置差を完全には解消しない。
+- ブラウザデモの右側は MapLibre GL JS の raster ソースを使用。WASM Worker の生成画像を `addProtocol` 経由で `ImageBitmap` として渡し、左右の中心・ズームを同期。Leaflet 依存を削除。
 
 ### フェーズ2: 式評価(`core/src/expression/`)
 
