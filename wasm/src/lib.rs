@@ -3,7 +3,7 @@
 //! Byte results (needs list, RGBA, error messages) go to a shared output buffer read via
 //! `out_ptr`/`out_len`; it stays valid until the next call. Inputs are copied in via `alloc`.
 
-use mlrender::{Renderer, View};
+use ml2drender::{Renderer, View};
 use std::cell::RefCell;
 
 thread_local! {

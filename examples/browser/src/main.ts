@@ -55,7 +55,7 @@ async function requestRender() {
   try {
     status('rendering…');
     const styleUrl = input('style').value;
-    const active = renderer ?? await MapRenderer.init(styleUrl);
+    const active = renderer ?? await MapRenderer.init(styleUrl, { cache: { ttlMs: Infinity } });
     if (styleUrl !== input('style').value) return;
     renderer = active;
     const center = map.getCenter();

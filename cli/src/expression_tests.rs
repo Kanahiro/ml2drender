@@ -2,7 +2,7 @@
 //! test/integration/expression/expression.test.ts upstream.
 
 use crate::{find_files, read_json, Tally};
-use mlrender::expression::{self as ex, create_property_expression};
+use ml2drender::expression::{self as ex, create_property_expression};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;

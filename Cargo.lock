@@ -157,7 +157,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mlrender"
+name = "ml2drender"
 version = "0.0.0"
 dependencies = [
  "earcutr",
@@ -171,19 +171,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "mlrender-cli"
+name = "ml2drender-cli"
 version = "0.0.0"
 dependencies = [
- "mlrender",
+ "ml2drender",
  "png",
  "serde_json",
 ]
 
 [[package]]
-name = "mlrender-wasm"
+name = "ml2drender-wasm"
 version = "0.0.0"
 dependencies = [
- "mlrender",
+ "ml2drender",
 ]
 
 [[package]]

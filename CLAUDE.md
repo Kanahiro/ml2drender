@@ -23,7 +23,7 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 
 ## 設計制約(厳守)
 
-- **純Rustのみ。C依存禁止**(zstd, freetype, harfbuzz, GDAL 等は不可)。依存クレートは採用前に `cargo build -p mlrender --target wasm32-unknown-unknown` で確認する。
+- **純Rustのみ。C依存禁止**(zstd, freetype, harfbuzz, GDAL 等は不可)。依存クレートは採用前に `cargo build -p ml2drender --target wasm32-unknown-unknown` で確認する。
 - **API の最小形は「style.json + XYZ → タイル画像」**: `Renderer::new(style, View::tile(z, x, y, tile_size))`。`View`(center/zoom/bearing/サイズ/pixel_ratio)は任意カメラ用の一般形で、render テストはこちらを使う。スタイルは生成時に固定(変更 API は作らない)。
 - **Sans-IO**: `core` は fetch / ファイル / async / スレッド / 時計に依存しない。`Renderer` が:
   - `needs() -> Vec<Resource>`: 現時点で必要な未取得リソース(tile / glyph range / sprite json / sprite png / TileJSON など)
@@ -36,14 +36,14 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 
 ## 構成
 
-- `core/` — crate `mlrender`。純粋ロジック(sans-IO)。
+- `core/` — crate `ml2drender`。純粋ロジック(sans-IO)。
   - `expression/` — style-spec 式の移植(パース・型検査・評価)、`function.rs` は実行時の legacy function。
   - `style/` — レイヤ・プロパティのコンパイル、フィルタ。`spec.json` は v8.json の必要部分(`scripts/trim-spec.ts` で生成)。
   - `mvt.rs`(MVT デコード、overzoom 分割)、`geojson.rs`(geojson-vt 移植)、`tile.rs`(Transform・タイル被覆・URL)、`image.rs`(画像デコード・GL 風テクスチャ)、`sprite.rs`(sprite 読み込み)。
   - `render/` — `raster.rs` がソフトウェア GL(三角形・GL ライン・合成・マスク)、`mod.rs` / `line.rs` / `raster_layer.rs` / `pattern.rs` が各レイヤのバケット生成とシェーダ再現。
   - 方針: MapLibre の **バケット生成とシェーダをそのまま移植**し、GL と同じ規則でラスタライズする(tiny-skia は使わない)。上流の量子化・桁あふれ等の癖も再現する。
-- `cli/` — crate `mlrender-cli`、バイナリ `mlrender`。テストランナー兼ネイティブ検証用。
-- `wasm/` — crate `mlrender-wasm`。wasm-bindgen なしの素の C-ABI export(`renderer_new/needs/provide/render/free`, `alloc/dealloc`, 結果は `out_ptr/out_len` の共有バッファ)。
+- `cli/` — crate `ml2drender-cli`、バイナリ `ml2drender`。テストランナー兼ネイティブ検証用。
+- `wasm/` — crate `ml2drender-wasm`。wasm-bindgen なしの素の C-ABI export(`renderer_new/needs/provide/render/free`, `alloc/dealloc`, 結果は `out_ptr/out_len` の共有バッファ)。
 - `examples/browser/` — pnpm パッケージ `demo-browser`(Vite + TypeScript、maplibre-gl は npm 依存)。左に MapLibre GL JS(参照)、右に WASM 出力。`needs`→fetch→`provide` ループのホスト実装例を兼ねる。wasm は `target/` から `?url` import(Vite の fs.allow はワークスペースルートまで既定で許可)。社内標準のフロントエンド既定は SvelteKit だが、1画面の検証用ツールなので素の Vite にしている。
 - `tests/exclusions.json` — 対象外 render テストの除外ルール(理由付き)。pitch/roll/非mercator/operations はランナー内にハードコード。
 - `fixtures/` — 上流テスト(gitignore)。`scripts/fetch-fixtures.sh` が固定コミットから取得し LICENSE を同梱する。
@@ -60,7 +60,7 @@ pnpm test:render [filter]          # → target/test-report/render/{summary.md,r
 pnpm test:expression [filter]      # → target/test-report/expression/{summary.md,failures.json}
 pnpm demo                          # wasm ビルド + Vite dev server(examples/browser)
 pnpm typecheck                     # tsc --noEmit(全パッケージ)
-./target/release/mlrender compare a.png b.png [threshold]
+./target/release/ml2drender compare a.png b.png [threshold]
 ```
 
 比較は maplibre-gl-js と同じ: pixelmatch 8.0.0 の移植(`cli/src/pixelmatch.rs`、JS版と300組で一致確認済み)、`threshold` 既定 0.1285、`allowed`(不一致画素率)既定 0.00025、テストごとの `metadata.test` 指定があればそれに従う。`expected*.png` が複数あれば最小差分を採用。expression は上流と同じく数値を有効数字6桁で比較。

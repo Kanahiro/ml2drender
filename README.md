@@ -1,4 +1,4 @@
-# mlrender
+# ml2drender
 
 MapLibre Style の **2D 表現のみ**を静止画像に描画する、Rust 製のソフトウェアレンダラです。GPU を使わず、`wasm32-unknown-unknown` でブラウザなどから実行できます。MapLibre GL JS の実装を参照し、Vibe Coding で作成しました。
 
@@ -14,7 +14,7 @@ rustup target add wasm32-unknown-unknown
 pnpm demo
 ```
 
-`pnpm demo` は WASM をビルドして Vite の比較画面を起動します。画面左に MapLibre GL JS、右に本レンダラの結果を表示します。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
+`pnpm demo` は WASM をビルドして Vite の比較画面を起動します。画面左に MapLibre GL JS、右に本レンダラの結果を表示します。デモでは取得リソースのキャッシュを無期限 TTL にし、容量上限は既定の 64 MiB を使います。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
 
 ## JavaScript API
 
@@ -48,7 +48,7 @@ canvas.getContext('2d')!.putImageData(
 ```
 
 - `MapRenderer.init(styleUrl, options?)`: Style JSON を取得し、WASM をロードします。相対 URL は現在のページを基準に解決します。
-- `options.cache.ttlMs`: 取得したタイル・sprite・グリフなどをメモリに保持する期間（ミリ秒）。既定は 5 分。`0` ならキャッシュしません。期限は取得完了から計測します。
+- `options.cache.ttlMs`: 取得したタイル・sprite・グリフなどをメモリに保持する期間（ミリ秒）。既定は 5 分。`0` ならキャッシュせず、`Infinity` なら期限切れになりません。期限は取得完了から計測します。
 - `options.cache.maxBytes`: キャッシュするデータの合計上限（バイト）。既定は 64 MiB。上限に達すると最近使っていないデータから削除します。上限を超える単体のデータは保持しません。取得失敗はキャッシュしません。Style JSON と WASM はインスタンス内で再利用します。
 - `options.transformFillExtrusion`: Style JSON にある各 `fill-extrusion` レイヤを、対応する 2D レイヤ定義へ変換する関数です。`init()` 時に適用され、元のレイヤ ID などを使って置き換えられます。返り値には対応レイヤの `type` と `id` が必要です。
 - `renderer.render(view)`: 必要なタイル・画像・グリフを取得し、`Promise<RenderedImage>` を返します。同じインスタンスで異なる視点を繰り返し描画できます。

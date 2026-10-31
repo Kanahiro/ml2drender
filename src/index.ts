@@ -1,4 +1,4 @@
-import wasmUrl from '../target/wasm32-unknown-unknown/wasm/mlrender_wasm.wasm?url';
+import wasmUrl from '../target/wasm32-unknown-unknown/release/ml2drender_wasm.wasm?url';
 
 export interface View {
   center: [lng: number, lat: number];
@@ -25,7 +25,7 @@ export interface StyleLayer {
 export type FillExtrusionLayer = StyleLayer & { type: 'fill-extrusion' };
 
 export interface InitOptions {
-  /** Resource cache. ttlMs = 0 disables it. Defaults: 5 minutes, 64 MiB. */
+  /** Resource cache. ttlMs = 0 disables it; Infinity never expires. Defaults: 5 minutes, 64 MiB. */
   cache?: { ttlMs?: number; maxBytes?: number };
   /** Replace each fill-extrusion layer before the style reaches the renderer. */
   transformFillExtrusion?: (layer: FillExtrusionLayer) => StyleLayer;
@@ -141,7 +141,8 @@ export class MapRenderer {
 
   /** Fetch the style JSON and load the renderer. The URL is used to resolve style resources. */
   static async init(styleUrl: string, options: InitOptions = {}): Promise<MapRenderer> {
-    const ttlMs = nonnegative(options.cache?.ttlMs ?? DEFAULT_TTL_MS, 'cache.ttlMs');
+    const ttlMs = options.cache?.ttlMs ?? DEFAULT_TTL_MS;
+    if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
     const maxBytes = nonnegative(options.cache?.maxBytes ?? DEFAULT_MAX_BYTES, 'cache.maxBytes');
     const url = new URL(styleUrl, globalThis.location?.href);
     const [styleResponse, wasmResponse] = await Promise.all([fetch(url), fetch(wasmUrl)]);

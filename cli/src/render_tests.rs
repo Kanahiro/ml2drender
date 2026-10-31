@@ -1,7 +1,7 @@
 //! Runs maplibre-gl-js render tests (fixtures/render) and reports pass rates.
 
 use crate::{find_files, read_json, Tally};
-use mlrender::{Renderer, View};
+use ml2drender::{Renderer, View};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
