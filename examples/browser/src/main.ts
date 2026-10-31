@@ -1,9 +1,11 @@
 import { Map as MapLibreMap, setWorkerUrl } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
-import { MapRenderer } from '../../../src/index';
+import * as L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import { TileWorker } from './worker-client';
 
-const SIZE = 512;
+const TILE_SIZE = 256;
 const form = document.getElementById('controls') as HTMLFormElement;
 const input = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
 const logEl = document.getElementById('log')!;
@@ -20,75 +22,137 @@ const fail = (error: unknown) => {
 window.addEventListener('error', (event) => fail(event.error ?? event.message));
 window.addEventListener('unhandledrejection', (event) => fail(event.reason));
 
+/** Leaflet's zoom 0 has a 256px world; MapLibre's has a 512px world. */
+const leafletZoom = (mapLibreZoom: number) => mapLibreZoom + 1;
+const mapLibreZoom = (leafletZoomValue: number) => leafletZoomValue - 1;
+
+class WasmTiles extends L.GridLayer {
+  private ready = false;
+  private generation = 0;
+
+  constructor(private readonly worker: TileWorker, options: L.GridLayerOptions) {
+    super(options);
+  }
+
+  setReady(ready: boolean) {
+    this.ready = ready;
+    this.generation++;
+    this.redraw();
+  }
+
+  createTile(coords: L.Coords, done: L.DoneCallback): HTMLElement {
+    const canvas = document.createElement('canvas');
+    const ratio = devicePixelRatio;
+    canvas.width = canvas.height = Math.round(TILE_SIZE * ratio);
+    const generation = this.generation;
+    if (!this.ready) {
+      done(undefined, canvas);
+      return canvas;
+    }
+    const n = 2 ** coords.z;
+    const lng = ((coords.x + 0.5) / n) * 360 - 180;
+    const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (coords.y + 0.5) / n))) * 180 / Math.PI;
+    void this.worker.render({
+      center: [lng, lat],
+      zoom: mapLibreZoom(coords.z),
+      width: TILE_SIZE,
+      height: TILE_SIZE,
+      pixelRatio: ratio,
+    }).then((image) => {
+      if (generation === this.generation) {
+        canvas.getContext('2d')!.putImageData(
+          new ImageData(Uint8ClampedArray.from(image.data), image.width, image.height), 0, 0,
+        );
+      }
+      done(undefined, canvas);
+    }).catch((error: unknown) => {
+      if (generation !== this.generation) {
+        done(undefined, canvas);
+        return;
+      }
+      fail(error);
+      done(error instanceof Error ? error : new Error(String(error)), canvas);
+    });
+    return canvas;
+  }
+}
+
 setWorkerUrl(workerUrl);
 const map = new MapLibreMap({
   container: 'map',
   style: input('style').value,
   center: [0, 0],
   zoom: 1,
+  minZoom: 0,
   maxPitch: 0,
+  dragRotate: false,
   pitchWithRotate: false,
   attributionControl: false,
 });
+const leaflet = L.map('out', {
+  center: [0, 0],
+  zoom: leafletZoom(1),
+  minZoom: 1,
+  maxZoom: 23,
+  zoomSnap: 0,
+  zoomControl: false,
+  attributionControl: false,
+});
+const tileWorker = new TileWorker();
+const tiles = new WasmTiles(tileWorker, { tileSize: TILE_SIZE, noWrap: true, updateWhenIdle: true }).addTo(leaflet);
+
+// Both maps use Web Mercator. The guard prevents the programmatic move from echoing back.
+let syncing = false;
+map.on('move', () => {
+  if (syncing) return;
+  syncing = true;
+  try {
+    const center = map.getCenter();
+    leaflet.setView([center.lat, center.lng], leafletZoom(map.getZoom()), { animate: false });
+  } finally {
+    syncing = false;
+  }
+});
+leaflet.on('move', () => {
+  if (syncing) return;
+  syncing = true;
+  try {
+    const center = leaflet.getCenter();
+    map.jumpTo({ center: [center.lng, center.lat], zoom: mapLibreZoom(leaflet.getZoom()), bearing: 0 });
+  } finally {
+    syncing = false;
+  }
+});
+
+let styleGeneration = 0;
+async function loadStyle() {
+  const generation = ++styleGeneration;
+  tiles.setReady(false);
+  status('loading style and WASM…');
+  try {
+    await tileWorker.init(new URL(input('style').value, location.href).href);
+    if (generation !== styleGeneration) return;
+    tiles.setReady(true);
+    status('rendering tiles…');
+  } catch (error) {
+    if (generation === styleGeneration) fail(error);
+  }
+}
 input('style').addEventListener('change', () => {
-  renderer = undefined;
   map.setStyle(input('style').value);
+  void loadStyle();
 });
 
 document.getElementById('tile')!.onclick = () => {
   const [z, x, y] = ['z', 'x', 'y'].map((key) => Number(input(key).value));
   const n = 2 ** z;
   const lng = ((x + 0.5) / n) * 360 - 180;
-  const lat = (Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 0.5)) / n))) * 180) / Math.PI;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
   map.jumpTo({ center: [lng, lat], zoom: z, bearing: 0 });
 };
-
-let renderer: MapRenderer | undefined;
-let busy = false;
-let pending = false;
-async function requestRender() {
-  if (busy) {
-    pending = true;
-    return;
-  }
-  busy = true;
-  try {
-    status('rendering…');
-    const styleUrl = input('style').value;
-    const active = renderer ?? await MapRenderer.init(styleUrl, { cache: { ttlMs: Infinity } });
-    if (styleUrl !== input('style').value) return;
-    renderer = active;
-    const center = map.getCenter();
-    const started = performance.now();
-    const image = await active.render({
-      center: [center.lng, center.lat],
-      zoom: map.getZoom(),
-      bearing: map.getBearing(),
-      width: SIZE,
-      height: SIZE,
-      pixelRatio: devicePixelRatio,
-    });
-    if (styleUrl !== input('style').value) return;
-    const canvas = document.getElementById('out') as HTMLCanvasElement;
-    canvas.width = image.width;
-    canvas.height = image.height;
-    canvas.getContext('2d')!.putImageData(new ImageData(Uint8ClampedArray.from(image.data), image.width, image.height), 0, 0);
-    const elapsed = (performance.now() - started).toFixed(0);
-    logEl.textContent = `rendered in ${elapsed} ms`;
-    status(`rendered in ${elapsed} ms (zoom ${map.getZoom().toFixed(2)})`);
-  } catch (error) {
-    fail(error);
-  } finally {
-    busy = false;
-    if (pending) {
-      pending = false;
-      void requestRender();
-    }
-  }
-}
 form.onsubmit = (event) => {
   event.preventDefault();
-  void requestRender();
+  tiles.redraw();
 };
-map.on('moveend', () => void requestRender());
-void requestRender();
+tiles.on('load', () => status(`tiles ready (zoom ${map.getZoom().toFixed(2)})`));
+void loadStyle();

@@ -14,7 +14,7 @@ rustup target add wasm32-unknown-unknown
 pnpm demo
 ```
 
-`pnpm demo` は WASM をビルドして Vite の比較画面を起動します。画面左に MapLibre GL JS、右に本レンダラの結果を表示します。デモでは取得リソースのキャッシュを無期限 TTL にし、容量上限は既定の 64 MiB を使います。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
+`pnpm demo` は WASM をビルドして Vite の比較画面を起動します。左は MapLibre GL JS、右は本レンダラが生成した 256px ラスタータイルを Leaflet で表示します。どちらの地図を動かしても、もう一方の中心とズームが同期します。右側の Style・リソース取得と WASM 描画は Web Worker で実行し、画素データを転送してメインスレッドでタイルに表示します。デモでは取得リソースのキャッシュを無期限 TTL にし、容量上限は既定の 64 MiB を使います。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
 
 ## JavaScript API
 
@@ -73,7 +73,7 @@ flowchart LR
     ABI -->|RGBA| Host
 ```
 
-`core/` はネットワークやファイル I/O を持たない Rust ライブラリです。必要な URL を `needs()` で通知し、ホストから `provide()` で受け取ったデータを処理します。`wasm/` はこの API を C ABI として公開し、`src/index.ts` の `MapRenderer` が WASM メモリ操作と取得ループを隠します。`examples/browser/` は公開クラスを使って Canvas に表示します。`cli/` はテストとネイティブでの検証に使います。
+`core/` はネットワークやファイル I/O を持たない Rust ライブラリです。必要な URL を `needs()` で通知し、ホストから `provide()` で受け取ったデータを処理します。`wasm/` はこの API を C ABI として公開し、`src/index.ts` の `MapRenderer` が WASM メモリ操作と取得ループを隠します。`examples/browser/` は Web Worker 内で公開クラスを使い、生成したタイルの画素データを Leaflet に渡します。`cli/` はテストとネイティブでの検証に使います。
 
 ## 開発
 
