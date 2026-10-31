@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = root.as_path();
     if !root.join("fixtures").exists() && args.first().is_some_and(|a| a.ends_with("-tests")) {
         eprintln!("fixtures/ missing: run scripts/fetch-fixtures.sh");
         std::process::exit(2);

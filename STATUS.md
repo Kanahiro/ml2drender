@@ -35,7 +35,7 @@ Render: **pass 889 / fail 23 / skip 823**(in scope 912 中 97.5%)。pass のう�
 - 隣接タイルのアイコン、余白分のタイル取得、極域の中心維持、小数 DPR・回転時の射影とピクセル整列を単体テストで確認。margin はタイル間の独立した衝突判定による配置差を完全には解消しない。
 - ブラウザデモの右側は MapLibre GL JS の raster ソースを使用。WASM Worker の生成画像を `addProtocol` 経由で `ImageBitmap` として渡し、左右の中心・ズームを同期。Leaflet 依存を削除。
 
-### フェーズ2: 式評価(`core/src/expression/`)
+### フェーズ2: 式評価(`crates/core/src/expression/`)
 
 - style-spec `src/expression` の移植: 型システム、パース/型検査(エラーメッセージ・キーまで一致)、定数畳み込み、全演算子、`within` / `distance`、legacy function → expression 変換(テスト用)。
 - JS 互換の細部: 数値の文字列化(`Number#toString`)、`JSON.stringify`、`Math.round`、`String()` 強制、UTF-16 順の文字列比較。
@@ -64,7 +64,7 @@ Render: **pass 889 / fail 23 / skip 823**(in scope 912 中 97.5%)。pass のう�
 - 三角形ラスタライズの共有辺を厳密化(辺関数を正規化した端点から評価し、隣接三角形で完全に符号反転させる)。
 - WASM: 1.6 MB(未最適化、画像デコーダ 3 種込み)。
 
-### フェーズ6: symbol(`core/src/symbol/`)
+### フェーズ6: symbol(`crates/core/src/symbol/`)
 
 - `glyphs.rs`: PBF グリフのパースと fontstack×256 コードポイント単位の範囲ストア。`needs()` はデコード済みタイルの text を評価してから範囲 URL を返す(style → タイル → グリフの段階的確定)。縦書きで置換されうる句読点の範囲も上流どおり要求する。
 - `shaping.rs`: `shapeText`/`TaggedString` の移植(badness 最小の改行、justify、anchor 揃え、formatted のセクション・scale・vertical-align・画像、`shapeIcon`/`fitIconToText`/`applyTextFit`)。縦書き(`isLineVertical`、line ラベルの `determineLineVerticals`、句読点の縦書き形 `verticalizePunctuation`)。

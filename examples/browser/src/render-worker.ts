@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import { MapRenderer, type View } from '../../../src/index';
+import { MapRenderer, type View } from 'ml2drender';
 
 export type WorkerRequest =
   | { kind: 'init'; generation: number; styleUrl: string }

@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn parse_fixture_range() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/render/assets/glyphs/Open Sans Semibold,Arial Unicode MS Bold/0-255.pbf");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/render/assets/glyphs/Open Sans Semibold,Arial Unicode MS Bold/0-255.pbf");
         let Ok(bytes) = std::fs::read(path) else { return };
         let glyphs = parse(&bytes);
         let a = &glyphs[&('A' as u32)];

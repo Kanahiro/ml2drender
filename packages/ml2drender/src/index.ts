@@ -1,5 +1,5 @@
 import type { FillExtrusionLayerSpecification, LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
-import wasmUrl from '../target/wasm32-unknown-unknown/release/ml2drender_wasm.wasm?url';
+import wasmUrl from '../wasm/ml2drender_wasm.wasm?url';
 
 export interface View {
   center: [lng: number, lat: number];

@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "maplibre-gl": "6.15.0"
+    "maplibre-gl": "6.15.0",
+    "ml2drender": "workspace:*"
   },
   "devDependencies": {
     "typescript": "7.0.2",

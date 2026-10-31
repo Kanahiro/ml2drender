@@ -18,10 +18,12 @@ pnpm demo
 
 ## JavaScript API
 
-ブラウザ向けの [`MapRenderer`](src/index.ts) が、WASM のロード、リソース取得、画像生成をまとめて扱います。先に `pnpm build:wasm` を実行してください。現在のモジュールは Vite の `?url` アセット読み込みを使います。
+ブラウザ向けの [`MapRenderer`](packages/ml2drender/src/index.ts) が、WASM のロード、リソース取得、画像生成をまとめて扱います。先に `pnpm build:wasm` を実行してください。現在のモジュールは Vite の `?url` アセット読み込みを使います。
+
+JS API は workspace パッケージ `ml2drender` として利用します。利用側の `package.json` に `"ml2drender": "workspace:*"` を追加してください。現在は TypeScript ソースを公開する非公開パッケージで、npm 配布用のビルドは用意していません。
 
 ```ts
-import { MapRenderer } from './src/index';
+import { MapRenderer } from 'ml2drender';
 
 const renderer = await MapRenderer.init('/style.json', {
   cache: { ttlMs: 300_000, maxBytes: 64 * 1024 * 1024 },
@@ -81,9 +83,34 @@ flowchart LR
     ABI -->|RGBA| Host
 ```
 
-`core/` はネットワークやファイル I/O を持たない Rust ライブラリです。必要な URL を `needs()` で通知し、ホストから `provide()` で受け取ったデータを処理します。`wasm/` はこの API を C ABI として公開し、`src/index.ts` の `MapRenderer` が WASM メモリ操作と取得ループを隠します。`examples/browser/` は Web Worker 内で公開クラスを使い、生成したタイルの画素データを `ImageBitmap` に変換し、`addProtocol` 経由で MapLibre GL JS の raster ソースに渡します。`cli/` はテストとネイティブでの検証に使います。
+`crates/core/` はネットワークやファイル I/O を持たない Rust ライブラリです。必要な URL を `needs()` で通知し、ホストから `provide()` で受け取ったデータを処理します。`crates/wasm/` はこの API を C ABI として公開し、`packages/ml2drender/src/index.ts` の `MapRenderer` が WASM メモリ操作と取得ループを隠します。`examples/browser/` は Web Worker 内で公開クラスを使い、生成したタイルの画素データを `ImageBitmap` に変換し、`addProtocol` 経由で MapLibre GL JS の raster ソースに渡します。`crates/cli/` はテストとネイティブでの検証に使います。
 
 ## 開発
+
+Cargo と pnpm の workspace をルートで管理します。Rust の crate は `crates/`、TypeScript のライブラリは `packages/`、利用例は `examples/` に置きます。
+
+```text
+.
+├── Cargo.toml / Cargo.lock         # Rust workspace
+├── package.json / pnpm-workspace.yaml / pnpm-lock.yaml
+├── crates/
+│   ├── core/                      # I/O を持たない描画エンジン
+│   ├── wasm/                      # C ABI
+│   └── cli/
+│       ├── src/                   # ネイティブ実行・上流テストランナー
+│       └── tests/exclusions.json  # render テストの除外ルール
+├── packages/ml2drender/
+│   ├── src/                       # MapRenderer と公開型
+│   ├── tests/                     # API の型テスト
+│   ├── package.json / tsconfig.json
+│   └── wasm/                      # build:wasm で配置する生成物（gitignore）
+├── examples/browser/              # パッケージ名で API を使う Vite デモ
+├── scripts/                       # リポジトリ全体の開発スクリプト
+├── fixtures/                      # 上流テストデータ（gitignore）
+└── target/                        # Cargo の生成物・テストレポート（gitignore）
+```
+
+テストや設定は所有するパッケージに置き、ルートには全体を管理するものを置きます。`pnpm build:wasm` は Cargo の出力を JS パッケージ内にコピーするため、利用側が Rust の生成物のパスを知る必要はありません。
 
 ```sh
 pnpm test              # Rust の単体テスト

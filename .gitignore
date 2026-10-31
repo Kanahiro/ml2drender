@@ -2,3 +2,4 @@
 /fixtures
 node_modules
 dist
+/packages/ml2drender/wasm

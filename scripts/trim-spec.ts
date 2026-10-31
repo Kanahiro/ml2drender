@@ -1,5 +1,5 @@
 // Trim maplibre-style-spec reference/v8.json to the layout/paint property fields the renderer
-// needs. Usage: node scripts/trim-spec.ts path/to/v8.json > core/src/style/spec.json
+// needs. Usage: node scripts/trim-spec.ts path/to/v8.json > crates/core/src/style/spec.json
 import {readFileSync} from 'node:fs';
 
 const KEEP = ['type', 'value', 'length', 'default', 'values', 'property-type', 'expression', 'tokens'];

@@ -164,20 +164,16 @@ settings:
 
 importers:
 
-  .:
-    devDependencies:
-      '@maplibre/maplibre-gl-style-spec':
-        specifier: 26.4.4
-        version: 26.4.4
-      typescript:
-        specifier: 7.0.2
-        version: 7.0.2
+  .: {}
 
   examples/browser:
     dependencies:
       maplibre-gl:
         specifier: 6.15.0
         version: 6.15.0
+      ml2drender:
+        specifier: workspace:*
+        version: link:../../packages/ml2drender
     devDependencies:
       typescript:
         specifier: 7.0.2
@@ -185,6 +181,15 @@ importers:
       vite:
         specifier: 8.3.5
         version: 8.3.5
+
+  packages/ml2drender:
+    devDependencies:
+      '@maplibre/maplibre-gl-style-spec':
+        specifier: 26.4.4
+        version: 26.4.4
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
 
 packages:
 

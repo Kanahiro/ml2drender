@@ -19,7 +19,7 @@ enum Outcome {
 pub fn run(root: &Path, filter: Option<&str>) {
     let tests_dir = root.join("fixtures/render/tests");
     let assets = root.join("fixtures/render/assets");
-    let exclusions = read_json(&root.join("tests/exclusions.json"));
+    let exclusions = read_json(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/exclusions.json"));
     let out_dir = root.join("target/test-report/render");
     let _ = fs::remove_dir_all(&out_dir);
     fs::create_dir_all(&out_dir).unwrap();

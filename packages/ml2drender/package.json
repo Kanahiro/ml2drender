@@ -1,0 +1,19 @@
+{
+  "name": "ml2drender",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@maplibre/maplibre-gl-style-spec": "^26.4.4"
+  },
+  "devDependencies": {
+    "@maplibre/maplibre-gl-style-spec": "26.4.4",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,4 +1,4 @@
-import type { RenderedImage, View } from '../../../src/index';
+import type { RenderedImage, View } from 'ml2drender';
 import type { WorkerRequest, WorkerResponse } from './render-worker';
 
 /** Owns the worker protocol so the map only deals with images and style changes. */
