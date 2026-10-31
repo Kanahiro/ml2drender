@@ -23,7 +23,14 @@ pnpm demo
 ```ts
 import { MapRenderer } from './src/index';
 
-const renderer = await MapRenderer.init('/style.json');
+const renderer = await MapRenderer.init('/style.json', {
+  cache: { ttlMs: 300_000, maxBytes: 64 * 1024 * 1024 },
+  transformFillExtrusion: (layer) => ({
+    ...layer,
+    type: 'fill',
+    paint: { 'fill-color': '#888888' },
+  }),
+});
 const image = await renderer.render({
   center: [139.767, 35.681], // [経度, 緯度]
   zoom: 12,
@@ -40,7 +47,10 @@ canvas.getContext('2d')!.putImageData(
 );
 ```
 
-- `MapRenderer.init(styleUrl)`: Style JSON を取得し、WASM をロードします。相対 URL は現在のページを基準に解決します。
+- `MapRenderer.init(styleUrl, options?)`: Style JSON を取得し、WASM をロードします。相対 URL は現在のページを基準に解決します。
+- `options.cache.ttlMs`: 取得したタイル・sprite・グリフなどをメモリに保持する期間（ミリ秒）。既定は 5 分。`0` ならキャッシュしません。期限は取得完了から計測します。
+- `options.cache.maxBytes`: キャッシュするデータの合計上限（バイト）。既定は 64 MiB。上限に達すると最近使っていないデータから削除します。上限を超える単体のデータは保持しません。取得失敗はキャッシュしません。Style JSON と WASM はインスタンス内で再利用します。
+- `options.transformFillExtrusion`: Style JSON にある各 `fill-extrusion` レイヤを、対応する 2D レイヤ定義へ変換する関数です。`init()` 時に適用され、元のレイヤ ID などを使って置き換えられます。返り値には対応レイヤの `type` と `id` が必要です。
 - `renderer.render(view)`: 必要なタイル・画像・グリフを取得し、`Promise<RenderedImage>` を返します。同じインスタンスで異なる視点を繰り返し描画できます。
 - `view`: `center: [lng, lat]`、`zoom`、`width`、`height` は必須。`bearing`（時計回りの度数、既定 0）と `pixelRatio`（既定 1）は省略できます。幅・高さは CSS ピクセル単位です。
 - `RenderedImage`: `width`、`height`、行優先の 8 bit RGBA 画素列 `data: Uint8ClampedArray` を持ちます。取得や描画の失敗は例外になります。
