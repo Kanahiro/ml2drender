@@ -39,6 +39,17 @@ impl Image {
         Image { w, h, data }
     }
 
+    /// `ImageAtlas` icon entry: the image with a 1px transparent border.
+    pub fn with_padding(&self) -> Image {
+        let (w, h) = (self.w + 2, self.h + 2);
+        let mut data = vec![0; w * h * 4];
+        for y in 0..self.h {
+            let d = ((y + 1) * w + 1) * 4;
+            data[d..d + self.w * 4].copy_from_slice(&self.data[y * self.w * 4..(y + 1) * self.w * 4]);
+        }
+        Image { w, h, data }
+    }
+
     /// `ImageAtlas` pattern entry: the image with a 1px border of wrapped edge pixels
     /// (corners stay transparent).
     pub fn with_wrapped_padding(&self) -> Image {

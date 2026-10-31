@@ -39,13 +39,13 @@ pub struct Layer {
     pub features: Vec<Feature>,
 }
 
-struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
+pub(crate) struct Reader<'a> {
+    pub buf: &'a [u8],
+    pub pos: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn varint(&mut self) -> Option<u64> {
+    pub fn varint(&mut self) -> Option<u64> {
         let mut v = 0u64;
         for shift in (0..64).step_by(7) {
             let b = *self.buf.get(self.pos)?;
@@ -58,7 +58,7 @@ impl<'a> Reader<'a> {
         None
     }
 
-    fn bytes(&mut self) -> Option<&'a [u8]> {
+    pub fn bytes(&mut self) -> Option<&'a [u8]> {
         let len = self.varint()? as usize;
         let s = self.buf.get(self.pos..self.pos + len)?;
         self.pos += len;
@@ -66,7 +66,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Next (field, wire type); `None` at end.
-    fn field(&mut self) -> Option<(u64, u8)> {
+    pub fn field(&mut self) -> Option<(u64, u8)> {
         if self.pos >= self.buf.len() {
             return None;
         }
@@ -74,7 +74,7 @@ impl<'a> Reader<'a> {
         Some((k >> 3, (k & 7) as u8))
     }
 
-    fn skip(&mut self, wire: u8) -> Option<()> {
+    pub fn skip(&mut self, wire: u8) -> Option<()> {
         match wire {
             0 => {
                 self.varint()?;

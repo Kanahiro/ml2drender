@@ -33,6 +33,8 @@ pub struct BucketFeature {
     pub ty: GeomType,
     pub geometry: Vec<Vec<[f64; 2]>>,
     pub sort_key: f64,
+    /// Index of the feature in its source layer.
+    pub index: usize,
 }
 
 impl Ctx<'_> {
@@ -70,7 +72,7 @@ impl Ctx<'_> {
         let scale = EXTENT / tf.layer.extent as f64;
         let canonical = Some(Self::canonical(&tf.tile));
         let mut out = Vec::new();
-        for f in &tf.layer.features {
+        for (index, f) in tf.layer.features.iter().enumerate() {
             let geometry: Vec<Vec<[f64; 2]>> =
                 f.geometry.iter().map(|l| l.iter().map(|p| [(p[0] as f64 * scale).round(), (p[1] as f64 * scale).round()]).collect()).collect();
             let feature = ex::Feature {
@@ -94,7 +96,7 @@ impl Ctx<'_> {
                 Some(p) if !p.is_constant() => num(&p.eval(zoom, Some(&feature), canonical, self.global_state)),
                 _ => 0.0,
             };
-            out.push(BucketFeature { feature, ty: f.ty, geometry, sort_key });
+            out.push(BucketFeature { feature, ty: f.ty, geometry, sort_key, index });
         }
         if sort_key_prop.is_some_and(|p| !layer.layout(p).is_constant()) {
             out.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap_or(std::cmp::Ordering::Equal));

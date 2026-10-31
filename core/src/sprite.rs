@@ -12,6 +12,14 @@ pub struct StyleImage {
     pub sdf: bool,
     /// The image with 1px wrapped padding, as packed for patterns.
     pub pattern: Texture,
+    /// The image with 1px transparent padding, as packed for icons.
+    pub icon: Texture,
+    pub stretch_x: Option<Vec<[f64; 2]>>,
+    pub stretch_y: Option<Vec<[f64; 2]>>,
+    /// `[x1, y1, x2, y2]` in image pixels.
+    pub content: Option<[f64; 4]>,
+    pub text_fit_width: Option<String>,
+    pub text_fit_height: Option<String>,
 }
 
 struct Source {
@@ -98,9 +106,23 @@ impl Sprites {
                     continue;
                 }
                 let pattern = Texture::new(&image.with_wrapped_padding(), false);
+                let icon = Texture::new(&image.with_padding(), false);
+                let ranges = |k: &str| e[k].as_array().map(|a| a.iter().map(|r| [r[0].as_f64().unwrap_or(0.0), r[1].as_f64().unwrap_or(0.0)]).collect());
+                let content = e["content"].as_array().filter(|c| c.len() == 4).map(|c| std::array::from_fn(|i| c[i].as_f64().unwrap_or(0.0)));
                 self.images.insert(
                     key,
-                    Rc::new(StyleImage { pixel_ratio: e["pixelRatio"].as_f64().unwrap_or(1.0), sdf: e["sdf"].as_bool().unwrap_or(false), image, pattern }),
+                    Rc::new(StyleImage {
+                        pixel_ratio: e["pixelRatio"].as_f64().unwrap_or(1.0),
+                        sdf: e["sdf"].as_bool().unwrap_or(false),
+                        image,
+                        pattern,
+                        icon,
+                        stretch_x: ranges("stretchX"),
+                        stretch_y: ranges("stretchY"),
+                        content,
+                        text_fit_width: e["textFitWidth"].as_str().map(String::from),
+                        text_fit_height: e["textFitHeight"].as_str().map(String::from),
+                    }),
                 );
             }
         }

@@ -103,7 +103,8 @@ fn run_one(dir: &Path, style: &Value, assets: &Path, out_dir: &Path) -> Outcome 
         pixel_ratio,
     };
     let max_zoom = t["maxZoom"].as_f64();
-    let rgba = match render(style, view, max_zoom, assets) {
+    let cross_source = t["crossSourceCollisions"].as_bool().unwrap_or(true);
+    let rgba = match render(style, view, max_zoom, cross_source, assets) {
         Ok(rgba) => rgba,
         Err(e) => return Outcome::Fail(e),
     };
@@ -147,8 +148,9 @@ fn run_one(dir: &Path, style: &Value, assets: &Path, out_dir: &Path) -> Outcome 
 }
 
 /// The host loop: answer `needs()` from the local assets until it is empty, then render.
-fn render(style: &Value, view: View, max_zoom: Option<f64>, assets: &Path) -> Result<Vec<u8>, String> {
+fn render(style: &Value, view: View, max_zoom: Option<f64>, cross_source_collisions: bool, assets: &Path) -> Result<Vec<u8>, String> {
     let mut r = Renderer::new(&style.to_string(), view).map_err(|e| e.to_string())?;
+    r.set_cross_source_collisions(cross_source_collisions);
     if let Some(z) = max_zoom {
         r.set_max_zoom(z);
     }

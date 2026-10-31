@@ -186,6 +186,13 @@ impl LegacyFunction {
         self.composite
     }
 
+    /// Zoom stops and interpolation (`StylePropertyFunction.zoomStops/interpolationType`) of a
+    /// zoom-dependent function; `None` interpolation for step (interval) functions.
+    pub fn zoom_curve(&self) -> (Vec<f64>, Option<super::expr::Interpolation>) {
+        let interp = (self.ty == Ty::Exponential).then_some(super::expr::Interpolation::Exponential(self.base));
+        (self.stops.iter().map(|s| s.0).collect(), interp)
+    }
+
     fn fallback(&self) -> Value {
         self.default.clone().or_else(|| self.spec_default.clone()).unwrap_or(Value::Null)
     }
@@ -240,6 +247,10 @@ impl LegacyFunction {
                     ("color", Value::String(s)) => Color::parse(s).map(Value::Color),
                     ("color", _) => None,
                     ("formatted", v) => Some(Value::Formatted(Rc::new(super::value::Formatted::from_string(v.to_js_string())))),
+                    ("resolvedImage", v) => {
+                        let name = v.to_js_string();
+                        (!name.is_empty()).then(|| Value::ResolvedImage(Rc::new(super::value::ResolvedImage { name, available: false })))
+                    }
                     ("padding", v) => super::expr::parse_padding(v),
                     ("colorArray", v) => super::expr::parse_color_array(v),
                     ("numberArray", v) => super::expr::parse_number_array(v),

@@ -41,6 +41,23 @@ impl PropValue {
         }
     }
 
+    /// Expression kind with the top-level zoom stops and interpolation (camera/composite).
+    pub fn curve(&self) -> (ex::Kind, Vec<f64>, Option<ex::Interpolation>) {
+        match self {
+            PropValue::Constant(_) => (ex::Kind::Constant, vec![], None),
+            PropValue::Expr(e) => (e.kind, e.zoom_stops.clone(), e.interpolation),
+            PropValue::Function(f) => {
+                let kind = match (f.is_zoom_dependent(), f.is_composite()) {
+                    (_, true) => ex::Kind::Composite,
+                    (true, false) => ex::Kind::Camera,
+                    (false, _) => ex::Kind::Source,
+                };
+                let (stops, interp) = f.zoom_curve();
+                (kind, stops, interp)
+            }
+        }
+    }
+
     pub fn is_feature_constant(&self) -> bool {
         match self {
             PropValue::Constant(_) => true,

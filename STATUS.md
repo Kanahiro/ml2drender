@@ -1,6 +1,6 @@
 # STATUS
 
-最終更新: 2026-10-31(フェーズ2・3・4 完了)
+最終更新: 2026-10-31(フェーズ2・3・4・6 完了。フェーズ5の人間レビューを経ずに、指示によりフェーズ6(symbol)を先行実施)
 
 ## スコープ決定(2026-10-31、人間判断)
 
@@ -13,20 +13,18 @@
 
 Expression: **581 / 583(99.7%)**
 
-Render: **pass 480 / fail 432 / skip 823**(in scope 912 中 52.6%)。pass のうち 435 件は差分 0(ピクセル完全一致)。
+Render: **pass 889 / fail 23 / skip 823**(in scope 912 中 97.5%)。pass のうち 834 件は差分 0(ピクセル完全一致)。
 
 | layer type | pass | fail | skip | 通過率 |
 |---|---|---|---|---|
-| background | 191 | 168 | 411 | 53.2% |
-| circle | 106 | 47 | 132 | 69.3% |
-| fill | 112 | 11 | 100 | 91.1% |
-| line | 180 | 24 | 84 | 88.2% |
-| raster | 82 | 1 | 81 | 98.8% |
-| symbol | 9 | 432 | 245 | 2.0% |
+| background | 352 | 7 | 411 | 98.1% |
+| circle | 149 | 4 | 132 | 97.4% |
+| fill | 121 | 2 | 100 | 98.4% |
+| line | 202 | 2 | 84 | 99.0% |
+| raster | 83 | 0 | 81 | 100.0% |
+| symbol | 418 | 23 | 245 | 94.8% |
 
-(1テストは使用する全レイヤ種別に計上)
-
-**fail 432 はすべて symbol レイヤを含むテスト。symbol を含まないテストは全件通過。**
+(1テストは使用する全レイヤ種別に計上。fail 23 はすべて symbol レイヤを含むテスト。内訳は「未対応・既知の問題」)
 
 ## 実装済み
 
@@ -59,20 +57,44 @@ Render: **pass 480 / fail 432 / skip 823**(in scope 912 中 52.6%)。pass のう
 - 三角形ラスタライズの共有辺を厳密化(辺関数を正規化した端点から評価し、隣接三角形で完全に符号反転させる)。
 - WASM: 1.6 MB(未最適化、画像デコーダ 3 種込み)。
 
+### フェーズ6: symbol(`core/src/symbol/`)
+
+- `glyphs.rs`: PBF グリフのパースと fontstack×256 コードポイント単位の範囲ストア。`needs()` はデコード済みタイルの text を評価してから範囲 URL を返す(style → タイル → グリフの段階的確定)。縦書きで置換されうる句読点の範囲も上流どおり要求する。
+- `shaping.rs`: `shapeText`/`TaggedString` の移植(badness 最小の改行、justify、anchor 揃え、formatted のセクション・scale・vertical-align・画像、`shapeIcon`/`fitIconToText`/`applyTextFit`)。縦書き(`isLineVertical`、line ラベルの `determineLineVerticals`、句読点の縦書き形 `verticalizePunctuation`)。
+- `layout.rs`: `SymbolBucket.populate` + `performSymbolLayout`(トークン解決、`text-transform`、point / line / line-center / polygon(pole of inaccessibility)のアンカー、`mergeLines`、`anchorIsTooClose`、text-size/icon-size の SizeData(constant/source/camera/composite、上流と同じ 128 倍パック)、quad(縦グリフの -90° 回転、icon-text-fit の nine-patch stretch)、Int16 に落とす衝突ボックス、variable anchor のオフセット)。
+- `placement.rs`: `GridIndex`/`CollisionIndex`/`Placement` の移植(viewport padding 100、overlap never/always/cooperative、ignore-placement、optional、variable anchor の 2 パス、writing-mode 順の横/縦配置、line ラベルの collision circle、sort-key のタイル横断ソート、viewport-y、`crossSourceCollisions`)。fadeDuration 0 の定常状態 = 「配置されたものだけ表示」。
+- `projection.rs`: `placeGlyphsAlongLine` / `placeGlyphAlongLine`(line-offset、keep-upright の反転、急勾配で縦書きへ切替える `useVertical`)。pitch 0 前提でラベル平面は画面(CSS px)。
+- `draw.rs`: `symbol_sdf`/`symbol_icon`/`symbol_text_and_icon` シェーダの再現(SDF のしきい値・gamma・halo、halo と本体の 1 パス/2 パス切替 `isGlyphOverlap`、LINEAR/NEAREST の選択、`a_offset` の 1/32 量子化、`pixelOffset`/`minFontScale` の Int16)。タイルとシンボルの描画順(地図回転込み)、sort-key の区間ソート。
+- 上流の癖で再現しているもの: layout が同一のレイヤは 1 つのバケットを共有し配置は先頭レイヤ分のみ(同じラベルが 2 回描かれる)、`text-size`(camera)のサイズはタイルズーム+1 の値で頭打ち、衝突ボックスは Int16 に切り捨て、描画時の layout 値は地図ズームで評価(バケットはタイルズーム)。
+- API 追加: `Renderer::set_cross_source_collisions(bool)`(MapLibre の Map オプション。render テストの `crossSourceCollisions`)。
+- 実スタイル確認: demotiles(国名ラベル)と OpenFreeMap liberty(東京、CJK・アイコン・シールド・line ラベル)を WASM 経由で描画できることを確認。WASM 1.86 MB(未最適化)。
+
 ## 未対応・既知の問題
 
-1. **symbol**(フェーズ6)。
-2. composite 式(zoom と feature の両方に依存)は表示ズームで直接評価している。MapLibre はタイルズームの前後で評価してシェーダで補間するため、指数補間などでわずかに差が出うる(現テストでは顕在化していない)。
-3. GeoJSON の `cluster` 未対応(supercluster 未移植)。
-4. タイル欠落時の親/子タイルでの穴埋め(MapLibre の retained tiles)未対応。
-5. feature-state は常に空(静的レンダリングのため仕様上も対象外)。
-6. 照合はルート照合のみ(上記)。`number-format` は en-US の書式のみ(通貨・単位は主要なもの)。
-7. `is-supported-script` は常に true。
+### symbol の残り失敗 23 件
 
-## 次フェーズ(5: sans-IO API の確定 + WASM + JS ホスト)の前提
+| 件数 | テスト | 原因 |
+|---|---|---|
+| 9 | `text-arabic/*`, `text-field/formatted-arabic`, `text-writing-mode/point_label/cjk-arabic-vertical-mode` | 双方向テキスト(bidi)とアラビア文字の字形整形が未実装(論理順のまま並べる)。 |
+| 3 | `geojson/clustered*` | GeoJSON の `cluster`(supercluster)未移植。 |
+| 5 | `is-supported-script/*`, `text-local-glyphs/complex-script`, `regressions/mapbox-gl-native#11729`, `geometry-type/all-geometries` | MapLibre 6 は複合文字スクリプト(デーヴァナーガリー、クメール等)や取得できなかったグリフ範囲をブラウザのフォントで描く(TinySDF)。フォントを持たないため再現不可(グリフは欠落扱い)。 |
+| 1 | `text-variable-anchor/rotated-offset` | 上流はタイルが届くたびに再配置し、前回のアンカーを優先して試す(`prevAnchor`)。1 回の配置ではこの履歴依存を再現できない。 |
+| 5 | `visibility/symbol/visible`(0.0027), `symbol-placement/line-overlap`(0.0041), `text-field/formatted-images`(0.00043), `symbol-placement/point-polygon-high-zoom`(0.00026), `combinations/symbol-translucent--fill-translucent`(0.00098) | 小差分。visible は期待画像で一部アイコンの上下 1px が欠ける(原因未特定、NEAREST の texel 境界を疑ったが丸めでは変わらず)。line-overlap は z22 の line ラベルが約 0.5px ずれる(未特定)。translucent は fill のアウトライン右端の AA。 |
 
-- 現 API: `Renderer::new(style, View)` / `set_max_zoom` / `needs()` / `provide(url, Option<bytes>)` / `render()`。`provide(None)` の意味(vector は空、raster は祖先で代替)は上流の 404 に合わせている。404 以外の失敗を区別したい場合は API 拡張が必要。
-- `needs()` の段階: style → (TileJSON / GeoJSON / sprite json+png / image) → タイル → (欠落 raster の祖先)。フェーズ6でグリフ範囲が加わる。
-- `wasm/` は素の C-ABI。`examples/browser` がホスト実装例(自動再描画・状態表示付き)。
-- WASM サイズ 1.6 MB: `opt-level="z"`、`wasm-opt`、LTO、spec.json の縮小、画像デコーダの feature 化などで削減余地。
-- CLI ランナーはハーネス依存の挙動(maxCanvasSize による DPR 縮小、`readPixels` の左下切り出し、`maxZoom`、`sparse204` の 204 応答)を再現済み。
+### その他
+
+1. composite 式(zoom と feature の両方に依存)は表示ズームで直接評価している。MapLibre はタイルズームの前後で評価してシェーダで補間するため、指数補間などでわずかに差が出うる(symbol のサイズは上流どおりパックして補間)。
+2. GeoJSON の `cluster` 未対応(上記)。
+3. タイル欠落時の親/子タイルでの穴埋め(MapLibre の retained tiles)未対応。symbol の CrossTileSymbolIndex(ズーム間の重複除去)も未実装(同一ズームのタイル間では不要)。
+4. feature-state は常に空(静的レンダリングのため仕様上も対象外)。
+5. 照合はルート照合のみ。`number-format` は en-US の書式のみ(通貨・単位は主要なもの)。
+6. `is-supported-script` は常に true。
+7. symbol: グラフェムクラスタは 1 コードポイントずつ扱う(MapLibre もグリフファイルに無いクラスタはそうする)。単語区切りの無いスクリプト(タイ語等)の改行位置は未対応。`font-faces` と縦書き用グリフ variant は対象外。pitch 前提のコード(遠近補正、pitched label plane)は pitch 0 に簡約。
+8. Unicode 文字種判定(縦書きの upright/neutral、句読点・記号、Nd/Lu)は範囲表と std の近似。
+
+## 次フェーズの前提
+
+- フェーズ5(sans-IO API の確定 + WASM + JS ホスト)の人間レビューが未実施。`needs()` の段階は style → (TileJSON / GeoJSON / sprite json+png / image) → タイル → (欠落 raster の祖先 / グリフ範囲)。グリフ範囲はデコード済みタイルの text 評価で確定するため、`needs()` の度に symbol レイヤのテキストを評価する(`provide()` は直前の `needs()` が返したグリフ URL を引くだけ。したがってグリフ範囲は `needs()` が返した URL でのみ受け付ける)。
+- 現 API: `Renderer::new(style, View)` / `set_max_zoom` / `set_cross_source_collisions` / `needs()` / `provide(url, Option<bytes>)` / `render()`。`provide(None)` の意味は上流の 404 に合わせている(vector は空、raster は祖先、グリフ範囲は欠落)。
+- WASM 1.86 MB: `opt-level="z"`、`wasm-opt`、LTO、spec.json の縮小、画像デコーダの feature 化などで削減余地。
+- CLI ランナーはハーネス依存の挙動(maxCanvasSize による DPR 縮小、`readPixels` の左下切り出し、`maxZoom`、`crossSourceCollisions`、`sparse204` の 204 応答)を再現済み。

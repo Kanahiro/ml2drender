@@ -41,6 +41,7 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
   - `style/` — レイヤ・プロパティのコンパイル、フィルタ。`spec.json` は v8.json の必要部分(`scripts/trim-spec.ts` で生成)。
   - `mvt.rs`(MVT デコード、overzoom 分割)、`geojson.rs`(geojson-vt 移植)、`tile.rs`(Transform・タイル被覆・URL)、`image.rs`(画像デコード・GL 風テクスチャ)、`sprite.rs`(sprite 読み込み)。
   - `render/` — `raster.rs` がソフトウェア GL(三角形・GL ライン・合成・マスク)、`mod.rs` / `line.rs` / `raster_layer.rs` / `pattern.rs` が各レイヤのバケット生成とシェーダ再現。
+  - `symbol/` — `glyphs.rs`(PBF グリフ)、`shaping.rs`、`layout.rs`(バケット・quad・衝突ボックス)、`placement.rs`(衝突判定)、`projection.rs`(line ラベル)、`draw.rs`(SDF/アイコンのシェーダ)。
   - 方針: MapLibre の **バケット生成とシェーダをそのまま移植**し、GL と同じ規則でラスタライズする(tiny-skia は使わない)。上流の量子化・桁あふれ等の癖も再現する。
 - `cli/` — crate `ml2drender-cli`、バイナリ `ml2drender`。テストランナー兼ネイティブ検証用。
 - `wasm/` — crate `ml2drender-wasm`。wasm-bindgen なしの素の C-ABI export(`renderer_new/needs/provide/render/free`, `alloc/dealloc`, 結果は `out_ptr/out_len` の共有バッファ)。
@@ -78,7 +79,7 @@ pnpm typecheck                     # tsc --noEmit(全パッケージ)
 3. MVT デコード + background / fill / line / circle(line-join/cap、dasharray、タイル境界バッファ、overzoom) ✅
 4. raster + sprite(fill-pattern / line-pattern) ✅
 5. sans-IO API の確定 + WASMビルド + JSホストのサンプル(`needs`→fetch→`provide` ループ、サイズ計測)。デモ画面 `examples/browser/` は先行して作成済み、各フェーズで目視確認に使う
-6. symbol: 水平な点ラベル → アイコン → line placement → CJK / 縦書き(衝突検出は画面単位)
+6. symbol: 水平な点ラベル → アイコン → line placement → CJK / 縦書き(衝突検出は画面単位) ✅(RTL/アラビア語は未対応)
 
 **フェーズ5完了時点で人間がレビューする。** 特に `needs()` の段階的依存設計を確認してから 6 に入ること。
 

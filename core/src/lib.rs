@@ -10,6 +10,7 @@ mod sprite;
 mod mvt;
 mod render;
 mod style;
+mod symbol;
 mod tile;
 
 use serde_json::Value as J;
@@ -113,9 +114,14 @@ pub struct Renderer {
     transform: Transform,
     sources: HashMap<String, Source>,
     sprites: sprite::Sprites,
+    glyphs: symbol::glyphs::Glyphs,
+    /// Glyph range URLs last returned by `needs()`, so `provide()` need not re-evaluate text.
+    glyph_urls: std::cell::RefCell<HashMap<String, (String, u32)>>,
     view: View,
     /// MapLibre map option `maxZoom` (default 22).
     max_zoom: f64,
+    /// MapLibre map option `crossSourceCollisions` (default true).
+    cross_source_collisions: bool,
 }
 
 fn tilejson_from(json: &J, overrides: &J) -> TileJson {
@@ -204,13 +210,17 @@ impl Renderer {
             sources.insert(id.clone(), Source { ty, json: src.clone(), data, tiles: HashMap::new() });
         }
         let sprites = sprite::Sprites::new(&json["sprite"], view.pixel_ratio);
+        let glyphs = symbol::glyphs::Glyphs::new(json["glyphs"].as_str());
         let mut r = Self {
             style: style::Style::parse(json),
             transform: Transform::new([0.0; 2], 0.0, 0.0, 1.0, 1.0, 1.0),
             sources,
             sprites,
+            glyphs,
+            glyph_urls: Default::default(),
             view,
             max_zoom: 22.0,
+            cross_source_collisions: true,
         };
         r.set_max_zoom(22.0);
         Ok(r)
@@ -222,6 +232,12 @@ impl Renderer {
         let v = self.view;
         let zoom = v.zoom.clamp(-2.0, max_zoom);
         self.transform = Transform::new(v.center, zoom, v.bearing, v.width as f64, v.height as f64, v.pixel_ratio);
+    }
+
+    /// MapLibre's `crossSourceCollisions` map option: when off, symbols only collide with
+    /// symbols of the same source.
+    pub fn set_cross_source_collisions(&mut self, enabled: bool) {
+        self.cross_source_collisions = enabled;
     }
 
     /// Sources referenced by layers visible at the current zoom.
@@ -326,13 +342,80 @@ impl Renderer {
                 _ => {}
             }
         }
+        let glyphs = self.glyph_needs();
+        out.extend(glyphs.iter().map(|(url, _)| url.clone()));
+        *self.glyph_urls.borrow_mut() = glyphs.into_iter().collect();
         out.into_iter().map(|url| Resource { url }).collect()
     }
 
-    /// Hand over fetched bytes for `url`. `None` means the host could not fetch it
-    /// (e.g. 404): a vector tile is then empty, a raster tile is replaced by an ancestor.
+    fn ctx(&self) -> render::Ctx<'_> {
+        render::Ctx { transform: &self.transform, global_state: &self.style.global_state, images: &self.sprites.images }
+    }
+
+    /// Glyph ranges still to fetch for the text of the loaded tiles. Text is only known once
+    /// its tiles are decoded, so this grows as tiles arrive.
+    fn glyph_needs(&self) -> Vec<(String, (String, u32))> {
+        if self.glyphs.url.is_none() {
+            return vec![];
+        }
+        let ctx = self.ctx();
+        let mut deps = BTreeSet::new();
+        let no_mask = render::raster::Mask { w: 0, bits: vec![] };
+        for layer in &self.style.layers {
+            if layer.ty != "symbol" || layer.is_hidden(self.transform.zoom, &self.style.global_state) {
+                continue;
+            }
+            let Some(src) = layer.source.as_deref().and_then(|s| self.sources.get(s)) else { continue };
+            let raw = self.style.layer_json(&layer.id);
+            for (rt, tl) in self.tile_layers(src) {
+                let Some(l) = self.source_layer(src, layer, tl.as_deref()) else { continue };
+                let tf = render::TileFeatures { tile: rt, mask: &no_mask, layer: l };
+                symbol::layout::glyph_dependencies(layer, &ctx, &tf, raw, &mut deps);
+            }
+        }
+        self.glyphs.needs(&deps)
+    }
+
+    /// Resolved tiles of a vector/GeoJSON source with their decoded layers (sliced when
+    /// overzoomed).
+    fn tile_layers(&self, src: &Source) -> Vec<(RenderTile, Option<Rc<Vec<mvt::Layer>>>)> {
+        self.resolve(src)
+            .0
+            .into_iter()
+            .map(|(rt, data_id)| {
+                let layers = match &src.data {
+                    Data::GeoJson(g) => Some(Rc::new(vec![g.tile(rt.canonical.z, rt.canonical.x, rt.canonical.y)])),
+                    Data::Tiled(_) => match src.tiles.get(&data_id).cloned().flatten() {
+                        Some(TileData::Vector(ls)) if data_id == rt.canonical => Some(ls),
+                        Some(TileData::Vector(ls)) => Some(Rc::new(ls.iter().map(|l| mvt::slice_layer(l, data_id, rt.canonical)).collect())),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                (rt, layers)
+            })
+            .collect()
+    }
+
+    /// The style layer's source layer within a tile.
+    fn source_layer<'a>(&self, src: &Source, layer: &style::Layer, layers: Option<&'a Vec<mvt::Layer>>) -> Option<&'a mvt::Layer> {
+        let ls = layers?;
+        match &src.data {
+            Data::GeoJson(_) => ls.first(),
+            _ => ls.iter().find(|l| Some(l.name.as_str()) == layer.source_layer.as_deref()),
+        }
+    }
+
+    /// Hand over fetched bytes for `url` (as returned by `needs()`). `None` means the host could
+    /// not fetch it (e.g. 404): a vector tile is then empty, a raster tile is replaced by an
+    /// ancestor, a glyph range leaves its glyphs missing.
     pub fn provide(&mut self, url: &str, bytes: Option<&[u8]>) {
         self.sprites.provide(url, bytes);
+        // Glyph ranges are recognized from the last `needs()` (evaluating text is costly).
+        let glyph_key = self.glyph_urls.borrow().get(url).cloned();
+        if let Some(key) = glyph_key {
+            self.glyphs.provide(key, bytes);
+        }
         let wanted: Vec<(String, BTreeSet<TileId>)> = self.sources.iter().map(|(id, s)| (id.clone(), self.resolve(s).1)).collect();
         for (id, fetch) in wanted {
             let src = self.sources.get_mut(&id).unwrap();
@@ -405,6 +488,50 @@ impl Renderer {
         let mut target = render::raster::Target::new(w, h);
         let ctx = render::Ctx { transform: t, global_state: &self.style.global_state, images: &self.sprites.images };
         let empty = mvt::Layer { name: String::new(), extent: 4096, features: vec![] };
+        // Symbols are laid out and placed for all layers before drawing (placement runs from
+        // the top layer down).
+        let no_mask = render::raster::Mask { w: 0, bits: vec![] };
+        // Layers with identical layout share one bucket (`groupByLayout`): it is laid out and
+        // placed once, for the first layer, and drawn by each with its own paint.
+        let mut symbol_layers: Vec<(&style::Layer, &serde_json::Value, Vec<symbol::layout::SymbolBucket>)> = Vec::new();
+        let mut leader_of: HashMap<&str, usize> = HashMap::new();
+        for layer in &self.style.layers {
+            if layer.ty != "symbol" || layer.is_hidden(t.zoom, &self.style.global_state) {
+                continue;
+            }
+            let Some(src) = layer.source.as_deref().and_then(|s| self.sources.get(s)) else { continue };
+            let raw = self.style.layer_json(&layer.id);
+            const REF: [&str; 7] = ["type", "source", "source-layer", "minzoom", "maxzoom", "filter", "layout"];
+            if let Some(i) = symbol_layers.iter().position(|(_, r, _)| REF.iter().all(|k| r.get(*k) == raw.get(*k))) {
+                leader_of.insert(&layer.id, i);
+                continue;
+            }
+            let builder = symbol::layout::Builder { layer, ctx: &ctx, glyphs: &self.glyphs, raw };
+            let mut buckets = Vec::new();
+            for (rt, tl) in self.tile_layers(src) {
+                let l = self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty);
+                buckets.push(builder.build(&render::TileFeatures { tile: rt, mask: &no_mask, layer: l }));
+            }
+            leader_of.insert(&layer.id, symbol_layers.len());
+            symbol_layers.push((layer, raw, buckets));
+        }
+        let mut groups: Vec<&str> = Vec::new();
+        let placement_input: Vec<symbol::placement::LayerBuckets> = symbol_layers
+            .iter()
+            .map(|(layer, raw, buckets)| {
+                let mut group = 0;
+                if !self.cross_source_collisions {
+                    let src = layer.source.as_deref().unwrap_or("");
+                    group = groups.iter().position(|g| *g == src).unwrap_or_else(|| {
+                        groups.push(src);
+                        groups.len() - 1
+                    }) as u32
+                        + 1;
+                }
+                symbol::placement::LayerBuckets { layer, raw, buckets, group }
+            })
+            .collect();
+        let placements = symbol::placement::place(&ctx, &placement_input);
         for layer in &self.style.layers {
             if layer.is_hidden(t.zoom, &self.style.global_state) {
                 continue;
@@ -412,6 +539,12 @@ impl Renderer {
             let raw = self.style.layer_json(&layer.id);
             if layer.ty == "background" {
                 render::draw_background(&mut target, layer, &ctx, raw);
+                continue;
+            }
+            if layer.ty == "symbol" {
+                if let Some(&i) = leader_of.get(layer.id.as_str()) {
+                    symbol::draw::draw_symbol_layer(&mut target, layer, &ctx, raw, &symbol_layers[i].2, &placements[i]);
+                }
                 continue;
             }
             if !matches!(layer.ty.as_str(), "fill" | "line" | "circle" | "raster") {
@@ -422,32 +555,13 @@ impl Renderer {
                 self.draw_raster(&mut target, layer, &ctx, src, w, h);
                 continue;
             }
-            let resolved = self.resolve(src).0;
-            let render_tiles: Vec<RenderTile> = resolved.iter().map(|r| r.0).collect();
+            let layers_by_tile = self.tile_layers(src);
+            let render_tiles: Vec<RenderTile> = layers_by_tile.iter().map(|r| r.0).collect();
             let masks = self.masks(&ctx, &render_tiles, w, h);
-            let mut layers_by_tile = Vec::new();
-            for (rt, data_id) in &resolved {
-                let tile_layer = match &src.data {
-                    Data::GeoJson(g) => Some(Rc::new(vec![g.tile(rt.canonical.z, rt.canonical.x, rt.canonical.y)])),
-                    Data::Tiled(_) => match src.tiles.get(data_id).cloned().flatten() {
-                        Some(TileData::Vector(ls)) if *data_id == rt.canonical => Some(ls),
-                        Some(TileData::Vector(ls)) => Some(Rc::new(ls.iter().map(|l| mvt::slice_layer(l, *data_id, rt.canonical)).collect())),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                layers_by_tile.push((*rt, tile_layer));
-            }
             let tiles: Vec<render::TileFeatures> = layers_by_tile
                 .iter()
                 .zip(&masks)
-                .map(|((rt, tl), mask)| {
-                    let l = tl.as_ref().and_then(|ls| match &src.data {
-                        Data::GeoJson(_) => ls.first(),
-                        _ => ls.iter().find(|l| Some(l.name.as_str()) == layer.source_layer.as_deref()),
-                    });
-                    render::TileFeatures { tile: *rt, mask, layer: l.unwrap_or(&empty) }
-                })
+                .map(|((rt, tl), mask)| render::TileFeatures { tile: *rt, mask, layer: self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty) })
                 .collect();
             // `*-layer-opacity`: the layer is drawn offscreen, then composited.
             let layer_opacity = layer.paint.get(&format!("{}-layer-opacity", layer.ty)).map(|p| {
