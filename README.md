@@ -26,8 +26,14 @@ import { MapRenderer } from './src/index';
 const renderer = await MapRenderer.init('/style.json', {
   cache: { ttlMs: 300_000, maxBytes: 64 * 1024 * 1024 },
   transformFillExtrusion: (layer) => ({
-    ...layer,
+    id: layer.id,
     type: 'fill',
+    source: layer.source,
+    'source-layer': layer['source-layer'],
+    minzoom: layer.minzoom,
+    maxzoom: layer.maxzoom,
+    filter: layer.filter,
+    layout: { visibility: layer.layout?.visibility },
     paint: { 'fill-color': '#888888' },
   }),
 });
@@ -51,7 +57,7 @@ canvas.getContext('2d')!.putImageData(
 - `MapRenderer.init(styleUrl, options?)`: Style JSON を取得し、WASM をロードします。相対 URL は現在のページを基準に解決します。
 - `options.cache.ttlMs`: 取得したタイル・sprite・グリフなどをメモリに保持する期間（ミリ秒）。既定は 5 分。`0` ならキャッシュせず、`Infinity` なら期限切れになりません。期限は取得完了から計測します。
 - `options.cache.maxBytes`: キャッシュするデータの合計上限（バイト）。既定は 64 MiB。上限に達すると最近使っていないデータから削除します。上限を超える単体のデータは保持しません。取得失敗はキャッシュしません。Style JSON と WASM はインスタンス内で再利用します。
-- `options.transformFillExtrusion`: Style JSON にある各 `fill-extrusion` レイヤを、対応する 2D レイヤ定義へ変換する関数です。`init()` 時に適用され、元のレイヤ ID などを使って置き換えられます。返り値には対応レイヤの `type` と `id` が必要です。
+- `options.transformFillExtrusion`: Style JSON にある各 `fill-extrusion` レイヤを、対応する 2D レイヤ定義へ変換する関数です。`init()` 時に適用され、元のレイヤ ID などを使って置き換えられます。引数の `FillExtrusionLayer` は公式 [`@maplibre/maplibre-gl-style-spec`](https://github.com/maplibre/maplibre-style-spec) の `FillExtrusionLayerSpecification`、返り値の `StyleLayer` は公式 `LayerSpecification` から `fill-extrusion` を除いた型です。レイヤ種別ごとの必須項目・paint・layout を型チェックします。型定義は取得した JSON の実行時検証を行うものではありません。
 - `renderer.render(view)`: 必要なタイル・画像・グリフを取得し、`Promise<RenderedImage>` を返します。同じインスタンスで異なる視点を繰り返し描画できます。
 - `view`: `center: [lng, lat]`、`zoom`、`width`、`height` は必須。`bearing`（時計回りの度数、既定 0）と `pixelRatio`（既定 1）は省略できます。幅・高さは CSS ピクセル単位です。
 - `view.margin`: 四辺に追加する描画余白（CSS ピクセル単位の非負整数、既定 0）。余白までタイル取得・symbol の衝突判定・描画を行い、中央の指定サイズを返します。出力サイズ・中心・ズームは変わりません。タイル境界の外側にアンカーを持つ symbol の欠落を軽減できますが、タイルごとの衝突判定の一致を保証するものではありません。余白を増やすほど取得量・描画時間・メモリ使用量も増えます。デモでは `64` CSS ピクセルを指定しています。大きな symbol には、より広い余白が必要になる場合があります。
@@ -81,7 +87,7 @@ flowchart LR
 
 ```sh
 pnpm test              # Rust の単体テスト
-pnpm typecheck         # ブラウザサンプルの型チェック
+pnpm typecheck         # JavaScript API・型の回帰テスト・ブラウザサンプルの型チェック
 pnpm fixtures          # 上流のテストデータを取得（初回）
 pnpm test:render       # MapLibre GL JS の render テスト
 pnpm test:expression   # Style Spec の式テスト

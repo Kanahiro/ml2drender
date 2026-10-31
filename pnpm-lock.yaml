@@ -164,7 +164,14 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    devDependencies:
+      '@maplibre/maplibre-gl-style-spec':
+        specifier: 26.4.4
+        version: 26.4.4
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
 
   examples/browser:
     dependencies:

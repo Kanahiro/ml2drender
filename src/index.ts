@@ -1,3 +1,4 @@
+import type { FillExtrusionLayerSpecification, LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
 import wasmUrl from '../target/wasm32-unknown-unknown/release/ml2drender_wasm.wasm?url';
 
 export interface View {
@@ -18,13 +19,10 @@ export interface RenderedImage {
   data: Uint8ClampedArray;
 }
 
-export interface StyleLayer {
-  id: string;
-  type: string;
-  [property: string]: unknown;
-}
+/** Style Spec layers supported by the 2D renderer. */
+export type StyleLayer = Exclude<LayerSpecification, FillExtrusionLayerSpecification>;
 
-export type FillExtrusionLayer = StyleLayer & { type: 'fill-extrusion' };
+export type FillExtrusionLayer = FillExtrusionLayerSpecification;
 
 export interface InitOptions {
   /** Resource cache. ttlMs = 0 disables it; Infinity never expires. Defaults: 5 minutes, 64 MiB. */
@@ -50,7 +48,9 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
-const SUPPORTED_LAYERS = new Set(['background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap']);
+const SUPPORTED_LAYERS = new Set<string>([
+  'background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap',
+] satisfies StyleLayer['type'][]);
 
 function nonnegative(value: number, name: string): number {
   if (!Number.isFinite(value) || value < 0) throw new RangeError(`${name} must be a finite, non-negative number`);

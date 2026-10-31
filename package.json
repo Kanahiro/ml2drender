@@ -14,6 +14,13 @@
     "test:render": "cargo run --release -p ml2drender-cli -- render-tests",
     "test:expression": "cargo run --release -p ml2drender-cli -- expression-tests",
     "demo": "pnpm build:wasm && pnpm --filter demo-browser dev",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "tsc --noEmit && pnpm -r typecheck"
+  },
+  "peerDependencies": {
+    "@maplibre/maplibre-gl-style-spec": "^26.4.4"
+  },
+  "devDependencies": {
+    "@maplibre/maplibre-gl-style-spec": "26.4.4",
+    "typescript": "7.0.2"
   }
 }
