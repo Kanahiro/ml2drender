@@ -1,0 +1,19 @@
+{
+  "name": "mlrender",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.15.0",
+  "engines": {
+    "node": ">=26.12.1"
+  },
+  "scripts": {
+    "fixtures": "sh scripts/fetch-fixtures.sh",
+    "build": "cargo build --release",
+    "build:wasm": "cargo build -p mlrender-wasm --target wasm32-unknown-unknown --release",
+    "test": "cargo test --release",
+    "test:render": "cargo run --release -p mlrender-cli -- render-tests",
+    "test:expression": "cargo run --release -p mlrender-cli -- expression-tests",
+    "demo": "pnpm build:wasm && pnpm --filter demo-browser dev",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

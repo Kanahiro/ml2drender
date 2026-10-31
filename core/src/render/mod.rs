@@ -1,0 +1,434 @@
+//! Layer drawing: background, fill, line, circle, emulating MapLibre's buckets and shaders.
+
+mod line;
+mod pattern;
+pub mod raster;
+pub mod raster_layer;
+
+use crate::expression::{self as ex, CanonicalTileId, Object, Value};
+use crate::mvt::{self, GeomType};
+use crate::style::{Layer, PropValue};
+use crate::tile::{RenderTile, Transform};
+use raster::{Mask, Rgba, Target};
+use std::rc::Rc;
+
+pub const EXTENT: f64 = 8192.0;
+
+pub struct Ctx<'a> {
+    pub transform: &'a Transform,
+    pub global_state: &'a Rc<Object>,
+    pub images: &'a std::collections::HashMap<String, Rc<crate::sprite::StyleImage>>,
+}
+
+/// A tile's features for one style layer, with its clip mask.
+pub struct TileFeatures<'a> {
+    pub tile: RenderTile,
+    pub mask: &'a Mask,
+    pub layer: &'a mvt::Layer,
+}
+
+/// A feature ready for bucket building: geometry in EXTENT (8192) units.
+pub struct BucketFeature {
+    pub feature: ex::Feature,
+    pub ty: GeomType,
+    pub geometry: Vec<Vec<[f64; 2]>>,
+    pub sort_key: f64,
+}
+
+impl Ctx<'_> {
+    pub fn tile_px(&self, tile: &RenderTile) -> f64 {
+        self.transform.world_size / (1u64 << tile.canonical.z) as f64
+    }
+
+    /// World CSS-pixel origin of a tile.
+    pub fn tile_origin(&self, tile: &RenderTile) -> [f64; 2] {
+        let s = self.tile_px(tile);
+        [tile.canonical.x as f64 * s + tile.wrap as f64 * self.transform.world_size, tile.canonical.y as f64 * s]
+    }
+
+    /// Tile units (EXTENT) → world CSS pixels.
+    pub fn tile_to_world(&self, tile: &RenderTile) -> impl Fn([f64; 2]) -> [f64; 2] + use<> {
+        let o = self.tile_origin(tile);
+        let s = self.tile_px(tile) / EXTENT;
+        move |p| [o[0] + p[0] * s, o[1] + p[1] * s]
+    }
+
+    pub fn tile_mask(&self, tile: &RenderTile, w: usize, h: usize) -> Mask {
+        let f = self.tile_to_world(tile);
+        let q = [[0.0, 0.0], [EXTENT, 0.0], [EXTENT, EXTENT], [0.0, EXTENT]].map(|p| self.transform.world_to_screen(f(p)));
+        Mask::from_quad(w, h, q)
+    }
+
+    pub fn canonical(tile: &RenderTile) -> CanonicalTileId {
+        CanonicalTileId { z: tile.canonical.z, x: tile.canonical.x, y: tile.canonical.y }
+    }
+
+    /// Filter and prepare a tile layer's features (MapLibre `populate`): geometry scaled to
+    /// EXTENT, filter evaluated at the tile's zoom, sorted by `sort_key_prop` if set.
+    pub fn bucket_features(&self, layer: &Layer, tf: &TileFeatures, sort_key_prop: Option<&str>) -> Vec<BucketFeature> {
+        let zoom = tf.tile.overscaled_z as f64;
+        let scale = EXTENT / tf.layer.extent as f64;
+        let canonical = Some(Self::canonical(&tf.tile));
+        let mut out = Vec::new();
+        for f in &tf.layer.features {
+            let geometry: Vec<Vec<[f64; 2]>> =
+                f.geometry.iter().map(|l| l.iter().map(|p| [(p[0] as f64 * scale).round(), (p[1] as f64 * scale).round()]).collect()).collect();
+            let feature = ex::Feature {
+                id: f.id.clone(),
+                geom_type: Some(f.ty.name()),
+                properties: f.properties.clone(),
+                geometry: layer.needs_geometry.then(|| geometry.clone()),
+            };
+            if let Some(filter) = &layer.filter {
+                let mut ctx = ex::EvalCtx {
+                    globals: ex::Globals { zoom, global_state: Some(self.global_state.clone()), ..Default::default() },
+                    feature: Some(&feature),
+                    canonical,
+                    ..Default::default()
+                };
+                if !filter.evaluate(&mut ctx).truthy() {
+                    continue;
+                }
+            }
+            let sort_key = match sort_key_prop.map(|p| layer.layout(p)) {
+                Some(p) if !p.is_constant() => num(&p.eval(zoom, Some(&feature), canonical, self.global_state)),
+                _ => 0.0,
+            };
+            out.push(BucketFeature { feature, ty: f.ty, geometry, sort_key });
+        }
+        if sort_key_prop.is_some_and(|p| !layer.layout(p).is_constant()) {
+            out.sort_by(|a, b| a.sort_key.partial_cmp(&b.sort_key).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        out
+    }
+
+    /// Evaluate a paint property for a feature at the current zoom.
+    pub fn paint(&self, layer: &Layer, name: &str, f: Option<&BucketFeature>, tile: &RenderTile) -> Value {
+        self.eval(layer.paint(name), f, tile, self.transform.zoom)
+    }
+
+    pub fn layout(&self, layer: &Layer, name: &str, f: Option<&BucketFeature>, tile: &RenderTile) -> Value {
+        self.eval(layer.layout(name), f, tile, tile.overscaled_z as f64)
+    }
+
+    fn eval(&self, p: &PropValue, f: Option<&BucketFeature>, tile: &RenderTile, zoom: f64) -> Value {
+        p.eval(zoom, f.map(|f| &f.feature), Some(Self::canonical(tile)), self.global_state)
+    }
+
+    /// `translatePosition` as a world-space (CSS px) offset.
+    pub fn translate(&self, layer: &Layer, prefix: &str, tile: &RenderTile) -> [f64; 2] {
+        let t = num2(&self.paint(layer, &format!("{prefix}-translate"), None, tile));
+        let anchor = self.paint(layer, &format!("{prefix}-translate-anchor"), None, tile);
+        if anchor.as_str() == Some("viewport") {
+            // Screen-aligned: undo the map rotation.
+            let a = -self.transform.bearing_rad;
+            let (s, c) = a.sin_cos();
+            [t[0] * c - t[1] * s, t[0] * s + t[1] * c]
+        } else {
+            t
+        }
+    }
+}
+
+pub fn num(v: &Value) -> f64 {
+    v.as_f64().unwrap_or(0.0)
+}
+
+pub fn num2(v: &Value) -> [f64; 2] {
+    match v {
+        Value::Array(a) if a.len() >= 2 => [num(&a[0]), num(&a[1])],
+        _ => [0.0, 0.0],
+    }
+}
+
+/// Premultiplied color times opacity.
+pub fn color(v: &Value, opacity: f64) -> Rgba {
+    match v {
+        Value::Color(c) => [(c.r * opacity) as f32, (c.g * opacity) as f32, (c.b * opacity) as f32, (c.a * opacity) as f32],
+        _ => [0.0; 4],
+    }
+}
+
+pub fn draw_background(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serde_json::Value) {
+    let tile = dummy_tile();
+    let opacity = num(&ctx.paint(layer, "background-opacity", None, &tile));
+    if opacity == 0.0 {
+        return;
+    }
+    let t = ctx.transform;
+    // A set pattern is cross-faded (evaluated at the integer zoom); with no resolvable image
+    // MapLibre skips the layer.
+    let image = if raw["paint"].get("background-pattern").is_some() {
+        let v = layer.paint("background-pattern").eval(t.zoom.floor(), None, None, ctx.global_state);
+        match pattern::image_name(&v).and_then(|n| ctx.images.get(&n)) {
+            Some(img) => Some(img),
+            None => return,
+        }
+    } else {
+        None
+    };
+    let Some(img) = image else {
+        let c = color(&ctx.paint(layer, "background-color", None, &tile), opacity);
+        // Drawn over the covering tiles, i.e. only within the world's vertical extent.
+        for y in 0..target.h {
+            for x in 0..target.w {
+                let wy = t.screen_to_world([x as f64 + 0.5, y as f64 + 0.5])[1];
+                if (0.0..t.world_size).contains(&wy) {
+                    target.blend(y * target.w + x, c);
+                }
+            }
+        }
+        return;
+    };
+    // Pattern: one quad per covering tile at the integer zoom.
+    let size = pattern::display_size(img);
+    let z = t.zoom.floor().max(0.0) as i32;
+    for (x, y, wrap) in t.covering_tiles(z) {
+        let rt = RenderTile { overscaled_z: z as u8, wrap, canonical: crate::tile::TileId { z: z as u8, x: x as u32, y: y as u32 } };
+        let tp = pattern::TilePattern::new(ctx, &rt);
+        let to_world = ctx.tile_to_world(&rt);
+        let corners = [[0.0, 0.0], [EXTENT, 0.0], [0.0, EXTENT], [EXTENT, EXTENT]];
+        let screen = corners.map(|p| t.world_to_screen(to_world(p)));
+        let vary = corners.map(|p| tp.pattern_pos(size, p));
+        for tri in [[1, 0, 2], [1, 2, 3]] {
+            raster::triangle(target, None, tri.map(|i| screen[i]), tri.map(|i| vary[i]), &mut |v: &[f32; 2]| {
+                Some(pattern::sample_fill(img, *v).map(|c| c * opacity as f32))
+            });
+        }
+    }
+}
+
+/// How a fill feature is painted: plain color, or an image pattern (optionally SDF, tinted
+/// with the fill color).
+enum FillPaint<'a> {
+    Color(Rgba),
+    Pattern { img: &'a crate::sprite::StyleImage, tint: Rgba, opacity: f32 },
+}
+
+impl FillPaint<'_> {
+    /// Fragment color for pattern position `v` with screen gradients `g` (for `fwidth`).
+    fn shade(&self, v: [f32; 2], g: &[[f32; 2]; 2]) -> Rgba {
+        match self {
+            FillPaint::Color(c) => *c,
+            FillPaint::Pattern { img, tint, opacity } => {
+                let c = pattern::sample_fill(img, v);
+                if img.sdf {
+                    let a = |d: [f32; 2]| pattern::sample_fill(img, [v[0] + d[0], v[1] + d[1]])[3];
+                    let fwidth = (a(g[0]) - c[3]).abs() + (a(g[1]) - c[3]).abs();
+                    let edge = (256.0 - 64.0) / 256.0;
+                    let gamma = (fwidth * 0.5).max(1.0 / 255.0 / 16.0);
+                    let alpha = raster::smoothstep(edge - gamma, edge + gamma, c[3]);
+                    tint.map(|k| k * alpha * opacity)
+                } else {
+                    c.map(|k| k * opacity)
+                }
+            }
+        }
+    }
+}
+
+pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeatures], raw: &serde_json::Value) {
+    let has_outline_color = raw["paint"].get("fill-outline-color").is_some();
+    let has_pattern = raw["paint"].get("fill-pattern").is_some();
+    let constant_opaque = !has_pattern
+        && layer.paint("fill-color").is_constant()
+        && layer.paint("fill-opacity").is_constant()
+        && matches!(ctx.paint(layer, "fill-color", None, &tiles.first().map_or(dummy_tile(), |t| t.tile)), Value::Color(c) if c.a == 1.0)
+        && tiles.first().is_some_and(|t| num(&ctx.paint(layer, "fill-opacity", None, &t.tile)) == 1.0);
+    let antialias = tiles.first().is_some_and(|t| ctx.paint(layer, "fill-antialias", None, &t.tile).truthy());
+    let pattern_prop = layer.paint("fill-pattern");
+    let mut prepared = Vec::new();
+    for tf in tiles {
+        let features = ctx.bucket_features(layer, tf, Some("fill-sort-key"));
+        let to_world = ctx.tile_to_world(&tf.tile);
+        let tr = ctx.translate(layer, "fill", &tf.tile);
+        let to_screen = |p: [f64; 2]| {
+            let w = to_world(p);
+            ctx.transform.world_to_screen([w[0] + tr[0], w[1] + tr[1]])
+        };
+        let tp = pattern::TilePattern::new(ctx, &tf.tile);
+        // Pixels covered by opaque fills, standing in for the depth buffer.
+        let mut covered = vec![false; if constant_opaque { target.w * target.h } else { 0 }];
+        let mut outlines = Vec::new();
+        for f in features.iter().filter(|f| f.ty == GeomType::Polygon) {
+            let opacity = num(&ctx.paint(layer, "fill-opacity", Some(f), &tf.tile));
+            let fill_color = color(&ctx.paint(layer, "fill-color", Some(f), &tf.tile), opacity);
+            let paint = if has_pattern {
+                // Cross-faded "to" image: the integer zoom, or the tile zoom when data-driven.
+                let v = if pattern_prop.is_feature_constant() {
+                    pattern_prop.eval(ctx.transform.zoom.floor(), None, Some(Ctx::canonical(&tf.tile)), ctx.global_state)
+                } else {
+                    pattern_prop.eval(tf.tile.overscaled_z as f64, Some(&f.feature), Some(Ctx::canonical(&tf.tile)), ctx.global_state)
+                };
+                let Some(img) = pattern::image_name(&v).and_then(|n| ctx.images.get(&n)) else { continue };
+                FillPaint::Pattern { img, tint: color(&ctx.paint(layer, "fill-color", Some(f), &tf.tile), 1.0), opacity: opacity as f32 }
+            } else {
+                FillPaint::Color(fill_color)
+            };
+            let size = match &paint {
+                FillPaint::Pattern { img, .. } => pattern::display_size(img),
+                FillPaint::Color(_) => [1.0, 1.0],
+            };
+            let outline_paint = if has_outline_color {
+                FillPaint::Color(color(&ctx.paint(layer, "fill-outline-color", Some(f), &tf.tile), opacity))
+            } else {
+                match &paint {
+                    FillPaint::Color(c) => FillPaint::Color(*c),
+                    FillPaint::Pattern { img, tint, opacity } => FillPaint::Pattern { img, tint: *tint, opacity: *opacity },
+                }
+            };
+            for polygon in classify_rings(&f.geometry, 500) {
+                let mut flat = Vec::new();
+                let mut holes = Vec::new();
+                for (i, ring) in polygon.iter().enumerate() {
+                    if i > 0 {
+                        holes.push(flat.len() / 2);
+                    }
+                    for p in ring {
+                        flat.push(p[0]);
+                        flat.push(p[1]);
+                    }
+                }
+                let tile_pts: Vec<[f64; 2]> = flat.chunks(2).map(|p| [p[0], p[1]]).collect();
+                let screen: Vec<[f64; 2]> = tile_pts.iter().map(|p| to_screen(*p)).collect();
+                let vary: Vec<[f32; 2]> = tile_pts.iter().map(|p| tp.pattern_pos(size, *p)).collect();
+                if opacity >= 0.01 {
+                    let tris = earcutr::earcut(&flat, &holes, 2).unwrap_or_default();
+                    for t in tris.chunks_exact(3) {
+                        let p = [screen[t[0]], screen[t[1]], screen[t[2]]];
+                        let v = [vary[t[0]], vary[t[1]], vary[t[2]]];
+                        let g = raster::varying_gradients(p, v);
+                        let w = target.w;
+                        raster::triangle(target, Some(tf.mask), p, v, &mut |v: &[f32; 2]| Some(paint.shade(*v, &g)));
+                        if constant_opaque {
+                            raster::for_each_pixel(target.w, target.h, p, |x, y, _| {
+                                if tf.mask.get(x, y) {
+                                    covered[y * w + x] = true;
+                                }
+                            });
+                        }
+                    }
+                }
+                if antialias && opacity >= 0.01 {
+                    let mut start = 0;
+                    for ring in &polygon {
+                        for i in 1..ring.len() {
+                            let (a, b) = (start + i - 1, start + i);
+                            outlines.push((screen[a], screen[b], vary[a], vary[b], clone_paint(&outline_paint)));
+                        }
+                        start += ring.len();
+                    }
+                }
+            }
+        }
+        prepared.push((tf, outlines, covered));
+    }
+    // Outlines are drawn after all fills (MapLibre's separate outline pass).
+    for (tf, outlines, covered) in prepared {
+        let w = target.w;
+        for (a, b, va, vb, paint) in outlines {
+            let skip = |x: usize, y: usize| !has_outline_color && constant_opaque && covered[y * w + x];
+            let none = [[0.0; 2]; 2];
+            raster::line(target, &|x, y| tf.mask.get(x, y) && !skip(x, y), a, b, &mut |dist, t| {
+                let alpha = 1.0 - raster::smoothstep(0.0, 1.0, dist as f32);
+                let t = t as f32;
+                let v = [va[0] + (vb[0] - va[0]) * t, va[1] + (vb[1] - va[1]) * t];
+                Some(paint.shade(v, &none).map(|c| c * alpha))
+            });
+        }
+    }
+}
+
+fn clone_paint<'a>(p: &FillPaint<'a>) -> FillPaint<'a> {
+    match p {
+        FillPaint::Color(c) => FillPaint::Color(*c),
+        FillPaint::Pattern { img, tint, opacity } => FillPaint::Pattern { img, tint: *tint, opacity: *opacity },
+    }
+}
+
+pub(crate) fn dummy_tile() -> RenderTile {
+    RenderTile { overscaled_z: 0, wrap: 0, canonical: crate::tile::TileId { z: 0, x: 0, y: 0 } }
+}
+
+pub use line::draw_line;
+
+pub fn draw_circle(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeatures]) {
+    let dpr = ctx.transform.pixel_ratio;
+    for tf in tiles {
+        let features = ctx.bucket_features(layer, tf, Some("circle-sort-key"));
+        let to_world = ctx.tile_to_world(&tf.tile);
+        let tr = ctx.translate(layer, "circle", &tf.tile);
+        for f in &features {
+            let p = |name: &str| ctx.paint(layer, name, Some(f), &tf.tile);
+            let radius = num(&p("circle-radius")) as f32;
+            let blur = num(&p("circle-blur")) as f32;
+            let opacity = num(&p("circle-opacity"));
+            let stroke_width = num(&p("circle-stroke-width")) as f32;
+            let fill = color(&p("circle-color"), opacity);
+            let stroke = color(&p("circle-stroke-color"), num(&p("circle-stroke-opacity")));
+            let size = (radius + stroke_width) as f64 * dpr;
+            let aa_blur = -(1.0 / dpr as f32 / (radius + stroke_width)).max(blur);
+            for pt in f.geometry.iter().flatten() {
+                if pt[0] < 0.0 || pt[0] >= EXTENT || pt[1] < 0.0 || pt[1] >= EXTENT {
+                    continue;
+                }
+                let w = to_world(*pt);
+                let c = ctx.transform.world_to_screen([w[0] + tr[0], w[1] + tr[1]]);
+                let q = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+                let pos = q.map(|e| [c[0] + e[0] * size, c[1] + e[1] * size]);
+                let v = q.map(|e| [e[0] as f32, e[1] as f32]);
+                let mut shade = |e: &[f32; 2]| {
+                    let len = (e[0] * e[0] + e[1] * e[1]).sqrt();
+                    let opacity_t = raster::smoothstep(0.0, aa_blur, len - 1.0);
+                    let color_t = if stroke_width < 0.01 { 0.0 } else { raster::smoothstep(aa_blur, 0.0, len - radius / (radius + stroke_width)) };
+                    let c: Rgba = std::array::from_fn(|k| opacity_t * (fill[k] + (stroke[k] - fill[k]) * color_t));
+                    (c.iter().any(|&x| x >= 0.5 / 255.0)).then_some(c)
+                };
+                raster::triangle(target, None, [pos[0], pos[1], pos[2]], [v[0], v[1], v[2]], &mut shade);
+                raster::triangle(target, None, [pos[0], pos[2], pos[3]], [v[0], v[2], v[3]], &mut shade);
+            }
+        }
+    }
+}
+
+fn signed_area(ring: &[[f64; 2]]) -> f64 {
+    let mut sum = 0.0;
+    let len = ring.len();
+    for i in 0..len {
+        let j = if i == 0 { len - 1 } else { i - 1 };
+        sum += (ring[j][0] - ring[i][0]) * (ring[i][1] + ring[j][1]);
+    }
+    sum
+}
+
+/// Group rings into polygons by winding (first ring's winding = outer), keeping at most
+/// `max_rings` rings per polygon (largest holes first), like MapLibre's `classifyRings`.
+pub fn classify_rings(rings: &[Vec<[f64; 2]>], max_rings: usize) -> Vec<Vec<Vec<[f64; 2]>>> {
+    if rings.len() <= 1 {
+        return vec![rings.to_vec()];
+    }
+    let mut polygons: Vec<Vec<(f64, Vec<[f64; 2]>)>> = Vec::new();
+    let mut ccw: Option<bool> = None;
+    for ring in rings {
+        let area = signed_area(ring);
+        if area == 0.0 {
+            continue;
+        }
+        let ccw = *ccw.get_or_insert(area < 0.0);
+        if ccw == (area < 0.0) || polygons.is_empty() {
+            polygons.push(vec![(area.abs(), ring.clone())]);
+        } else {
+            polygons.last_mut().unwrap().push((area.abs(), ring.clone()));
+        }
+    }
+    polygons
+        .into_iter()
+        .map(|mut p| {
+            if max_rings > 1 && p.len() > max_rings {
+                p[1..].sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                p.truncate(max_rings);
+            }
+            p.into_iter().map(|(_, r)| r).collect()
+        })
+        .collect()
+}
