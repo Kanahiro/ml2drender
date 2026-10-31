@@ -435,7 +435,7 @@ impl Renderer {
         }
         let ctx = self.ctx();
         let mut deps = BTreeSet::new();
-        let no_mask = render::raster::Mask { w: 0, bits: vec![] };
+        let no_mask = render::raster::Mask::empty();
         for layer in &self.style.layers {
             if layer.ty != "symbol" || layer.is_hidden(self.transform.zoom, &self.style.global_state) {
                 continue;
@@ -559,7 +559,7 @@ impl Renderer {
         let empty = mvt::Layer { name: String::new(), extent: 4096, features: vec![] };
         // Symbols are laid out and placed for all layers before drawing (placement runs from
         // the top layer down).
-        let no_mask = render::raster::Mask { w: 0, bits: vec![] };
+        let no_mask = render::raster::Mask::empty();
         // Layers with identical layout share one bucket (`groupByLayout`): it is laid out and
         // placed once, for the first layer, and drawn by each with its own paint.
         let mut symbol_layers: Vec<(&style::Layer, &serde_json::Value, Vec<symbol::layout::SymbolBucket>)> = Vec::new();

@@ -81,12 +81,10 @@ impl<'a> Ctx<'a> {
         }
         let quads: Vec<Mask> = tiles.iter().map(|t| self.tile_mask(t, w, h)).collect();
         let masks = Rc::new(tiles.iter().enumerate().map(|(i, t)| {
-            let mut m = Mask { w, bits: quads[i].bits.clone() };
+            let mut m = quads[i].clone();
             for (j, u) in tiles.iter().enumerate() {
                 if u.canonical.z > t.canonical.z && u.wrap == t.wrap && u.canonical.parent_at(t.canonical.z) == t.canonical {
-                    for (b, &o) in m.bits.iter_mut().zip(&quads[j].bits) {
-                        *b = *b && !o;
-                    }
+                    m.subtract(&quads[j]);
                 }
             }
             m
@@ -502,13 +500,18 @@ mod tests {
         assert!(!family[1].get(8, 8));
 
         let reversed = ctx.masks(&[child, parent], 32, 32);
-        assert_eq!(reversed[0].bits, family[1].bits);
-        assert_eq!(reversed[1].bits, family[0].bits);
+        for y in 0..32 {
+            for x in 0..32 {
+                assert_eq!(reversed[0].get(x, y), family[1].get(x, y));
+                assert_eq!(reversed[1].get(x, y), family[0].get(x, y));
+            }
+        }
         let wrapped = ctx.masks(&[parent, RenderTile { wrap: 1, ..child }], 32, 32);
         assert!(wrapped[0].get(24, 24));
         assert!(!wrapped[1].get(24, 24));
         let larger = ctx.masks(&[parent, child], 64, 32);
-        assert_eq!(larger[0].bits.len(), 64 * 32);
+        assert!(!larger[0].get(63, 24));
+        assert!(larger[1].get(63, 24));
         assert!(!Rc::ptr_eq(&family, &larger));
     }
 

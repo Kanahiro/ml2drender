@@ -54,23 +54,75 @@ impl Target {
 }
 
 /// Pixel coverage mask (like the stencil clip of a tile).
+#[derive(Clone)]
 pub struct Mask {
-    pub w: usize,
-    pub bits: Vec<bool>,
+    w: usize,
+    h: usize,
+    coverage: Coverage,
+}
+
+#[derive(Clone)]
+enum Coverage {
+    Rectangle { x: [usize; 2], y: [usize; 2] },
+    Pixels(Vec<bool>),
 }
 
 impl Mask {
-    #[inline]
-    pub fn get(&self, x: usize, y: usize) -> bool {
-        self.bits[y * self.w + x]
+    pub fn empty() -> Mask {
+        Mask { w: 0, h: 0, coverage: Coverage::Rectangle { x: [0, 0], y: [0, 0] } }
     }
 
+    #[inline]
+    pub fn get(&self, x: usize, y: usize) -> bool {
+        match &self.coverage {
+            Coverage::Rectangle { x: xs, y: ys } => x >= xs[0] && x < xs[1] && y >= ys[0] && y < ys[1],
+            Coverage::Pixels(bits) => bits[y * self.w + x],
+        }
+    }
+
+    pub fn subtract(&mut self, other: &Mask) {
+        if let Coverage::Rectangle { x, y } = self.coverage {
+            let mut bits = vec![false; self.w * self.h];
+            for row in y[0]..y[1] {
+                bits[row * self.w + x[0]..row * self.w + x[1]].fill(true);
+            }
+            self.coverage = Coverage::Pixels(bits);
+        }
+        let Coverage::Pixels(bits) = &mut self.coverage else { unreachable!() };
+        match &other.coverage {
+            Coverage::Rectangle { x, y } => {
+                for row in y[0]..y[1] {
+                    bits[row * self.w + x[0]..row * self.w + x[1]].fill(false);
+                }
+            }
+            Coverage::Pixels(other) => {
+                for (b, &o) in bits.iter_mut().zip(other) {
+                    *b = *b && !o;
+                }
+            }
+        }
+    }
+
+    /// Coverage of a straight-edged screen-space quad. Geographic projection and any
+    /// tessellation of curved boundaries belong before this operation.
     pub fn from_quad(w: usize, h: usize, q: [[f64; 2]; 4]) -> Mask {
+        // Decide from screen geometry, never from the geographic projection
+        // or camera bearing. Rotated/warped quads keep the general coverage path.
+        let area = (q[1][0] - q[0][0]) * (q[3][1] - q[0][1]);
+        if area != 0.0 && area.is_finite() && q.iter().flatten().all(|v| v.is_finite())
+            && q[0][1] == q[1][1] && q[2][1] == q[3][1] && q[0][0] == q[3][0] && q[1][0] == q[2][0] {
+            let (left, right) = (q[0][0].min(q[1][0]), q[0][0].max(q[1][0]));
+            let (top, bottom) = (q[0][1].min(q[3][1]), q[0][1].max(q[3][1]));
+            // GL includes the left and bottom boundaries, excludes the right and top.
+            let x = [(left - 0.5).ceil().max(0.0).min(w as f64) as usize, (right - 0.5).ceil().max(0.0).min(w as f64) as usize];
+            let y = [((top - 0.5).floor() + 1.0).max(0.0).min(h as f64) as usize, ((bottom - 0.5).floor() + 1.0).max(0.0).min(h as f64) as usize];
+            return Mask { w, h, coverage: Coverage::Rectangle { x, y } };
+        }
         let mut bits = vec![false; w * h];
         for tri in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
             for_each_pixel(w, h, tri, |x, y, _| bits[y * w + x] = true);
         }
-        Mask { w, bits }
+        Mask { w, h, coverage: Coverage::Pixels(bits) }
     }
 }
 
@@ -298,6 +350,49 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn compact_masks_preserve_quad_coverage_and_subtracted_holes() {
+        let (w, h) = (64, 32);
+        let coverage = |q: [[f64; 2]; 4]| {
+            let a = reference_pixels(w, h, [q[0], q[1], q[2]]);
+            let b = reference_pixels(w, h, [q[0], q[2], q[3]]);
+            a.iter().zip(b).map(|(a, b)| a.is_some() || b.is_some()).collect::<Vec<_>>()
+        };
+        let quads = [
+            [[0.5, 0.5], [16.5, 0.5], [16.5, 16.5], [0.5, 16.5]],
+            [[65.25, 33.75], [-5.5, 33.75], [-5.5, -5.5], [65.25, -5.5]],
+            [[-10.2, 4.4], [40.3, -20.1], [80.9, 30.7], [25.7, 60.2]],
+            [[20.5, -5.0], [20.5, -5.0], [20.5, 40.0], [20.5, 40.0]],
+        ];
+        for q in quads {
+            let mask = Mask::from_quad(w, h, q);
+            let expected = coverage(q);
+            for y in 0..h {
+                for x in 0..w {
+                    assert_eq!(mask.get(x, y), expected[y * w + x], "quad {q:?}, {x},{y}");
+                }
+            }
+        }
+        let base = [[-1.0, -1.0], [65.0, -1.0], [65.0, 33.0], [-1.0, 33.0]];
+        let holes = [
+            [[16.5, 8.5], [48.5, 8.5], [48.5, 24.5], [16.5, 24.5]],
+            quads[2],
+        ];
+        let mut mask = Mask::from_quad(w, h, base);
+        let mut expected = coverage(base);
+        for q in holes {
+            mask.subtract(&Mask::from_quad(w, h, q));
+            for (b, hole) in expected.iter_mut().zip(coverage(q)) {
+                *b &= !hole;
+            }
+            for y in 0..h {
+                for x in 0..w {
+                    assert_eq!(mask.get(x, y), expected[y * w + x]);
+                }
+            }
+        }
     }
 
     #[test]
