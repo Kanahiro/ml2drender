@@ -57,6 +57,7 @@ canvas.getContext('2d')!.putImageData(
 ```
 
 - `MapRenderer.init(styleUrl, options?)`: Style JSON を取得し、WASM をロードします。相対 URL は現在のページを基準に解決します。
+- `options.loadResource`: Style JSON・タイル・sprite・glyph・既定の Wasm を取得する `(url: string) => Promise<Uint8Array<ArrayBuffer> | null>`。既定は HTTP fetch です。HTTP 404 は欠落リソース（`null`）として描画を続行します。それ以外の HTTP エラーや通信・本文読み取りの失敗は例外になります。空タイルを表す HTTP 204 は成功として扱います。Style JSON と Wasm は必須のため、欠落時も初期化に失敗します。ホスト側の同時数制限・再試行・タイムアウトを実装する場合に指定できます。
 - `options.wasm`: コンパイル済みの `WebAssembly.Module`。指定時はWASMのfetch・実行時コンパイルを行わず、モジュールから専用インスタンスを生成します。Cloudflare Workersでは必須です。`styleUrl` はページがない環境では絶対URLを指定してください。
 - `options.cache.ttlMs`: 取得したタイル・sprite・グリフなどをメモリに保持する期間（ミリ秒）。既定は 5 分。`0` ならキャッシュせず、`Infinity` なら期限切れになりません。期限は取得完了から計測します。
 - `options.cache.maxBytes`: キャッシュするデータの合計上限（バイト）。既定は 64 MiB。上限に達すると最近使っていないデータから削除します。上限を超える単体のデータは保持しません。取得失敗はキャッシュしません。Style JSON と WASM はインスタンス内で再利用します。

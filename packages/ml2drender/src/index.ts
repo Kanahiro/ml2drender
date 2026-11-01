@@ -24,6 +24,8 @@ export type StyleLayer = Exclude<LayerSpecification, FillExtrusionLayerSpecifica
 export type FillExtrusionLayer = FillExtrusionLayerSpecification;
 
 export interface InitOptions {
+  /** Load complete resource bytes, or null for a missing resource (HTTP 404). Other failures must reject. */
+  loadResource?: (url: string) => Promise<Uint8Array<ArrayBuffer> | null>;
   /** Precompiled WASM (required on Cloudflare Workers). Defaults to the bundled asset in browsers. */
   wasm?: WebAssembly.Module;
   /** Resource cache. ttlMs = 0 disables it; Infinity never expires. Defaults: 5 minutes, 64 MiB. */
@@ -54,14 +56,24 @@ const SUPPORTED_LAYERS = new Set<string>([
   'background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap',
 ] satisfies StyleLayer['type'][]);
 
-async function loadWasm(module?: WebAssembly.Module): Promise<WasmExports> {
+async function fetchResource(url: string): Promise<Uint8Array<ArrayBuffer> | null> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    await response.body?.cancel();
+    if (response.status === 404) return null;
+    throw new Error(`Resource fetch failed: HTTP ${response.status} ${url}`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function loadWasm(module: WebAssembly.Module | undefined, loadResource: NonNullable<InitOptions['loadResource']>): Promise<WasmExports> {
   if (!module) {
     // Vite bundles this asset for browsers. Workers supply their imported module and
     // never fetch or compile WASM at runtime.
     const url = new URL('../wasm/ml2drender_wasm.wasm', import.meta.url);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`WASM fetch failed: ${response.status} ${url}`);
-    module = await WebAssembly.compile(await response.arrayBuffer());
+    const bytes = await loadResource(url.href);
+    if (bytes === null) throw new Error(`WASM not found: ${url}`);
+    module = await WebAssembly.compile(bytes);
   }
   const instance = await WebAssembly.instantiate(module);
   return instance.exports as unknown as WasmExports;
@@ -74,13 +86,17 @@ function nonnegative(value: number, name: string): number {
 
 /** Per-renderer, byte-bounded LRU cache; expiry is measured from the fetch completion. */
 class ResourceCache {
-  private readonly entries = new Map<string, { bytes: Uint8Array; expiresAt: number }>();
-  private readonly pending = new Map<string, Promise<Uint8Array | null>>();
+  private readonly entries = new Map<string, { bytes: Uint8Array<ArrayBuffer>; expiresAt: number }>();
+  private readonly pending = new Map<string, Promise<Uint8Array<ArrayBuffer> | null>>();
   private size = 0;
 
-  constructor(private readonly ttlMs: number, private readonly maxBytes: number) {}
+  constructor(
+    private readonly ttlMs: number,
+    private readonly maxBytes: number,
+    private readonly loadResource: NonNullable<InitOptions['loadResource']>,
+  ) {}
 
-  async get(url: string): Promise<Uint8Array | null> {
+  async get(url: string): Promise<Uint8Array<ArrayBuffer> | null> {
     const cached = this.entries.get(url);
     if (cached) {
       this.entries.delete(url);
@@ -101,36 +117,31 @@ class ResourceCache {
     }
   }
 
-  private async fetch(url: string): Promise<Uint8Array | null> {
-    try {
-      const response = await globalThis.fetch(url);
-      if (!response.ok) return null;
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (this.ttlMs > 0 && bytes.byteLength <= this.maxBytes) {
-        const now = performance.now();
-        for (const [key, entry] of this.entries) {
-          if (entry.expiresAt <= now) {
-            this.entries.delete(key);
-            this.size -= entry.bytes.byteLength;
-          }
+  private async fetch(url: string): Promise<Uint8Array<ArrayBuffer> | null> {
+    const bytes = await this.loadResource(url);
+    if (bytes === null) return null;
+    if (this.ttlMs > 0 && bytes.byteLength <= this.maxBytes) {
+      const now = performance.now();
+      for (const [key, entry] of this.entries) {
+        if (entry.expiresAt <= now) {
+          this.entries.delete(key);
+          this.size -= entry.bytes.byteLength;
         }
-        while (this.size + bytes.byteLength > this.maxBytes) {
-          const oldest = this.entries.keys().next().value;
-          if (oldest === undefined) break;
-          this.size -= this.entries.get(oldest)!.bytes.byteLength;
-          this.entries.delete(oldest);
-        }
-        this.entries.set(url, { bytes, expiresAt: now + this.ttlMs });
-        this.size += bytes.byteLength;
       }
-      return bytes;
-    } catch {
-      return null;
+      while (this.size + bytes.byteLength > this.maxBytes) {
+        const oldest = this.entries.keys().next().value;
+        if (oldest === undefined) break;
+        this.size -= this.entries.get(oldest)!.bytes.byteLength;
+        this.entries.delete(oldest);
+      }
+      this.entries.set(url, { bytes, expiresAt: now + this.ttlMs });
+      this.size += bytes.byteLength;
     }
+    return bytes;
   }
 }
 
-function prepareStyle(bytes: ArrayBuffer, transform?: InitOptions['transformFillExtrusion']): Uint8Array {
+function prepareStyle(bytes: Uint8Array<ArrayBuffer>, transform?: InitOptions['transformFillExtrusion']): Uint8Array {
   if (!transform) return new Uint8Array(bytes);
   const style: unknown = JSON.parse(decoder.decode(bytes));
   if (!style || typeof style !== 'object' || !('layers' in style) || !Array.isArray(style.layers)) {
@@ -162,11 +173,11 @@ export class MapRenderer {
     if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
     const maxBytes = nonnegative(options.cache?.maxBytes ?? DEFAULT_MAX_BYTES, 'cache.maxBytes');
     const url = new URL(styleUrl, globalThis.location?.href);
-    const [styleResponse, wasm] = await Promise.all([fetch(url), loadWasm(options.wasm)]);
-    if (!styleResponse.ok) throw new Error(`Style fetch failed: ${styleResponse.status} ${url}`);
-    const style = await styleResponse.arrayBuffer();
+    const loadResource = options.loadResource ?? fetchResource;
+    const [style, wasm] = await Promise.all([loadResource(url.href), loadWasm(options.wasm, loadResource)]);
+    if (style === null) throw new Error(`Style not found: ${url}`);
     return new MapRenderer(wasm,
-      prepareStyle(style, options.transformFillExtrusion), url.href, new ResourceCache(ttlMs, maxBytes));
+      prepareStyle(style, options.transformFillExtrusion), url.href, new ResourceCache(ttlMs, maxBytes, loadResource));
   }
 
   /** Fetch required resources and return a new RGBA image for the requested view. */
@@ -199,7 +210,7 @@ export class MapRenderer {
         const resources = await Promise.all(urls.map((url) => this.cache.get(new URL(url, this.styleUrl).href)));
         urls.forEach((url, i) => this.withBytes(encoder.encode(url), (urlPtr, urlLen) =>
           this.withBytes(resources[i] ?? new Uint8Array(), (dataPtr, dataLen) =>
-            w.renderer_provide(handle, urlPtr, urlLen, dataPtr, dataLen, resources[i] ? 1 : 0))));
+            w.renderer_provide(handle, urlPtr, urlLen, dataPtr, dataLen, resources[i] === null ? 0 : 1))));
       }
       const ok = format === 'png' ? w.renderer_render_png(handle) : w.renderer_render(handle);
       if (!ok) throw new Error(decoder.decode(this.output()));

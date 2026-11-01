@@ -36,3 +36,8 @@ const misspelledPaint: StyleLayer = { id: 'fill', type: 'fill', source: 'buildin
 const invalidColor: StyleLayer = { id: 'fill', type: 'fill', source: 'buildings', paint: { 'fill-color': 123 } };
 // @ts-expect-error The replacement must be a supported 2D layer.
 const unsupportedTransform: InitOptions = { transformFillExtrusion: (layer) => layer };
+
+const customResourceLoader: InitOptions = {
+  loadResource: async (url) => new Uint8Array(await (await fetch(url)).arrayBuffer()),
+};
+const missingResourceLoader: InitOptions = { loadResource: async () => null };
