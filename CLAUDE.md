@@ -61,6 +61,7 @@ pnpm fixtures                      # 初回のみ(~144MB)
 pnpm test                          # cargo test
 pnpm test:render [filter]          # → target/test-report/render/{summary.md,results.json,<id>/diff.png}
 pnpm test:expression [filter]      # → target/test-report/expression/{summary.md,failures.json}
+pnpm bench base=<checkout> head=. # WASM の性能比較(fixture 使用、各 checkout で pnpm build:wasm 済み)。PR では .github/workflows/bench.yml が base と比較しコメント
 pnpm demo                          # wasm ビルド + Vite dev server(examples/browser)
 pnpm typecheck                     # tsc --noEmit(全パッケージ)
 ./target/release/ml2drender compare a.png b.png [threshold]

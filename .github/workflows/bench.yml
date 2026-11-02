@@ -1,0 +1,62 @@
+# Compare the PR's WASM against its base on the same runner (scripts/bench.ts) and report the result
+# as a PR comment and job summary. Fails when a case is slower than the base by more than 10%.
+name: Benchmark
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: bench-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check out the base
+        run: |
+          git fetch --depth 1 origin ${{ github.event.pull_request.base.sha }}
+          git worktree add --detach ../base FETCH_HEAD
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('scripts/fetch-fixtures.sh') }}
+      - run: test -d fixtures/render || pnpm fixtures
+      - run: pnpm install --frozen-lockfile --filter ml2drender
+      - name: Build WASM (PR and base)
+        run: |
+          pnpm build:wasm
+          cd ../base && cargo build -p ml2drender-wasm --target wasm32-unknown-unknown --profile wasm --target-dir "$GITHUB_WORKSPACE/target/base"
+      - name: Benchmark
+        id: bench
+        continue-on-error: true
+        run: node scripts/bench.ts base=../base:target/base/wasm32-unknown-unknown/wasm/ml2drender_wasm.wasm pr=. | tee bench.md
+      - name: Report
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Fork PRs get a read-only token: they only get the job summary.
+          COMMENT: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          test -s bench.md || echo "ベンチマークが完了しませんでした。ジョブのログを確認してください。" > bench.md
+          cat bench.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$COMMENT" = true ]; then gh pr comment ${{ github.event.pull_request.number }} --edit-last --create-if-none --body-file bench.md; fi
+      - name: Fail on regression
+        if: steps.bench.outcome == 'failure'
+        run: |
+          echo "::error::A benchmark case is more than 10% slower than the base, or the benchmark failed. See the job summary."
+          exit 1
