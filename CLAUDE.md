@@ -47,7 +47,6 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 - `crates/wasm/` — crate `ml2drender-wasm`。wasm-bindgen なしの素の C-ABI export(`renderer_new/needs/provide/render/render_png/free`, `alloc/dealloc`, RGBA / PNG・エラー等の結果は `out_ptr/out_len` の共有バッファ)。
 - `packages/ml2drender/` — TypeScript の公開 API と型テスト。`src/index.ts` が WASM のロード・メモリ操作・リソース取得を隠す。RGBAの `render()` とWASM内PNG化の `renderPng()` を提供し、`init(..., { wasm })` でコンパイル済みモジュールを渡せる。
 - `examples/browser/` — pnpm パッケージ `demo-browser`(Vite + TypeScript、maplibre-gl は npm 依存)。左に MapLibre GL JS(参照)、右に WASM 出力。`needs`→fetch→`provide` ループのホスト実装例を兼ねる。JS API は `ml2drender` を `workspace:*` で参照。WASM は `pnpm build:wasm` で `packages/ml2drender/wasm/` にコピーし、API 内で `?url` import。社内標準のフロントエンド既定は SvelteKit だが、1画面の検証用ツールなので素の Vite にしている。
-- `examples/workers/` — Wranglerサンプル。`ml2drender/renderer.wasm` をコンパイル済みモジュールとしてimportし、リクエスト内で `renderPng()` してPNGレスポンスを返す。`pnpm demo:workers` はローカル起動、サンプルの `build` はdry-runのみ。
 - `crates/cli/tests/exclusions.json` — 対象外 render テストの除外ルール(理由付き)。pitch/roll/非mercator/operations はランナー内にハードコード。
 - `fixtures/` — 上流テスト(gitignore)。`scripts/fetch-fixtures.sh` が固定コミットから取得し LICENSE を同梱する。
 

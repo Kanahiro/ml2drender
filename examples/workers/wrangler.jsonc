@@ -1,9 +1,0 @@
-{
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ml2drender-demo",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-10-19",
-  "vars": {
-    "STYLE_URL": "https://demotiles.maplibre.org/style.json"
-  }
-}
