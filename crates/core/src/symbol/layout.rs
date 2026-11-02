@@ -166,6 +166,7 @@ pub struct SymbolInstance {
 pub struct SymbolFeature {
     pub f: BucketFeature,
     pub text: Option<Formatted>,
+    pub font_stack: String,
     pub icon: Option<String>,
     pub sort_key: Option<f64>,
 }
@@ -323,7 +324,7 @@ pub fn glyph_dependencies(layer: &Layer, ctx: &Ctx, tf: &TileFeatures, raw: &ser
     let keep_upright = ctx.layout(layer, "text-keep-upright", None, &tf.tile).truthy();
     let allow_vertical = res.placement == "point"
         && matches!(ctx.layout(layer, "text-writing-mode", None, &tf.tile), Value::Array(a) if a.iter().any(|m| m.as_str() == Some("vertical")));
-    for f in ctx.bucket_features(layer, tf, None) {
+    for f in ctx.filtered_features(layer, tf, None, false) {
         let ft = feature_text(layer, ctx, &tf.tile, raw, &f);
         let Some(text) = ft.text else { continue };
         let unformatted: String = text.sections.iter().map(|s| s.text.as_str()).collect();
@@ -433,13 +434,13 @@ impl Builder<'_> {
             if point && f.ty == GeomType::Point && f.geometry.iter().flatten().all(|p| is_outside(*p)) {
                 continue;
             }
-            let text = feature_text(self.layer, self.ctx, &tile, self.raw, &f).text;
+            let FeatureText { text, font_stack } = feature_text(self.layer, self.ctx, &tile, self.raw, &f);
             let icon = if has_icon { feature_icon(self.layer, self.ctx, &tile, self.raw, &f) } else { None };
             if text.is_none() && icon.is_none() {
                 continue;
             }
             let sort_key = sort_prop.map(|p| num(&self.ctx.layout(self.layer, p, Some(&f), &tile)));
-            features.push(SymbolFeature { f, text, icon, sort_key });
+            features.push(SymbolFeature { f, text, font_stack, icon, sort_key });
         }
         if res.placement == "line" {
             let items: Vec<(Option<String>, Vec<P>)> = features
@@ -486,8 +487,7 @@ impl Builder<'_> {
         let layout_icon_size = self.lay_at("icon-size", zoom + 1.0, f, &tile);
         let line_height = num(&lay("text-line-height")) * ONE_EM;
         let along_line = res.text_along_line();
-        let ft = feature_text(self.layer, self.ctx, &tile, self.raw, f);
-        let fontstack = ft.font_stack;
+        let fontstack = &feature.font_stack;
 
         // (justification, shaping) in insertion order.
         let mut horizontal: Vec<(&'static str, Shaping)> = Vec::new();
@@ -516,7 +516,7 @@ impl Builder<'_> {
                     text,
                     self.glyphs,
                     self.ctx.images,
-                    &fontstack,
+                    fontstack,
                     max_width,
                     line_height,
                     anchor,

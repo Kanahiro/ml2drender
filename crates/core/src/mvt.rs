@@ -96,13 +96,14 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn packed(data: &[u8]) -> Option<Vec<u32>> {
+/// Packed varints, into a reused buffer.
+fn packed(data: &[u8], out: &mut Vec<u32>) -> Option<()> {
     let mut r = Reader { buf: data, pos: 0 };
-    let mut out = Vec::new();
+    out.clear();
     while r.pos < data.len() {
         out.push(r.varint()? as u32);
     }
-    Some(out)
+    Some(())
 }
 
 fn decode_value(data: &[u8]) -> Option<Value> {
@@ -182,27 +183,30 @@ fn decode_layer(data: &[u8]) -> Option<Layer> {
     let mut r = Reader { buf: data, pos: 0 };
     let mut name = String::new();
     let mut extent = 4096;
-    let mut keys: Vec<String> = Vec::new();
+    let mut keys: Vec<Rc<str>> = Vec::new();
     let mut values: Vec<Value> = Vec::new();
     let mut raw_features: Vec<&[u8]> = Vec::new();
     while let Some((f, w)) = r.field() {
         match (f, w) {
             (1, 2) => name = String::from_utf8_lossy(r.bytes()?).into_owned(),
             (2, 2) => raw_features.push(r.bytes()?),
-            (3, 2) => keys.push(String::from_utf8_lossy(r.bytes()?).into_owned()),
+            (3, 2) => keys.push(String::from_utf8_lossy(r.bytes()?).into()),
             (4, 2) => values.push(decode_value(r.bytes()?)?),
             (5, 0) => extent = r.varint()? as u32,
             _ => r.skip(w)?,
         }
     }
     let mut features = Vec::with_capacity(raw_features.len());
+    let (mut tags, mut geom) = (Vec::new(), Vec::new());
     for fd in raw_features {
         let mut r = Reader { buf: fd, pos: 0 };
-        let (mut id, mut ty, mut tags, mut geom) = (None, GeomType::Unknown, Vec::new(), Vec::new());
+        let (mut id, mut ty) = (None, GeomType::Unknown);
+        tags.clear();
+        geom.clear();
         while let Some((f, w)) = r.field() {
             match (f, w) {
                 (1, 0) => id = Some(Value::Number(r.varint()? as f64)),
-                (2, 2) => tags = packed(r.bytes()?)?,
+                (2, 2) => packed(r.bytes()?, &mut tags)?,
                 (3, 0) => {
                     ty = match r.varint()? {
                         1 => GeomType::Point,
@@ -211,11 +215,11 @@ fn decode_layer(data: &[u8]) -> Option<Layer> {
                         _ => GeomType::Unknown,
                     }
                 }
-                (4, 2) => geom = packed(r.bytes()?)?,
+                (4, 2) => packed(r.bytes()?, &mut geom)?,
                 _ => r.skip(w)?,
             }
         }
-        let mut properties = crate::expression::Object::default();
+        let mut properties = crate::expression::Object::with_capacity_and_hasher(tags.len() / 2, Default::default());
         for kv in tags.chunks_exact(2) {
             if let (Some(k), Some(v)) = (keys.get(kv[0] as usize), values.get(kv[1] as usize)) {
                 properties.insert(k.clone(), v.clone());

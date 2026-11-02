@@ -180,9 +180,9 @@ impl Style {
     pub fn parse(json: J) -> Style {
         let mut state = Object::default();
         for (k, v) in json["state"].as_object().into_iter().flatten() {
-            state.insert(k.clone(), Value::from_json(&v["default"]));
+            state.insert(k.as_str().into(), Value::from_json(&v["default"]));
         }
-        let state_json = J::Object(state.iter().map(|(k, v)| (k.clone(), v.to_json())).collect());
+        let state_json = J::Object(state.iter().map(|(k, v)| (k.to_string(), v.to_json())).collect());
         let mut layers: Vec<Layer> = Vec::new();
         let derefed = deref_layers(json["layers"].as_array().map(Vec::as_slice).unwrap_or_default());
         let mut grouped: Vec<&J> = Vec::new();

@@ -193,6 +193,11 @@ impl<'a> Ctx<'a> {
     /// Filter and prepare a tile layer's features (MapLibre `populate`): geometry scaled to
     /// EXTENT, filter evaluated at the tile's zoom, sorted by `sort_key_prop` if set.
     pub fn bucket_features(&self, layer: &Layer, tf: &TileFeatures, sort_key_prop: Option<&str>) -> Vec<BucketFeature> {
+        self.filtered_features(layer, tf, sort_key_prop, true)
+    }
+
+    /// `bucket_features`, with empty `BucketFeature::geometry` unless `with_geometry`.
+    pub fn filtered_features(&self, layer: &Layer, tf: &TileFeatures, sort_key_prop: Option<&str>, with_geometry: bool) -> Vec<BucketFeature> {
         let zoom = tf.tile.overscaled_z as f64;
         let scale = EXTENT / tf.layer.extent as f64;
         let canonical = Some(Self::canonical(&tf.tile));
@@ -221,7 +226,7 @@ impl<'a> Ctx<'a> {
                     continue;
                 }
             }
-            let geometry = geometry.unwrap_or_else(scale_geometry);
+            let geometry = if with_geometry { geometry.unwrap_or_else(scale_geometry) } else { Vec::new() };
             let sort_key = match sort_key_prop.map(|p| layer.layout(p)) {
                 Some(p) if !p.is_constant() => num(&p.eval(zoom, Some(&feature), canonical, self.global_state)),
                 _ => 0.0,
@@ -396,13 +401,12 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
     if pass == Pass::Opaque && !constant_opaque {
         return false;
     }
-    // Pixels covered by this layer's opaque interiors, standing in for the depth buffer (tile
-    // masks are disjoint, so one buffer serves all tiles).
-    let mut covered = match pass {
-        Pass::Translucent if constant_opaque => target.occ.iter().map(|&o| o == target.layer).collect(),
-        _ => vec![false; if constant_opaque { target.w * target.h } else { 0 }],
-    };
     let antialias = pass != Pass::Opaque && tiles.first().is_some_and(|t| ctx.paint(layer, "fill-antialias", None, &t.tile).truthy());
+    // The layer's opaque interior hides its own outline (the depth test). In `Pass::All`,
+    // `covered` records the interior (tile masks are disjoint, so one buffer serves all tiles);
+    // in `Pass::Translucent`, the opaque pass recorded it in `Target::occ` as this layer.
+    let outline_hidden = constant_opaque && antialias && !has_outline_color;
+    let mut covered = vec![false; if outline_hidden && pass == Pass::All { target.w * target.h } else { 0 }];
     let pattern_prop = layer.paint("fill-pattern");
     let mut prepared = Vec::new();
     for tf in tiles {
@@ -453,7 +457,9 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
                             let w = target.w;
                             raster::for_each_pixel(target.w, target.h, p, |x, y, _| {
                                 if tf.mask.get(x, y) {
-                                    covered[y * w + x] = true;
+                                    if let Some(c) = covered.get_mut(y * w + x) {
+                                        *c = true;
+                                    }
                                     target.cover(y * w + x, fill_color);
                                 }
                             });
@@ -478,13 +484,21 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
         }
         prepared.push((tf, outlines));
     }
-    // Outlines are drawn after all fills (MapLibre's separate outline pass).
+    // Outlines are drawn after all fills (MapLibre's separate outline pass). Reading `occ`
+    // while drawing needs it out of the target, so its culling is applied here instead.
+    let (w, layer_index) = (target.w, target.layer);
+    let occ = if outline_hidden && pass == Pass::Translucent { std::mem::take(&mut target.occ) } else { Vec::new() };
+    let cull = target.cull;
+    target.cull = cull && occ.is_empty();
+    let visible = |i: usize| match (outline_hidden, pass) {
+        (true, Pass::All) => !covered[i],
+        (true, _) => occ[i] < layer_index || !cull && occ[i] != layer_index,
+        _ => true,
+    };
     for (tf, outlines) in prepared {
-        let w = target.w;
         for (a, b, va, vb, paint) in outlines {
-            let skip = |x: usize, y: usize| !has_outline_color && constant_opaque && covered[y * w + x];
             let none = [[0.0; 2]; 2];
-            raster::line(target, &|x, y| tf.mask.get(x, y) && !skip(x, y), a, b, &mut |dist, t| {
+            raster::line(target, &|x, y| tf.mask.get(x, y) && visible(y * w + x), a, b, &mut |dist, t| {
                 let alpha = 1.0 - raster::smoothstep(0.0, 1.0, dist as f32);
                 let t = t as f32;
                 let v = [va[0] + (vb[0] - va[0]) * t, va[1] + (vb[1] - va[1]) * t];
@@ -492,6 +506,10 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
             });
         }
     }
+    if !occ.is_empty() {
+        target.occ = occ;
+    }
+    target.cull = cull;
     pass == Pass::Opaque
 }
 

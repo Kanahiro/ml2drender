@@ -205,7 +205,7 @@ impl LegacyFunction {
             return self.inner(&Value::Number(zoom), feature);
         }
         let props: Option<&Rc<Object>> = feature.map(|f| &f.properties);
-        match self.property.as_ref().and_then(|p| props.and_then(|o| o.get(p))) {
+        match self.property.as_ref().and_then(|p| props.and_then(|o| o.get(p.as_str()))) {
             None => self.fallback(),
             Some(v) => self.inner(v, feature),
         }

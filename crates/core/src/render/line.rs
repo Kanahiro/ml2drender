@@ -533,6 +533,8 @@ impl LineBucket {
 #[allow(clippy::too_many_arguments)]
 pub fn draw_line(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeatures], source_maxzoom: u8, map_max_zoom: f64, has_gradient: bool, has_pattern: bool) {
     let dpr = ctx.transform.pixel_ratio;
+    // Dash textures by dasharray and cap (MapLibre's LineAtlas).
+    let mut dashes = Vec::new();
     for tf in tiles {
         let bucket = tf.bucket(layer, || LineBucket::new(layer, ctx, tf));
         let to_world = ctx.tile_to_world(&tf.tile);
@@ -549,7 +551,7 @@ pub fn draw_line(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
             Gradient::new(layer, ctx, &bucket.clips, width)
         });
         for (i, b) in &bucket.lines {
-            draw_feature(target, layer, ctx, tf, &bucket.features[*i], b, &to_world, tr, dpr, gradient.as_ref(), has_pattern);
+            draw_feature(target, layer, ctx, tf, &bucket.features[*i], b, &to_world, tr, dpr, gradient.as_ref(), has_pattern, &mut dashes);
         }
     }
 }
@@ -577,6 +579,7 @@ fn draw_feature(
     dpr: f64,
     gradient: Option<&Gradient>,
     has_pattern: bool,
+    dashes: &mut Vec<(Vec<f64>, bool, Dash)>,
 ) {
     let p = |name: &str| ctx.paint(layer, name, Some(f), &tf.tile);
     let l = |name: &str| ctx.layout(layer, name, Some(f), &tf.tile);
@@ -610,7 +613,15 @@ fn draw_feature(
             } else {
                 l("line-cap").as_str() == Some("round")
             };
-            Some(make_dash(&d, round))
+            let i = match dashes.iter().position(|(k, r, _)| *k == d && *r == round) {
+                Some(i) => i,
+                None => {
+                    let dash = make_dash(&d, round);
+                    dashes.push((d, round, dash));
+                    dashes.len() - 1
+                }
+            };
+            Some(&dashes[i].2)
         }
         _ => None,
     };

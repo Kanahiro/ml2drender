@@ -6,7 +6,7 @@ use super::types::Type;
 use crate::hash::IndexMap;
 use std::rc::Rc;
 
-pub type Object = IndexMap<String, Value>;
+pub type Object = IndexMap<Rc<str>, Value>;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -100,7 +100,7 @@ impl Value {
             serde_json::Value::String(s) => Value::str(s),
             serde_json::Value::Array(a) => Value::Array(Rc::new(a.iter().map(Value::from_json).collect())),
             serde_json::Value::Object(o) => {
-                Value::Object(Rc::new(o.iter().map(|(k, v)| (k.clone(), Value::from_json(v))).collect()))
+                Value::Object(Rc::new(o.iter().map(|(k, v)| (k.as_str().into(), Value::from_json(v))).collect()))
             }
         }
     }
@@ -135,7 +135,7 @@ impl Value {
             Value::ResolvedImage(i) => json!({"name": i.name, "available": i.available}),
             Value::ProjectionDefinition(p) => json!({"from": p.from, "to": p.to, "transition": num(p.transition)}),
             Value::Array(a) => J::Array(a.iter().map(Value::to_json).collect()),
-            Value::Object(o) => J::Object(o.iter().map(|(k, v)| (k.clone(), v.to_json())).collect()),
+            Value::Object(o) => J::Object(o.iter().map(|(k, v)| (k.to_string(), v.to_json())).collect()),
         }
     }
 

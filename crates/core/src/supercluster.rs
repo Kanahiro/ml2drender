@@ -160,7 +160,7 @@ pub struct Point {
 }
 
 /// `clusterProperties`: per property, the map and reduce expressions.
-pub type ClusterProperties = Vec<(String, Expression, Expression)>;
+pub type ClusterProperties = Vec<(Rc<str>, Expression, Expression)>;
 
 pub struct Options {
     pub max_zoom: u8,

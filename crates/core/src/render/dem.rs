@@ -211,7 +211,7 @@ impl HillshadeParams {
         let scale = |c: Rgba, s: f32| -> Rgba { c.map(|v| v * s) };
         let add = |a: Rgba, b: Rgba| -> Rgba { std::array::from_fn(|k| a[k] + b[k]) };
         let len = |d: [f32; 2]| (d[0] * d[0] + d[1] * d[1]).sqrt();
-        let aspect = |d: [f32; 2]| if d[0] != 0.0 { atan2(d[1], -d[0]) } else { PI / 2.0 * if d[1] > 0.0 { 1.0 } else { -1.0 } };
+        let aspect = |d: [f32; 2]| if d[0] != 0.0 { d[1].atan2(-d[0]) } else { PI / 2.0 * if d[1] > 0.0 { 1.0 } else { -1.0 } };
         // GLSL `mod`.
         let gmod = |x: f32, y: f32| x - y * (x / y).floor();
         let boosted = [deriv[0] * self.exaggeration * 2.0, deriv[1] * self.exaggeration * 2.0];
@@ -223,7 +223,7 @@ impl HillshadeParams {
             // igor
             2 => {
                 let d = boosted;
-                let slope = atan(len(d)) * 2.0 / PI;
+                let slope = len(d).atan() * 2.0 / PI;
                 let aspect_strength = 1.0 - (gmod((aspect(d) + self.azimuth) / PI + 0.5, 2.0) - 1.0).abs();
                 add(scale(self.shadows[0], slope * aspect_strength), scale(self.highlights[0], slope * (1.0 - aspect_strength)))
             }
@@ -245,64 +245,23 @@ impl HillshadeParams {
             // combined
             1 => {
                 let c = cang(boosted, self.lights[0]).acos().clamp(0.0, PI / 2.0);
-                let s = atan(len(boosted)) * 4.0 / PI / PI;
+                let s = len(boosted).atan() * 4.0 / PI / PI;
                 add(scale(self.shadows[0], c * s), scale(self.highlights[0], (PI / 2.0 - c) * s))
             }
             // standard
             _ => {
-                let slope = atan(0.625 * len(deriv));
+                let slope = (0.625 * len(deriv)).atan();
                 let intensity = self.exaggeration;
                 let max = 0.5 * PI;
                 let scaled = if intensity != 0.5 { ((self.base.powf(slope) - 1.0) / self.base_max) * max } else { slope };
                 let k = (intensity * 2.0).clamp(0.0, 1.0);
-                let accent = scale(self.accent, (1.0 - cos(scaled)) * k);
+                let accent = scale(self.accent, (1.0 - scaled.cos()) * k);
                 let shade = (gmod((aspect(deriv) + self.azimuth) / PI + 0.5, 2.0) - 1.0).abs();
-                let shade_color = scale(mix(self.shadows[0], self.highlights[0], shade), sin(scaled) * k);
+                let shade_color = scale(mix(self.shadows[0], self.highlights[0], shade), scaled.sin() * k);
                 add(scale(accent, 1.0 - shade_color[3]), shade_color)
             }
         }
     }
-}
-
-// Inlinable polynomial approximations (error ~1e-7) for the per-pixel hillshade shader, in place
-// of libm calls. GPUs approximate these too; the output is 8-bit.
-
-/// Cephes `atanf`.
-fn atan(x: f32) -> f32 {
-    let a = x.abs();
-    let (base, t) = if a > 2.414_213_6 {
-        (PI / 2.0, -1.0 / a)
-    } else if a > 0.414_213_57 {
-        (PI / 4.0, (a - 1.0) / (a + 1.0))
-    } else {
-        (0.0, a)
-    };
-    let z = t * t;
-    (base + ((((8.053_744_5e-2 * z - 1.387_768_6e-1) * z + 1.997_771_1e-1) * z - 3.333_294_9e-1) * z * t + t)).copysign(x)
-}
-
-/// For `x != 0`. A `-0` `y` with negative `x` gives π, not -π.
-fn atan2(y: f32, x: f32) -> f32 {
-    let r = atan(y / x);
-    if x > 0.0 {
-        r
-    } else if y >= 0.0 {
-        r + PI
-    } else {
-        r - PI
-    }
-}
-
-/// Taylor series, for |x| <= π/2.
-fn sin(x: f32) -> f32 {
-    let z = x * x;
-    x + x * z * (-1.0 / 6.0 + z * (1.0 / 120.0 + z * (-1.0 / 5040.0 + z * (1.0 / 362_880.0 - z / 39_916_800.0))))
-}
-
-/// Taylor series, for |x| <= π/2.
-fn cos(x: f32) -> f32 {
-    let z = x * x;
-    1.0 + z * (-0.5 + z * (1.0 / 24.0 + z * (-1.0 / 720.0 + z * (1.0 / 40_320.0 + z * (-1.0 / 3_628_800.0 + z / 479_001_600.0)))))
 }
 
 /// Draw a tile quad, pixel-aligned like rasters; `shade` gets the tile fraction (`a_pos / 8192`).
@@ -332,7 +291,7 @@ pub fn draw_hillshade_tile(target: &mut Target, ctx: &Ctx, tile: &RenderTile, te
     draw_quad(target, ctx, tile, mask, &mut |v: &[f32; 2]| {
         let tp = [(v[0] * (sw - 2.0) + 1.0) / sw, (v[1] * (sh - 2.0) + 1.0) / sh];
         let px = tex.sample(tp[0], tp[1], params.filter, params.filter, 0.0);
-        let scale_factor = cos(((lat0 - lat1) * (1.0 - v[1]) + lat1).to_radians());
+        let scale_factor = ((lat0 - lat1) * (1.0 - v[1]) + lat1).to_radians().cos();
         let deriv = [(px[0] - 128.0 / 255.0) * 8.0 / scale_factor, (px[1] - 128.0 / 255.0) * 8.0 / scale_factor];
         Some(params.shade(deriv))
     });
@@ -463,21 +422,6 @@ pub fn draw_color_relief_tile(target: &mut Target, ctx: &Ctx, tile: &RenderTile,
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn approximations_match_libm() {
-        for i in -2000..=2000 {
-            let x = i as f32 / 1000.0;
-            let h = x * PI / 4.0;
-            assert!((sin(h) - h.sin()).abs() < 1e-6 && (cos(h) - h.cos()).abs() < 1e-6, "{h}");
-            let t = x * x * x * 50.0;
-            assert!((atan(t) - t.atan()).abs() < 1e-6, "{t}");
-            for y in [-3.0, -0.5, 0.25, 7.0] {
-                assert!(x == 0.0 || (atan2(y, x) - y.atan2(x)).abs() < 1e-6, "{y} {x}");
-            }
-        }
-        assert_eq!(atan(f32::INFINITY), PI / 2.0);
-    }
 
     #[test]
     fn flat_dem_has_no_slope() {
