@@ -137,15 +137,33 @@ pub unsafe extern "C" fn renderer_render(r: *mut Renderer) -> u32 {
     }
 }
 
-/// Returns 1 with PNG in the output buffer, or 0 with an error message.
+/// Encodes RGBA8 pixels; returns 1 with PNG in the output buffer, or 0 with an error message.
 ///
 /// # Safety
-/// `r` must be a live handle from `renderer_new`.
+/// `ptr`/`len` must describe readable memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn renderer_render_png(r: *mut Renderer) -> u32 {
-    match unsafe { &mut *r }.render_png() {
+pub unsafe extern "C" fn encode_png(ptr: *const u8, len: usize, width: u32, height: u32) -> u32 {
+    match ml2drender::encode_png(unsafe { bytes(ptr, len) }, width, height) {
         Ok(png) => {
             set_out(png);
+            1
+        }
+        Err(e) => {
+            set_out(e.to_string().into_bytes());
+            0
+        }
+    }
+}
+
+/// Encodes RGBA8 pixels; returns 1 with lossless WebP in the output buffer, or 0 with an error message.
+///
+/// # Safety
+/// `ptr`/`len` must describe readable memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn encode_webp(ptr: *const u8, len: usize, width: u32, height: u32) -> u32 {
+    match ml2drender::encode_webp(unsafe { bytes(ptr, len) }, width, height) {
+        Ok(webp) => {
+            set_out(webp);
             1
         }
         Err(e) => {

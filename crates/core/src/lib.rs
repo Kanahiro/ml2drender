@@ -129,6 +129,36 @@ const ZOOM_LEVELS_TO_OVERSCALE: u8 = 4;
 // memory becomes the constraint.
 const MAX_CACHED_TILES: usize = 8;
 
+/// Lossless PNG of row-major RGBA8 pixels, e.g. the output of [`Renderer::render`].
+pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::new();
+    let mut encode = || -> Result<(), png::EncodingError> {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        // Encoding is on the request's CPU budget; favor speed over minimum file size.
+        encoder.set_compression(png::Compression::Fast);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(rgba)?;
+        writer.finish()
+    };
+    encode().map_err(|e| Error::ImageEncoding(e.to_string()))?;
+    Ok(bytes)
+}
+
+/// Lossless WebP of row-major RGBA8 pixels, e.g. the output of [`Renderer::render`].
+pub fn encode_webp(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error> {
+    // The encoder panics (a WASM trap) on a size mismatch instead of returning an error.
+    if rgba.len() as u64 != width as u64 * height as u64 * 4 {
+        return Err(Error::ImageEncoding(format!("{} bytes is not {width}x{height} RGBA", rgba.len())));
+    }
+    let mut bytes = Vec::new();
+    image_webp::WebPEncoder::new(&mut bytes)
+        .encode(rgba, width, height, image_webp::ColorType::Rgba8)
+        .map_err(|e| Error::ImageEncoding(e.to_string()))?;
+    Ok(bytes)
+}
+
 pub struct Renderer {
     style: style::Style,
     transform: Transform,
@@ -817,26 +847,6 @@ impl Renderer {
         Ok(cropped)
     }
 
-    /// Lossless RGBA PNG of the requested viewport, with any render margin cropped out.
-    pub fn render_png(&mut self) -> Result<Vec<u8>, Error> {
-        let rgba = self.render()?;
-        let width = (self.view.width as f64 * self.view.pixel_ratio).round() as u32;
-        let height = (self.view.height as f64 * self.view.pixel_ratio).round() as u32;
-        let mut bytes = Vec::new();
-        let mut encode = || -> Result<(), png::EncodingError> {
-            let mut encoder = png::Encoder::new(&mut bytes, width, height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            // Encoding is on the request's CPU budget; favor speed over minimum file size.
-            encoder.set_compression(png::Compression::Fast);
-            let mut writer = encoder.write_header()?;
-            writer.write_image_data(&rgba)?;
-            writer.finish()
-        };
-        encode().map_err(|e| Error::ImageEncoding(e.to_string()))?;
-        Ok(bytes)
-    }
-
     fn draw_raster(&self, target: &mut render::raster::Target, layer: &style::Layer, ctx: &render::Ctx, src: &Source, w: usize, h: usize) {
         use render::raster_layer::{draw_quad, Quad, RasterParams};
         let params = RasterParams::new(layer, ctx);
@@ -1014,11 +1024,12 @@ mod tests {
                 let view = View { center: [0.0, 0.0], zoom: 1.0, bearing: 0.0, width: 63, height: 47, pixel_ratio, margin };
                 let mut renderer = Renderer::new(style, view).unwrap();
                 let rgba = renderer.render().unwrap();
-                let png = renderer.render_png().unwrap();
+                let (width, height) = ((view.width as f64 * pixel_ratio).round() as u32, (view.height as f64 * pixel_ratio).round() as u32);
+                let png = encode_png(&rgba, width, height).unwrap();
                 let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
                 let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
                 let info = reader.next_frame(&mut decoded).unwrap();
-                assert_eq!((info.width, info.height), ((view.width as f64 * pixel_ratio).round() as u32, (view.height as f64 * pixel_ratio).round() as u32));
+                assert_eq!((info.width, info.height), (width, height));
                 assert_eq!(info.color_type, png::ColorType::Rgba);
                 assert_eq!(&decoded[..info.buffer_size()], &rgba);
             }
@@ -1026,10 +1037,20 @@ mod tests {
     }
 
     #[test]
-    fn png_requires_resources_before_encoding() {
-        let style = r#"{"version":8,"sources":{"r":{"type":"raster","tiles":["/{z}/{x}/{y}.png"]}},"layers":[{"id":"r","type":"raster","source":"r"}]}"#;
-        let mut renderer = Renderer::new(style, View::tile(0, 0, 0, 64)).unwrap();
-        assert!(matches!(renderer.render_png(), Err(Error::NotReady)));
+    fn png_rejects_mismatched_dimensions() {
+        assert!(matches!(encode_png(&[0; 16], 3, 1), Err(Error::ImageEncoding(_))));
+    }
+
+    #[test]
+    fn webp_roundtrip_is_lossless() {
+        let rgba: Vec<u8> = (0..5 * 3 * 4).map(|i| (i * 37 % 256) as u8).collect();
+        let webp = encode_webp(&rgba, 5, 3).unwrap();
+        let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(webp)).unwrap();
+        assert_eq!(decoder.dimensions(), (5, 3));
+        let mut decoded = vec![0; decoder.output_buffer_size().unwrap()];
+        decoder.read_image(&mut decoded).unwrap();
+        assert_eq!(decoded, rgba);
+        assert!(matches!(encode_webp(&rgba, 4, 3), Err(Error::ImageEncoding(_))));
     }
 
     #[test]

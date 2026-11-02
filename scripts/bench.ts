@@ -32,7 +32,8 @@ const variants = args.map((arg) => {
 if (variants.length < 2) throw new Error('usage: node scripts/bench.ts base=<checkout>[:<wasm>] head=<checkout>[:<wasm>] [--samples N] [--threshold R] [--png dir]');
 
 interface View {center: [number, number]; zoom: number; bearing?: number; width: number; height: number; pixelRatio?: number}
-interface Renderer {render(view: View): Promise<{data: Uint8ClampedArray}>; renderPng(view: View): Promise<Uint8Array>}
+// Base checkouts may predate RenderedImage.toPng().
+interface Renderer {render(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; renderPng?(view: View): Promise<Uint8Array>}
 interface Api {MapRenderer: {init(style: object, options: object): Promise<Renderer>}}
 
 // Synthetic styles. Fixture resources are local://<path under assets>.
@@ -154,7 +155,12 @@ for (const c of cases) {
   });
   if (pngDir) {
     mkdirSync(pngDir, {recursive: true});
-    for (const [i, run] of runs.entries()) writeFileSync(join(pngDir, `${c.name.replace(/[^\w.-]+/g, '_')}.${loaded[i].name}.png`), await run.renderer!.renderPng((c.then ?? [c.view]).at(-1)!));
+    const view = (c.then ?? [c.view]).at(-1)!;
+    for (const [i, run] of runs.entries()) {
+      const r = run.renderer!;
+      const png = r.renderPng ? await r.renderPng(view) : (await r.render(view)).toPng!();
+      writeFileSync(join(pngDir, `${c.name.replace(/[^\w.-]+/g, '_')}.${loaded[i].name}.png`), png);
+    }
   }
   const medians = runs.map((r) => median(r.times));
   const ratios = medians.slice(1).map((m) => m / medians[0] - 1);

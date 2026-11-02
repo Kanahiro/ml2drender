@@ -31,6 +31,13 @@ Render: **pass 988 / fail 20 / skip 727**(in scope 1008 中 98.0%)。マスク�
 
 ## 実装済み
 
+### PNG化を画像側のメソッドへ移動 (2026-11-02)
+
+- `MapRenderer.renderPng(view)` を廃止し `(await renderer.render(view)).toPng()` に置き換え。出力形式が増えても描画APIは増やさず `RenderedImage.toXxx()` を足す。
+- Rust は `Renderer::render_png()` を自由関数 `ml2drender::encode_png(rgba, width, height)` に、C ABI は `renderer_render_png` を `encode_png(ptr, len, width, height)` に置き換え。PNG化のためにRGBAをJS→WASMへ1回余分にコピーする。
+- `RenderedImage.toWebp()` / `ml2drender::encode_webp` / C ABI `encode_webp` を追加。デコード用に採用済みの `image-webp` のエンコーダを流用(純Rust・可逆 VP8L のみ。非可逆は純Rust実装がないため未対応)。エンコーダは寸法不一致でpanic(WASMではtrap)するため事前に検査する。
+- WASM増分 1,947,632→1,969,699 B(+22 KB、gzip +9.6 KB)。bright-v9(symbol除く)512×512 z14: PNG 294,946 B / 2.5ms → WebP 197,038 B / 1.9ms(Node)。
+
 ### symbol レイアウトの再利用 (2026-11-02)
 
 - symbol のバケット(shaping・アンカー・quad・衝突ボックス)を、線・塗りと同じタイル単位の領域(`TileFeatures::bucket_keyed`)に保持し、`set_view` 後の描画で再利用する。配置(衝突判定)と描画は毎回行う。

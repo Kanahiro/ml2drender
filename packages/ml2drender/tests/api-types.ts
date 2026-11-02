@@ -5,8 +5,12 @@ import wasm from 'ml2drender/renderer.wasm';
 async function pngResponse() {
   const style: StyleSpecification = await (await fetch('https://example.com/style.json')).json();
   const renderer = await MapRenderer.init(style, { wasm });
-  const png: Uint8Array<ArrayBuffer> = await renderer.renderPng({ center: [0, 0], zoom: 0, width: 256, height: 256 });
+  const png: Uint8Array<ArrayBuffer> = (await renderer.render({ center: [0, 0], zoom: 0, width: 256, height: 256 })).toPng();
   return new Response(png, { headers: { 'Content-Type': 'image/png' } });
+}
+
+async function webpBytes(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>> {
+  return (await renderer.render({ center: [0, 0], zoom: 0, width: 256, height: 256 })).toWebp();
 }
 
 const transform: NonNullable<InitOptions['transformFillExtrusion']> = (layer) => ({
