@@ -118,20 +118,34 @@ struct Source {
     /// GeoJSON tiles and overzoom slices shared by glyph discovery and all style layers.
     /// Include the data tile so fallback parents cannot share the wrong slice.
     vector_layers: std::cell::RefCell<HashMap<(TileId, TileId), Rc<Vec<mvt::Layer>>>>,
+    /// Layer buckets by (data tile, canonical tile, overscaled zoom), kept across views.
+    buckets: std::cell::RefCell<HashMap<(TileId, TileId, u8), Rc<render::TileBuckets>>>,
+    /// When each data tile (GeoJSON: canonical tile) was last needed, in `Renderer::clock` ticks.
+    last_used: std::cell::RefCell<HashMap<TileId, u64>>,
 }
 
 const ZOOM_LEVELS_TO_OVERSCALE: u8 = 4;
+// ponytail: a tile count, not bytes. Dense low-zoom tiles cost far more; bound by size if
+// memory becomes the constraint.
+const MAX_CACHED_TILES: usize = 8;
 
 pub struct Renderer {
     style: style::Style,
     transform: Transform,
     sources: HashMap<String, Source>,
     sprites: sprite::Sprites,
+    /// The style's `sprite`, to pick the sheet again when the pixel ratio changes.
+    sprite: J,
     glyphs: symbol::glyphs::Glyphs,
     /// Glyph range URLs last returned by `needs()`, so `provide()` need not re-evaluate text.
     glyph_urls: std::cell::RefCell<HashMap<String, (String, u32)>>,
     /// Text dependencies depend on source data and camera, not on downloaded glyphs.
     glyph_dependencies: std::cell::RefCell<Option<BTreeSet<(String, u32)>>>,
+    /// Tile URLs returned by `needs()` and not yet provided, with the (source, tile) they fill.
+    /// `provide` matches against these, so a view change in between does not lose them.
+    requested: std::cell::RefCell<HashMap<String, Vec<(String, TileId)>>>,
+    /// Advances with every view change; orders tiles for eviction.
+    clock: u64,
     view: View,
     /// MapLibre map option `maxZoom` (default 22).
     max_zoom: f64,
@@ -276,18 +290,22 @@ impl Renderer {
                 }
                 _ => Data::Failed,
             };
-            sources.insert(id.clone(), Source { ty, json: src.clone(), data, tiles: HashMap::new(), vector_layers: Default::default() });
+            sources.insert(id.clone(), Source { ty, json: src.clone(), data, tiles: HashMap::new(), vector_layers: Default::default(), buckets: Default::default(), last_used: Default::default() });
         }
         let sprites = sprite::Sprites::new(&json["sprite"], view.pixel_ratio);
         let glyphs = symbol::glyphs::Glyphs::new(json["glyphs"].as_str());
+        let sprite = json["sprite"].clone();
         let mut r = Self {
             style: style::Style::parse(json),
             transform: Transform::new([0.0; 2], 0.0, 0.0, 1.0, 1.0, 1.0),
             sources,
             sprites,
+            sprite,
             glyphs,
             glyph_urls: Default::default(),
             glyph_dependencies: Default::default(),
+            requested: Default::default(),
+            clock: 0,
             view,
             max_zoom: 22.0,
             cross_source_collisions: true,
@@ -304,6 +322,37 @@ impl Renderer {
         let zoom = v.zoom.clamp(-2.0, max_zoom);
         self.transform = Transform::new(v.center, zoom, v.bearing, v.width as f64, v.height as f64, v.pixel_ratio);
         self.transform.set_margin(v.margin);
+    }
+
+    /// Moves the camera. Fetched resources and the layer buckets built from them are kept (up
+    /// to `MAX_CACHED_TILES` per source), so one renderer can draw many views of its style.
+    /// Call `needs()` again afterwards. A new pixel ratio refetches the sprite.
+    pub fn set_view(&mut self, view: View) {
+        if view == self.view {
+            return;
+        }
+        if view.pixel_ratio != self.view.pixel_ratio && !self.sprite.is_null() {
+            self.sprites = sprite::Sprites::new(&self.sprite, view.pixel_ratio);
+        }
+        self.view = view;
+        self.clock += 1;
+        self.set_max_zoom(self.max_zoom);
+    }
+
+    /// Drops the least recently needed tiles of each source beyond `MAX_CACHED_TILES`, with
+    /// everything built from them. Tiles of the current view stay.
+    fn evict(&mut self) {
+        for src in self.sources.values_mut() {
+            let last_used = src.last_used.get_mut();
+            let Some(excess) = last_used.len().checked_sub(MAX_CACHED_TILES).filter(|&n| n > 0) else { continue };
+            let mut old: Vec<(u64, TileId)> = last_used.iter().filter(|&(_, &t)| t < self.clock).map(|(&id, &t)| (t, id)).collect();
+            old.sort_unstable();
+            let evicted: std::collections::HashSet<TileId> = old.into_iter().take(excess).map(|(_, id)| id).collect();
+            last_used.retain(|id, _| !evicted.contains(id));
+            src.tiles.retain(|id, _| !evicted.contains(id));
+            src.vector_layers.get_mut().retain(|(data, _), _| !evicted.contains(data));
+            src.buckets.get_mut().retain(|(data, _, _), _| !evicted.contains(data));
+        }
     }
 
     /// MapLibre's `crossSourceCollisions` map option: when off, symbols only collide with
@@ -365,8 +414,13 @@ impl Renderer {
     fn resolve(&self, src: &Source) -> (Vec<(RenderTile, TileId)>, BTreeSet<TileId>) {
         let mut draw = BTreeSet::new();
         let mut fetch = BTreeSet::new();
+        let mut last_used = src.last_used.borrow_mut();
         let Data::Tiled(tj) = &src.data else {
-            return (self.covering(src).into_iter().map(|t| (t, t.canonical)).collect(), fetch);
+            let covering = self.covering(src);
+            if matches!(src.data, Data::GeoJson(_)) {
+                last_used.extend(covering.iter().map(|t| (t.canonical, self.clock)));
+            }
+            return (covering.into_iter().map(|t| (t, t.canonical)).collect(), fetch);
         };
         // `TileManager.maxUnderzooming`: parents are only sought this far below the ideal zoom.
         let covering = self.covering(src);
@@ -380,13 +434,19 @@ impl Renderer {
                         break;
                     }
                     Some(Some(_)) => {
+                        last_used.insert(id, self.clock);
                         let canonical = if id == Self::data_tile(tj, t.canonical) { t.canonical } else { id };
                         let overscaled_z = if canonical == t.canonical { t.overscaled_z } else { canonical.z };
                         draw.insert((RenderTile { overscaled_z, wrap: t.wrap, canonical }, id));
                         break;
                     }
-                    Some(None) if id.z > min_z => id = id.parent_at(id.z - 1),
-                    Some(None) => break,
+                    Some(None) => {
+                        last_used.insert(id, self.clock);
+                        if id.z <= min_z {
+                            break;
+                        }
+                        id = id.parent_at(id.z - 1);
+                    }
                 }
             }
         }
@@ -404,8 +464,14 @@ impl Renderer {
                     out.insert(url.clone());
                 }
                 Data::Tiled(tj) if !tj.tiles.is_empty() => {
-                    for id in self.resolve(src).1 {
-                        out.insert(tile::tile_url(&tj.tiles, id, tj.tms));
+                    for t in self.resolve(src).1 {
+                        let url = tile::tile_url(&tj.tiles, t, tj.tms);
+                        let mut requested = self.requested.borrow_mut();
+                        let targets = requested.entry(url.clone()).or_default();
+                        if !targets.iter().any(|(s, u)| s == id && *u == t) {
+                            targets.push((id.to_string(), t));
+                        }
+                        out.insert(url);
                     }
                 }
                 Data::Image { url, texture: None, .. } => {
@@ -416,7 +482,7 @@ impl Renderer {
         }
         let glyphs = self.glyph_needs();
         out.extend(glyphs.iter().map(|(url, _)| url.clone()));
-        *self.glyph_urls.borrow_mut() = glyphs.into_iter().collect();
+        self.glyph_urls.borrow_mut().extend(glyphs);
         out.into_iter().map(|url| Resource { url }).collect()
     }
 
@@ -442,9 +508,9 @@ impl Renderer {
             }
             let Some(src) = layer.source.as_deref().and_then(|s| self.sources.get(s)) else { continue };
             let raw = self.style.layer_json(&layer.id);
-            for (rt, tl) in self.tile_layers(src) {
+            for (rt, tl, _) in self.tile_layers(src) {
                 let Some(l) = self.source_layer(src, layer, tl.as_deref()) else { continue };
-                let tf = render::TileFeatures { tile: rt, mask: &no_mask, layer: l };
+                let tf = render::TileFeatures { tile: rt, mask: &no_mask, layer: l, buckets: None };
                 symbol::layout::glyph_dependencies(layer, &ctx, &tf, raw, &mut deps);
             }
         }
@@ -455,7 +521,8 @@ impl Renderer {
 
     /// Resolved tiles of a vector/GeoJSON source with their decoded layers (sliced when
     /// overzoomed).
-    fn tile_layers(&self, src: &Source) -> Vec<(RenderTile, Option<Rc<Vec<mvt::Layer>>>)> {
+    /// Each also gets its bucket cache.
+    fn tile_layers(&self, src: &Source) -> Vec<(RenderTile, Option<Rc<Vec<mvt::Layer>>>, Rc<render::TileBuckets>)> {
         self.resolve(src)
             .0
             .into_iter()
@@ -475,7 +542,8 @@ impl Renderer {
                     },
                     _ => None,
                 };
-                (rt, layers)
+                let buckets = Rc::clone(src.buckets.borrow_mut().entry((data_id, rt.canonical, rt.overscaled_z)).or_default());
+                (rt, layers, buckets)
             })
             .collect()
     }
@@ -497,13 +565,12 @@ impl Renderer {
         self.sprites.provide(url, bytes);
         let mut changed = self.sprites.images.len() != image_count;
         // Glyph ranges are recognized from the last `needs()` (evaluating text is costly).
-        let glyph_key = self.glyph_urls.borrow().get(url).cloned();
+        let glyph_key = self.glyph_urls.get_mut().remove(url);
         if let Some(key) = glyph_key {
             self.glyphs.provide(key, bytes);
         }
-        let wanted: Vec<(String, BTreeSet<TileId>)> = self.sources.iter().map(|(id, s)| (id.clone(), self.resolve(s).1)).collect();
-        for (id, fetch) in wanted {
-            let src = self.sources.get_mut(&id).unwrap();
+        let requested = self.requested.get_mut().remove(url).unwrap_or_default();
+        for (id, src) in self.sources.iter_mut() {
             match &mut src.data {
                 Data::Pending(u) if u == url => {
                     changed = true;
@@ -515,23 +582,25 @@ impl Renderer {
                     };
                 }
                 Data::Tiled(tj) => {
-                    for t in fetch {
-                        if tile::tile_url(&tj.tiles, t, tj.tms) == url {
-                            changed = true;
-                            // Like MapLibre: a missing vector tile is just empty; a missing raster
-                            // tile lets a parent show through, while an empty raster response
-                            // (HTTP 204) is a transparent tile.
-                            // A DEM tile that fails to decode also lets a parent show through.
-                            let raster = src.ty == "raster" || src.ty == "raster-dem";
-                            let decoded = match (src.ty.as_str(), bytes) {
-                                (_, Some([])) if raster => Some(TileData::Raster(Rc::new(image::Texture::new(&image::Image { w: 1, h: 1, data: vec![0; 4] }, true)))),
-                                ("raster", Some(b)) => image::Image::decode(b).map(|i| TileData::Raster(Rc::new(image::Texture::new(&i, true)))),
-                                ("raster-dem", Some(b)) => image::Image::decode(b).and_then(|i| dem_from(&i, &src.json, tj.encoding.as_deref())).map(|d| TileData::Dem(Rc::new(d))),
-                                _ if raster => None,
-                                _ => Some(TileData::Vector(Rc::new(bytes.and_then(mvt::decode).unwrap_or_default()))),
-                            };
-                            src.tiles.insert(t, decoded);
+                    for &(_, t) in requested.iter().filter(|(s, _)| s == id) {
+                        if src.tiles.contains_key(&t) {
+                            continue;
                         }
+                        changed = true;
+                        // Like MapLibre: a missing vector tile is just empty; a missing raster
+                        // tile lets a parent show through, while an empty raster response
+                        // (HTTP 204) is a transparent tile.
+                        // A DEM tile that fails to decode also lets a parent show through.
+                        let raster = src.ty == "raster" || src.ty == "raster-dem";
+                        let decoded = match (src.ty.as_str(), bytes) {
+                            (_, Some([])) if raster => Some(TileData::Raster(Rc::new(image::Texture::new(&image::Image { w: 1, h: 1, data: vec![0; 4] }, true)))),
+                            ("raster", Some(b)) => image::Image::decode(b).map(|i| TileData::Raster(Rc::new(image::Texture::new(&i, true)))),
+                            ("raster-dem", Some(b)) => image::Image::decode(b).and_then(|i| dem_from(&i, &src.json, tj.encoding.as_deref())).map(|d| TileData::Dem(Rc::new(d))),
+                            _ if raster => None,
+                            _ => Some(TileData::Vector(Rc::new(bytes.and_then(mvt::decode).unwrap_or_default()))),
+                        };
+                        src.tiles.insert(t, decoded);
+                        src.last_used.get_mut().insert(t, self.clock);
                     }
                 }
                 Data::Image { url: u, texture, .. } if u == url && texture.is_none() => {
@@ -552,6 +621,7 @@ impl Renderer {
         if !self.needs().is_empty() {
             return Err(Error::NotReady);
         }
+        self.evict();
         let t = &self.transform;
         let (w, h) = ((t.width * t.pixel_ratio).round() as usize, (t.height * t.pixel_ratio).round() as usize);
         let mut target = render::raster::Target::new(w, h);
@@ -577,9 +647,9 @@ impl Renderer {
             }
             let builder = symbol::layout::Builder { layer, ctx: &ctx, glyphs: &self.glyphs, raw };
             let mut buckets = Vec::new();
-            for (rt, tl) in self.tile_layers(src) {
+            for (rt, tl, _) in self.tile_layers(src) {
                 let l = self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty);
-                buckets.push(builder.build(&render::TileFeatures { tile: rt, mask: &no_mask, layer: l }));
+                buckets.push(builder.build(&render::TileFeatures { tile: rt, mask: &no_mask, layer: l, buckets: None }));
             }
             leader_of.insert(&layer.id, symbol_layers.len());
             symbol_layers.push((layer, raw, buckets));
@@ -643,7 +713,7 @@ impl Renderer {
             let tiles: Vec<render::TileFeatures> = layers_by_tile
                 .iter()
                 .zip(masks.iter())
-                .map(|((rt, tl), mask)| render::TileFeatures { tile: *rt, mask, layer: self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty) })
+                .map(|((rt, tl, buckets), mask)| render::TileFeatures { tile: *rt, mask, layer: self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty), buckets: Some(buckets) })
                 .collect();
             // `*-layer-opacity`: the layer is drawn offscreen, then composited.
             let layer_opacity = layer.paint.get(&format!("{}-layer-opacity", layer.ty)).map(|p| {
@@ -855,7 +925,7 @@ mod tests {
             renderer.sources.get_mut(id).unwrap().tiles.insert(parent, Some(TileData::Vector(Rc::new(vec![layer]))));
         }
         let layers = |id: &str, tile: TileId| {
-            renderer.tile_layers(&renderer.sources[id]).into_iter().find(|(t, _)| t.canonical == tile).unwrap().1.unwrap()
+            renderer.tile_layers(&renderer.sources[id]).into_iter().find(|(t, _, _)| t.canonical == tile).unwrap().1.unwrap()
         };
         let a = layers("a", child);
         assert!(Rc::ptr_eq(&a, &layers("a", child)));
@@ -872,7 +942,7 @@ mod tests {
         // Once zoom is clamped to the source zoom, use the original decoded tile.
         renderer.set_max_zoom(1.0);
         let unsliced = renderer.tile_layers(&renderer.sources["a"]).into_iter()
-            .find(|(t, _)| t.canonical == parent).unwrap().1.unwrap();
+            .find(|(t, _, _)| t.canonical == parent).unwrap().1.unwrap();
         assert_eq!(unsliced[0].features[0].geometry, vec![vec![[3072, 3072]]]);
     }
 
@@ -988,6 +1058,60 @@ mod tests {
         assert!(r.needs().is_empty());
         let px = r.render().unwrap();
         assert_eq!(&px[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn reused_renderer_matches_fresh_renders() {
+        // Polygons and round-joined lines over the whole world, so that every tile has buckets.
+        let mut features = Vec::new();
+        for i in 0..64 {
+            let (x, y) = (-178.0 + (i % 8) as f64 * 45.0, -82.0 + (i / 8) as f64 * 21.0);
+            features.push(serde_json::json!({"type": "Feature", "properties": {"k": i % 3}, "geometry": {"type": "Polygon", "coordinates": [[[x, y], [x + 40.0, y + 3.0], [x + 15.0, y + 19.0], [x, y]]]}}));
+            features.push(serde_json::json!({"type": "Feature", "properties": {"k": i % 3}, "geometry": {"type": "LineString", "coordinates": [[x, y], [x + 50.0, y + 15.0], [x + 10.0, y + 25.0]]}}));
+        }
+        let style = serde_json::json!({"version": 8, "sources": {"g": {"type": "geojson", "maxzoom": 3, "data": {"type": "FeatureCollection", "features": features}}}, "layers": [
+            {"id": "f", "type": "fill", "source": "g", "paint": {"fill-color": ["match", ["get", "k"], 0, "#c33", 1, "#3c3", "#33c"], "fill-opacity": 0.7}},
+            {"id": "l", "type": "line", "source": "g", "layout": {"line-join": "round", "line-cap": "round"}, "paint": {"line-width": 3}},
+        ]})
+        .to_string();
+        let render = |r: &mut Renderer| {
+            assert!(r.needs().is_empty());
+            r.render().unwrap()
+        };
+        // The 64 z3 tiles exceed MAX_CACHED_TILES and are revisited after eviction. z4 views
+        // overzoom the same z3 tiles, whose buckets differ by zoom.
+        let tile = |z: u8, x: u32, y: u32| View { margin: 16, pixel_ratio: 0.25, ..View::tile(z, x, y, 512) };
+        let mut views: Vec<View> = (0..64).map(|i| tile(3, i % 8, i / 8)).collect();
+        views.extend((0..16).map(|i| tile(4, 4 + i % 4, 4 + i / 4)));
+        views.extend((0..64).map(|i| tile(3, i % 8, i / 8)));
+        views.push(View { pixel_ratio: 0.5, ..views[9] });
+        let mut shared = Renderer::new(&style, views[0]).unwrap();
+        let mut drawn = 0;
+        for (i, &view) in views.iter().enumerate() {
+            shared.set_view(view);
+            let rgba = render(&mut shared);
+            assert_eq!(rgba, render(&mut Renderer::new(&style, view).unwrap()), "view {i}");
+            drawn += rgba.chunks_exact(4).any(|p| p[3] > 0) as usize;
+        }
+        assert!(drawn > views.len() / 2);
+        let src = &shared.sources["g"];
+        assert!(src.last_used.borrow().len() <= MAX_CACHED_TILES + 16);
+        assert!(src.buckets.borrow().len() <= MAX_CACHED_TILES + 16);
+    }
+
+    #[test]
+    fn provide_accepts_tiles_requested_before_a_view_change() {
+        let style = r#"{"version":8,"sources":{"v":{"type":"vector","tiles":["/{z}/{x}/{y}"],"maxzoom":2}},"layers":[{"id":"l","type":"line","source":"v","source-layer":"lines"}]}"#;
+        let (a, b) = (View::tile(2, 0, 0, 512), View::tile(2, 3, 3, 512));
+        let mut renderer = Renderer::new(style, a).unwrap();
+        let requested = renderer.needs();
+        assert!(!requested.is_empty());
+        renderer.set_view(b);
+        for r in &requested {
+            renderer.provide(&r.url, None);
+        }
+        renderer.set_view(a);
+        assert!(renderer.needs().is_empty());
     }
 
     #[test]

@@ -116,14 +116,12 @@ const rows = [head, `|---|${loaded.map(() => '---:|').join('')}---:|---:|---|`];
 const memory = loaded.map(() => 0);
 let regressions = 0;
 for (const c of cases) {
-  const runs = await Promise.all(loaded.map(async (v) => ({
-    renderer: await v.api.MapRenderer.init(styles[c.style], {wasm: v.module, cache: {ttlMs: Infinity}}),
-    times: [] as number[],
-    hash: '',
-  })));
+  const runs = loaded.map((v) => ({v, renderer: undefined as Renderer | undefined, times: [] as number[], hash: ''}));
   for (let i = 0; i < samples + 2; i++) {
     // Alternate the order to spread warm-up, JIT and thermal effects; the first two rounds warm up.
     for (const run of i % 2 ? [...runs].reverse() : runs) {
+      // A new renderer each time: renderers keep decoded tiles, and this measures a cold render.
+      run.renderer = await run.v.api.MapRenderer.init(styles[c.style], {wasm: run.v.module, cache: {ttlMs: Infinity}});
       const start = performance.now();
       const image = await run.renderer.render(c.view);
       const ms = performance.now() - start;
@@ -137,7 +135,7 @@ for (const c of cases) {
   });
   if (pngDir) {
     mkdirSync(pngDir, {recursive: true});
-    for (const [i, run] of runs.entries()) writeFileSync(join(pngDir, `${c.name.replace(/[^\w.-]+/g, '_')}.${loaded[i].name}.png`), await run.renderer.renderPng(c.view));
+    for (const [i, run] of runs.entries()) writeFileSync(join(pngDir, `${c.name.replace(/[^\w.-]+/g, '_')}.${loaded[i].name}.png`), await run.renderer!.renderPng(c.view));
   }
   const medians = runs.map((r) => median(r.times));
   const ratios = medians.slice(1).map((m) => m / medians[0] - 1);

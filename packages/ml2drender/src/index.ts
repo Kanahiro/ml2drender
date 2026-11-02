@@ -29,8 +29,13 @@ export interface InitOptions {
   loadResource?: (url: string) => Promise<Uint8Array<ArrayBuffer> | null>;
   /** Precompiled WASM (required on Cloudflare Workers). Defaults to the bundled asset in browsers. */
   wasm?: WebAssembly.Module;
-  /** Resource cache. ttlMs = 0 disables it; Infinity never expires. Defaults: 5 minutes, 64 MiB. */
-  cache?: { ttlMs?: number; maxBytes?: number };
+  /**
+   * Decoded resources (tiles and their layer geometry, sprites, glyphs) are kept inside the
+   * renderer and reused by later renders, and dropped ttlMs after the renderer was created;
+   * 0 disables reuse, Infinity never expires. Default: 5 minutes. Fetched bytes are not
+   * cached: rely on the HTTP cache, or cache in `loadResource`.
+   */
+  cache?: { ttlMs?: number };
   /** Replace each fill-extrusion layer. Defaults to a fill preserving its 2D appearance. */
   transformFillExtrusion?: (layer: FillExtrusionLayer) => StyleLayer;
 }
@@ -41,7 +46,8 @@ interface WasmExports {
   dealloc(ptr: number, len: number): void;
   out_ptr(): number;
   out_len(): number;
-  renderer_new(stylePtr: number, styleLen: number, lng: number, lat: number, zoom: number, bearing: number, width: number, height: number, pixelRatio: number, margin: number): number;
+  renderer_new(stylePtr: number, styleLen: number, ...view: ViewArgs): number;
+  renderer_set_view(handle: number, ...view: ViewArgs): void;
   renderer_needs(handle: number): number;
   renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
   renderer_render(handle: number): number;
@@ -49,10 +55,19 @@ interface WasmExports {
   renderer_free(handle: number): void;
 }
 
+type ViewArgs = [lng: number, lat: number, zoom: number, bearing: number, width: number, height: number, pixelRatio: number, margin: number];
+
+/** A WASM renderer shared by overlapping renders; freed once retired and idle. */
+interface Core {
+  handle: number;
+  createdAt: number;
+  active: number;
+  retired: boolean;
+}
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
-const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 const SUPPORTED_LAYERS = new Set<string>([
   'background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap',
 ] satisfies StyleLayer['type'][]);
@@ -80,66 +95,15 @@ async function loadWasm(module: WebAssembly.Module | undefined, loadResource: No
   return instance.exports as unknown as WasmExports;
 }
 
+function viewArgs(view: View): ViewArgs {
+  const margin = nonnegative(view.margin ?? 0, 'margin');
+  if (!Number.isInteger(margin) || margin > 0xffffffff) throw new RangeError('margin must be a uint32 integer');
+  return [view.center[0], view.center[1], view.zoom, view.bearing ?? 0, view.width, view.height, view.pixelRatio ?? 1, margin];
+}
+
 function nonnegative(value: number, name: string): number {
   if (!Number.isFinite(value) || value < 0) throw new RangeError(`${name} must be a finite, non-negative number`);
   return value;
-}
-
-/** Per-renderer, byte-bounded LRU cache; expiry is measured from the fetch completion. */
-class ResourceCache {
-  private readonly entries = new Map<string, { bytes: Uint8Array<ArrayBuffer>; expiresAt: number }>();
-  private readonly pending = new Map<string, Promise<Uint8Array<ArrayBuffer> | null>>();
-  private size = 0;
-
-  constructor(
-    private readonly ttlMs: number,
-    private readonly maxBytes: number,
-    private readonly loadResource: NonNullable<InitOptions['loadResource']>,
-  ) {}
-
-  async get(url: string): Promise<Uint8Array<ArrayBuffer> | null> {
-    const cached = this.entries.get(url);
-    if (cached) {
-      this.entries.delete(url);
-      if (cached.expiresAt > performance.now()) {
-        this.entries.set(url, cached);
-        return cached.bytes;
-      }
-      this.size -= cached.bytes.byteLength;
-    }
-    const existing = this.pending.get(url);
-    if (existing) return existing;
-    const request = this.fetch(url);
-    this.pending.set(url, request);
-    try {
-      return await request;
-    } finally {
-      this.pending.delete(url);
-    }
-  }
-
-  private async fetch(url: string): Promise<Uint8Array<ArrayBuffer> | null> {
-    const bytes = await this.loadResource(url);
-    if (bytes === null) return null;
-    if (this.ttlMs > 0 && bytes.byteLength <= this.maxBytes) {
-      const now = performance.now();
-      for (const [key, entry] of this.entries) {
-        if (entry.expiresAt <= now) {
-          this.entries.delete(key);
-          this.size -= entry.bytes.byteLength;
-        }
-      }
-      while (this.size + bytes.byteLength > this.maxBytes) {
-        const oldest = this.entries.keys().next().value;
-        if (oldest === undefined) break;
-        this.size -= this.entries.get(oldest)!.bytes.byteLength;
-        this.entries.delete(oldest);
-      }
-      this.entries.set(url, { bytes, expiresAt: now + this.ttlMs });
-      this.size += bytes.byteLength;
-    }
-    return bytes;
-  }
 }
 
 function flattenFillExtrusion(layer: FillExtrusionLayer): FillLayerSpecification {
@@ -181,20 +145,24 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
 
 /** Render a MapLibre Style as a static 2D RGBA image or PNG. */
 export class MapRenderer {
+  private core?: Core;
+  /** Fetches in flight, shared by overlapping renders. */
+  private readonly pending = new Map<string, Promise<Uint8Array<ArrayBuffer> | null>>();
+
   private constructor(
     private readonly wasm: WasmExports,
     private readonly style: Uint8Array,
-    private readonly cache: ResourceCache,
+    private readonly loadResource: NonNullable<InitOptions['loadResource']>,
+    private readonly ttlMs: number,
   ) {}
 
   /** Snapshot a style object and load the renderer. Resource URLs are passed to `loadResource` as written. */
   static async init(style: StyleSpecification, options: InitOptions = {}): Promise<MapRenderer> {
     const ttlMs = options.cache?.ttlMs ?? DEFAULT_TTL_MS;
     if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
-    const maxBytes = nonnegative(options.cache?.maxBytes ?? DEFAULT_MAX_BYTES, 'cache.maxBytes');
     const loadResource = options.loadResource ?? fetchResource;
     const prepared = prepareStyle(style, options.transformFillExtrusion);
-    return new MapRenderer(await loadWasm(options.wasm, loadResource), prepared, new ResourceCache(ttlMs, maxBytes, loadResource));
+    return new MapRenderer(await loadWasm(options.wasm, loadResource), prepared, loadResource, ttlMs);
   }
 
   /** Fetch required resources and return a new RGBA image for the requested view. */
@@ -211,31 +179,60 @@ export class MapRenderer {
   }
 
   private async renderOutput(view: View, format: 'rgba' | 'png'): Promise<Uint8Array<ArrayBuffer>> {
-    const margin = nonnegative(view.margin ?? 0, 'margin');
-    if (!Number.isInteger(margin) || margin > 0xffffffff) throw new RangeError('margin must be a uint32 integer');
+    const args = viewArgs(view);
     const w = this.wasm;
-    const handle = this.withBytes(this.style, (ptr, len) =>
-      w.renderer_new(ptr, len, view.center[0], view.center[1], view.zoom, view.bearing ?? 0,
-        view.width, view.height, view.pixelRatio ?? 1, margin));
-    if (!handle) throw new Error(decoder.decode(this.output()));
+    const core = this.acquire(args);
     try {
+      // Other renders may move the camera while this one awaits resources.
       for (let round = 0; ; round++) {
-        const count = w.renderer_needs(handle);
+        w.renderer_set_view(core.handle, ...args);
+        const count = w.renderer_needs(core.handle);
         if (count === 0) break;
         if (round >= 32) throw new Error('Resource requests did not settle');
         const urls = decoder.decode(this.output()).split('\n');
-        const resources = await Promise.all(urls.map((url) => this.cache.get(url)));
+        const resources = await Promise.all(urls.map((url) => this.fetch(url)));
         urls.forEach((url, i) => this.withBytes(encoder.encode(url), (urlPtr, urlLen) =>
           this.withBytes(resources[i] ?? new Uint8Array(), (dataPtr, dataLen) =>
-            w.renderer_provide(handle, urlPtr, urlLen, dataPtr, dataLen, resources[i] === null ? 0 : 1))));
+            w.renderer_provide(core.handle, urlPtr, urlLen, dataPtr, dataLen, resources[i] === null ? 0 : 1))));
       }
-      const ok = format === 'png' ? w.renderer_render_png(handle) : w.renderer_render(handle);
+      const ok = format === 'png' ? w.renderer_render_png(core.handle) : w.renderer_render(core.handle);
       if (!ok) throw new Error(decoder.decode(this.output()));
       // Own the bytes before another render can overwrite or grow WASM memory.
       return this.output();
     } finally {
-      w.renderer_free(handle);
+      this.release(core);
     }
+  }
+
+  private fetch(url: string): Promise<Uint8Array<ArrayBuffer> | null> {
+    let request = this.pending.get(url);
+    if (!request) {
+      request = this.loadResource(url).finally(() => this.pending.delete(url));
+      this.pending.set(url, request);
+    }
+    return request;
+  }
+
+  /** The current WASM renderer, replaced once older than the cache TTL. */
+  private acquire(args: ViewArgs): Core {
+    const now = performance.now();
+    if (this.core && now - this.core.createdAt >= this.ttlMs) {
+      this.core.retired = true;
+      if (this.core.active === 0) this.wasm.renderer_free(this.core.handle);
+      this.core = undefined;
+    }
+    if (!this.core) {
+      const handle = this.withBytes(this.style, (ptr, len) => this.wasm.renderer_new(ptr, len, ...args));
+      if (!handle) throw new Error(decoder.decode(this.output()));
+      this.core = { handle, createdAt: now, active: 0, retired: false };
+    }
+    this.core.active++;
+    return this.core;
+  }
+
+  private release(core: Core) {
+    core.active--;
+    if (core.retired && core.active === 0) this.wasm.renderer_free(core.handle);
   }
 
   private output(): Uint8Array<ArrayBuffer> {

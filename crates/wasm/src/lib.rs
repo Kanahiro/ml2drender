@@ -71,6 +71,25 @@ pub unsafe extern "C" fn renderer_new(
     }
 }
 
+/// Moves the camera of a live renderer, keeping its fetched and decoded resources.
+///
+/// # Safety
+/// `r` must be a live handle from `renderer_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn renderer_set_view(
+    r: *mut Renderer,
+    lng: f64,
+    lat: f64,
+    zoom: f64,
+    bearing: f64,
+    width: u32,
+    height: u32,
+    pixel_ratio: f64,
+    margin: u32,
+) {
+    unsafe { &mut *r }.set_view(View { center: [lng, lat], zoom, bearing, width, height, pixel_ratio, margin });
+}
+
 /// Writes the needed URLs, newline-separated, to the output buffer; returns their count.
 ///
 /// # Safety
