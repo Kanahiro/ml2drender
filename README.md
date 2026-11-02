@@ -139,4 +139,4 @@ pnpm test:render       # MapLibre GL JS の render テスト
 pnpm test:expression   # Style Spec の式テスト
 ```
 
-対応状況と既知の差分は [STATUS.md](STATUS.md) を参照してください。
+設計方針と既知の非対応は [AGENTS.md](AGENTS.md) を参照してください。
