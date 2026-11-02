@@ -7,6 +7,7 @@ use super::layout::{overlap_mode, CollisionBox, Resolved, SymbolBucket};
 use super::shaping::{self, WritingMode};
 use crate::render::{num, Ctx, EXTENT};
 use crate::style::Layer;
+use std::rc::Rc;
 
 pub const VIEWPORT_PADDING: f64 = 100.0;
 
@@ -306,7 +307,7 @@ impl CollisionIndex {
 pub struct LayerBuckets<'a> {
     pub layer: &'a Layer,
     pub raw: &'a serde_json::Value,
-    pub buckets: &'a [SymbolBucket],
+    pub buckets: &'a [Rc<SymbolBucket>],
     /// Collision group (0 = collides across sources).
     pub group: u32,
 }

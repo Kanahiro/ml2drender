@@ -11,6 +11,13 @@ pub struct Target {
     /// When non-empty, pixels written by MapLibre's opaque pass (opaque backgrounds and fill
     /// interiors), which depth-test-free layers drawn later (heatmaps) end up on top of.
     pub opaque: Vec<bool>,
+    /// When non-empty, the topmost opaque-pass layer (`layer` value, 0 = none) of each pixel,
+    /// standing in for the depth buffer: layers below it skip the pixel, which it overwrites.
+    pub occ: Vec<u16>,
+    /// The layer being drawn: its style index + 1.
+    pub layer: u16,
+    /// Whether `occ` can hide anything from the layers being drawn.
+    pub cull: bool,
 }
 
 /// Premultiplied color in 0..1.
@@ -18,10 +25,11 @@ pub type Rgba = [f32; 4];
 
 impl Target {
     pub fn new(w: usize, h: usize) -> Target {
-        Target { w, h, px: vec![[0; 4]; w * h], opaque: Vec::new() }
+        Target { w, h, px: vec![[0; 4]; w * h], opaque: Vec::new(), occ: Vec::new(), layer: 0, cull: false }
     }
 
     /// `gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA)` into a unorm8 target.
+    /// Callers check `visible` first (heatmaps, which don't, disable culling).
     #[inline]
     pub fn blend(&mut self, i: usize, c: Rgba) {
         // The same per-channel operations as below, four lanes at once (exact, not approximated).
@@ -47,6 +55,24 @@ impl Target {
         for k in 0..4 {
             let v = c[k].clamp(0.0, 1.0) + d[k] as f32 / 255.0 * inv;
             d[k] = round(v * 255.0).clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    /// Whether pixel `i` survives the opaque layers above the current one.
+    #[inline]
+    pub fn visible(&self, i: usize) -> bool {
+        !self.cull || self.occ[i] <= self.layer
+    }
+
+    /// Opaque pass: draw `c` (alpha 1, so it replaces whatever is below) and record the
+    /// current layer as the pixel's occluder, unless a layer above already covers it.
+    pub fn cover(&mut self, i: usize, c: Rgba) {
+        if self.visible(i) {
+            self.blend(i, c);
+            if let Some(o) = self.occ.get_mut(i) {
+                *o = self.layer;
+            }
+            self.mark_opaque(i);
         }
     }
 
@@ -156,107 +182,158 @@ impl Mask {
 /// Visit pixels whose centers are covered by the triangle (top-left fill rule), with
 /// barycentric weights.
 pub fn for_each_pixel(w: usize, h: usize, p: [[f64; 2]; 3], mut f: impl FnMut(usize, usize, [f64; 3])) {
-    let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]);
-    if area == 0.0 || !area.is_finite() {
-        return;
-    }
-    // Normalize to positive orientation.
-    let (p, flip) = if area < 0.0 { ([p[0], p[2], p[1]], true) } else { (p, false) };
-    let area = area.abs();
-    let min_x = p.iter().map(|v| v[0]).fold(f64::INFINITY, f64::min);
-    let max_x = p.iter().map(|v| v[0]).fold(f64::NEG_INFINITY, f64::max);
-    let min_y = p.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min);
-    let max_y = p.iter().map(|v| v[1]).fold(f64::NEG_INFINITY, f64::max);
-    let x0 = (min_x - 0.5).ceil().max(0.0) as i64;
-    let x1 = ((max_x - 0.5).floor() as i64).min(w as i64 - 1);
-    let y0 = (min_y - 0.5).ceil().max(0.0) as i64;
-    let y1 = ((max_y - 0.5).floor() as i64).min(h as i64 - 1);
-    if x0 > x1 || y0 > y1 {
-        return;
-    }
-    // Edge i is opposite vertex i: from p[(i+1)%3] to p[(i+2)%3]. Each edge is evaluated from
-    // its lexicographically smaller endpoint so that a shared edge yields exactly negated
-    // values in both triangles (no gaps or double hits from rounding).
-    let edge = |i: usize| {
-        let a = p[(i + 1) % 3];
-        let b = p[(i + 2) % 3];
-        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-        // GL's top-left rule applies in y-up window space; in our y-down buffer that
-        // includes left edges and *bottom* horizontal edges.
-        let include = dy < 0.0 || (dy == 0.0 && dx < 0.0);
-        let flip = (b[0], b[1]) < (a[0], a[1]);
-        let (base, ddx, ddy) = if flip { (b, -dx, -dy) } else { (a, dx, dy) };
-        (base, ddx, ddy, if flip { -1.0 } else { 1.0 }, include)
-    };
-    let edges = [edge(0), edge(1), edge(2)];
-    'rows: for y in y0..=y1 {
+    let Some(setup) = Setup::new(w, h, p) else { return };
+    setup.runs(|y, x0, x1| {
         let cy = y as f64 + 0.5;
-        let (mut row_x0, mut row_x1) = (x0, x1);
-        // Direct testing is cheaper than span setup for short rows (e.g. glyph quads).
-        if x1 - x0 >= 16 {
-            // Each edge is monotone along a scanline. An intersection suggests its pixel
-            // boundary, but only the original edge predicate can confirm it. Binary search
-            // handles rounding/cancellation without changing coverage or shared-edge rules.
-            for &(a, dx, dy, sign, include) in &edges {
-                let value = |x: i64| sign * (dx * (cy - a[1]) - dy * (x as f64 + 0.5 - a[0]));
-                let outside = |e: f64| e < 0.0 || (e == 0.0 && !include);
-                let (left, right) = (value(row_x0), value(row_x1));
-                // Non-finite edge intermediates need the original per-pixel behavior.
-                if !left.is_finite() || !right.is_finite() {
-                    continue;
-                }
-                let (left_out, right_out) = (outside(left), outside(right));
-                if left_out == right_out {
-                    if left_out {
-                        continue 'rows;
-                    }
-                    continue;
-                }
-                let (mut lo, mut hi) = (row_x0, row_x1);
-                let crossing = a[0] + dx * (cy - a[1]) / dy - 0.5;
-                let hint = (if left_out { crossing.ceil() } else { crossing.floor() + 1.0 }) as i64;
-                if hint > lo && hint <= hi && outside(value(hint - 1)) == left_out && outside(value(hint)) != left_out {
-                    lo = hint - 1;
-                    hi = hint;
-                }
-                while hi - lo > 1 {
-                    let mid = lo + (hi - lo) / 2;
-                    if outside(value(mid)) == left_out {
-                        lo = mid;
-                    } else {
-                        hi = mid;
-                    }
-                }
-                if left_out {
-                    row_x0 = hi;
-                } else {
-                    row_x1 = lo;
-                }
-            }
-        }
-        for x in row_x0..=row_x1 {
+        for x in x0..x1 {
             let cx = x as f64 + 0.5;
             let mut wts = [0.0; 3];
-            let mut inside = true;
-            for (i, (a, dx, dy, sign, include)) in edges.iter().enumerate() {
-                let e = sign * (dx * (cy - a[1]) - dy * (cx - a[0]));
-                if e < 0.0 || (e == 0.0 && !include) {
-                    inside = false;
-                    break;
-                }
-                wts[i] = e / area;
+            for (i, (a, dx, dy, sign, _)) in setup.edges.iter().enumerate() {
+                wts[i] = sign * (dx * (cy - a[1]) - dy * (cx - a[0])) / setup.area;
             }
-            if inside {
-                if flip {
-                    wts.swap(1, 2);
+            if setup.flip {
+                wts.swap(1, 2);
+            }
+            f(x, y, wts);
+        }
+    });
+}
+
+/// An edge from its lexicographically smaller endpoint: (base, dx, dy, sign, include).
+type Edge = ([f64; 2], f64, f64, f64, bool);
+
+/// A positively oriented triangle's edge functions and pixel bounds.
+struct Setup {
+    edges: [Edge; 3],
+    area: f64,
+    flip: bool,
+    x0: i64,
+    x1: i64,
+    y0: i64,
+    y1: i64,
+}
+
+impl Setup {
+    fn new(w: usize, h: usize, p: [[f64; 2]; 3]) -> Option<Setup> {
+        let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]);
+        if area == 0.0 || !area.is_finite() {
+            return None;
+        }
+        // Normalize to positive orientation.
+        let (p, flip) = if area < 0.0 { ([p[0], p[2], p[1]], true) } else { (p, false) };
+        let area = area.abs();
+        let min_x = p.iter().map(|v| v[0]).fold(f64::INFINITY, f64::min);
+        let max_x = p.iter().map(|v| v[0]).fold(f64::NEG_INFINITY, f64::max);
+        let min_y = p.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min);
+        let max_y = p.iter().map(|v| v[1]).fold(f64::NEG_INFINITY, f64::max);
+        let x0 = (min_x - 0.5).ceil().max(0.0) as i64;
+        let x1 = ((max_x - 0.5).floor() as i64).min(w as i64 - 1);
+        let y0 = (min_y - 0.5).ceil().max(0.0) as i64;
+        let y1 = ((max_y - 0.5).floor() as i64).min(h as i64 - 1);
+        if x0 > x1 || y0 > y1 {
+            return None;
+        }
+        // Edge i is opposite vertex i: from p[(i+1)%3] to p[(i+2)%3]. Each edge is evaluated from
+        // its lexicographically smaller endpoint so that a shared edge yields exactly negated
+        // values in both triangles (no gaps or double hits from rounding).
+        let edge = |i: usize| {
+            let a = p[(i + 1) % 3];
+            let b = p[(i + 2) % 3];
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            // GL's top-left rule applies in y-up window space; in our y-down buffer that
+            // includes left edges and *bottom* horizontal edges.
+            let include = dy < 0.0 || (dy == 0.0 && dx < 0.0);
+            let flip = (b[0], b[1]) < (a[0], a[1]);
+            let (base, ddx, ddy) = if flip { (b, -dx, -dy) } else { (a, dx, dy) };
+            (base, ddx, ddy, if flip { -1.0 } else { 1.0 }, include)
+        };
+        Some(Setup { edges: [edge(0), edge(1), edge(2)], area, flip, x0, x1, y0, y1 })
+    }
+
+    /// Calls `f(y, x0, x1)` for each run `x0..x1` of covered pixels in row `y`.
+    fn runs(&self, mut f: impl FnMut(usize, usize, usize)) {
+        let (x0, x1) = (self.x0, self.x1);
+        'rows: for y in self.y0..=self.y1 {
+            let cy = y as f64 + 0.5;
+            let (mut row_x0, mut row_x1) = (x0, x1);
+            // Whether every pixel of row_x0..=row_x1 is known to be inside.
+            let mut exact = false;
+            // Direct testing is cheaper than span setup for short rows (e.g. glyph quads).
+            if x1 - x0 >= 16 {
+                exact = true;
+                // Each edge is monotone along a scanline. An intersection suggests its pixel
+                // boundary, but only the original edge predicate can confirm it. Binary search
+                // handles rounding/cancellation without changing coverage or shared-edge rules.
+                for &(a, dx, dy, sign, include) in &self.edges {
+                    let value = |x: i64| sign * (dx * (cy - a[1]) - dy * (x as f64 + 0.5 - a[0]));
+                    let outside = |e: f64| e < 0.0 || (e == 0.0 && !include);
+                    let (left, right) = (value(row_x0), value(row_x1));
+                    // Non-finite edge intermediates need the original per-pixel behavior.
+                    if !left.is_finite() || !right.is_finite() {
+                        exact = false;
+                        continue;
+                    }
+                    let (left_out, right_out) = (outside(left), outside(right));
+                    if left_out == right_out {
+                        if left_out {
+                            continue 'rows;
+                        }
+                        continue;
+                    }
+                    let (mut lo, mut hi) = (row_x0, row_x1);
+                    let crossing = a[0] + dx * (cy - a[1]) / dy - 0.5;
+                    let hint = (if left_out { crossing.ceil() } else { crossing.floor() + 1.0 }) as i64;
+                    if hint > lo && hint <= hi && outside(value(hint - 1)) == left_out && outside(value(hint)) != left_out {
+                        lo = hint - 1;
+                        hi = hint;
+                    }
+                    while hi - lo > 1 {
+                        let mid = lo + (hi - lo) / 2;
+                        if outside(value(mid)) == left_out {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    if left_out {
+                        row_x0 = hi;
+                    } else {
+                        row_x1 = lo;
+                    }
                 }
-                f(x as usize, y as usize, wts);
+            }
+            if exact {
+                if row_x0 <= row_x1 {
+                    f(y as usize, row_x0 as usize, row_x1 as usize + 1);
+                }
+                continue;
+            }
+            let mut run: Option<i64> = None;
+            for x in row_x0..=row_x1 {
+                let cx = x as f64 + 0.5;
+                let inside = self.edges.iter().all(|(a, dx, dy, sign, include)| {
+                    let e = sign * (dx * (cy - a[1]) - dy * (cx - a[0]));
+                    !(e < 0.0 || (e == 0.0 && !include))
+                });
+                match (inside, run) {
+                    (true, None) => run = Some(x),
+                    (false, Some(r)) => {
+                        f(y as usize, r as usize, x as usize);
+                        run = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(r) = run {
+                f(y as usize, r as usize, row_x1 as usize + 1);
             }
         }
     }
 }
 
 /// Rasterize a triangle with `N` varyings; `shade` returns the premultiplied fragment color.
+/// Varyings are interpolated as screen-space planes (exact for the affine, unpitched camera up
+/// to rounding).
 pub fn triangle<const N: usize>(
     t: &mut Target,
     mask: Option<&Mask>,
@@ -264,17 +341,30 @@ pub fn triangle<const N: usize>(
     v: [[f32; N]; 3],
     shade: &mut impl FnMut(&[f32; N]) -> Option<Rgba>,
 ) {
-    let (w, h) = (t.w, t.h);
-    for_each_pixel(w, h, p, |x, y, b| {
-        if mask.is_some_and(|m| !m.get(x, y)) {
-            return;
-        }
-        let mut vary = [0f32; N];
-        for (k, out) in vary.iter_mut().enumerate() {
-            *out = (v[0][k] as f64 * b[0] + v[1][k] as f64 * b[1] + v[2][k] as f64 * b[2]) as f32;
-        }
-        if let Some(c) = shade(&vary) {
-            t.blend(y * w + x, c);
+    let w = t.w;
+    let Some(setup) = Setup::new(w, t.h, p) else { return };
+    // v(x, y) = v0 + gx (x - p0x) + gy (y - p0y).
+    let (e1, e2) = ([p[1][0] - p[0][0], p[1][1] - p[0][1]], [p[2][0] - p[0][0], p[2][1] - p[0][1]]);
+    let det = e1[0] * e2[1] - e1[1] * e2[0];
+    let mut gx = [0f64; N];
+    let mut gy = [0f64; N];
+    for k in 0..N {
+        let (d1, d2) = ((v[1][k] - v[0][k]) as f64, (v[2][k] - v[0][k]) as f64);
+        gx[k] = (d1 * e2[1] - d2 * e1[1]) / det;
+        gy[k] = (d2 * e1[0] - d1 * e2[0]) / det;
+    }
+    setup.runs(|y, x0, x1| {
+        let dy = y as f64 + 0.5 - p[0][1];
+        let row: [f64; N] = std::array::from_fn(|k| v[0][k] as f64 + gy[k] * dy);
+        for x in x0..x1 {
+            if mask.is_some_and(|m| !m.get(x, y)) || !t.visible(y * w + x) {
+                continue;
+            }
+            let dx = x as f64 + 0.5 - p[0][0];
+            let vary: [f32; N] = std::array::from_fn(|k| (row[k] + gx[k] * dx) as f32);
+            if let Some(c) = shade(&vary) {
+                t.blend(y * w + x, c);
+            }
         }
     });
 }
@@ -301,7 +391,7 @@ pub fn line(t: &mut Target, accept: &dyn Fn(usize, usize) -> bool, a: [f64; 2], 
             continue;
         }
         let (x, y) = (x as usize, y as usize);
-        if !accept(x, y) {
+        if !t.visible(y * t.w + x) || !accept(x, y) {
             continue;
         }
         let dist = (j as f64 + 0.5 - minor).abs();
