@@ -33,9 +33,9 @@ if (variants.length < 2) throw new Error('usage: node scripts/bench.ts base=<che
 
 interface View {center: [number, number]; zoom: number; bearing?: number; width: number; height: number; pixelRatio?: number}
 interface Renderer {render(view: View): Promise<{data: Uint8ClampedArray}>; renderPng(view: View): Promise<Uint8Array>}
-interface Api {MapRenderer: {init(style: object | string, options: object): Promise<Renderer>}}
+interface Api {MapRenderer: {init(style: object, options: object): Promise<Renderer>}}
 
-// Synthetic styles, served as bench://<name>.json. Fixture resources are local://<path under assets>.
+// Synthetic styles. Fixture resources are local://<path under assets>.
 const tile = (z: number, x: number, y: number): [number, number] =>
   [x / 2 ** z * 360 - 180, Math.atan(Math.sinh(Math.PI * (1 - 2 * y / 2 ** z))) * 180 / Math.PI];
 // The corner shared by the dense Berlin streets tiles 14/8802..8803/5374..5375.
@@ -82,7 +82,6 @@ const cases: {name: string; style: string; view: View}[] = [
 
 globalThis.fetch = async (input: RequestInfo | URL) => {
   const url = input instanceof Request ? input.url : String(input);
-  if (url.startsWith('bench://')) return new Response(JSON.stringify(styles[url.slice(8, -5)]));
   try {
     return new Response(readFileSync(join(assets, decodeURIComponent(url.replace(/^local:\/\//, '')))));
   } catch {
@@ -118,9 +117,7 @@ const memory = loaded.map(() => 0);
 let regressions = 0;
 for (const c of cases) {
   const runs = await Promise.all(loaded.map(async (v) => ({
-    // ponytail: falls back to the old URL-only init for older base checkouts; drop once main takes style objects.
-    renderer: await v.api.MapRenderer.init(styles[c.style], {wasm: v.module, cache: {ttlMs: Infinity}})
-      .catch(() => v.api.MapRenderer.init(`bench://${c.style}.json`, {wasm: v.module, cache: {ttlMs: Infinity}})),
+    renderer: await v.api.MapRenderer.init(styles[c.style], {wasm: v.module, cache: {ttlMs: Infinity}}),
     times: [] as number[],
     hash: '',
   })));
