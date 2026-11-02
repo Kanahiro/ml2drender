@@ -127,6 +127,9 @@ pub struct Layer {
     pub paint: HashMap<String, PropValue>,
     /// Whether expressions need feature geometry (`within` / `distance`).
     pub needs_geometry: bool,
+    /// Id of the first layer with the same source data, filter and layout (like
+    /// `groupByLayout`, but ignoring zoom ranges); layers in one group build identical buckets.
+    pub layout_group: String,
 }
 
 impl Layer {
@@ -180,8 +183,10 @@ impl Style {
             state.insert(k.clone(), Value::from_json(&v["default"]));
         }
         let state_json = J::Object(state.iter().map(|(k, v)| (k.clone(), v.to_json())).collect());
-        let mut layers = Vec::new();
-        for l in deref_layers(json["layers"].as_array().map(Vec::as_slice).unwrap_or_default()) {
+        let mut layers: Vec<Layer> = Vec::new();
+        let derefed = deref_layers(json["layers"].as_array().map(Vec::as_slice).unwrap_or_default());
+        let mut grouped: Vec<&J> = Vec::new();
+        for l in &derefed {
             let Some(ty) = l["type"].as_str() else { continue };
             let mut layout = HashMap::new();
             let mut paint = HashMap::new();
@@ -200,8 +205,19 @@ impl Style {
                 }
             }
             let filter = l.get("filter").and_then(|f| filter::compile(f, &state_json)).map(Rc::new);
+            let id = l["id"].as_str().unwrap_or("").to_string();
+            let needs_geometry = contains_op(l, &["within", "distance"]);
+            // Zoom ranges only decide visibility. Paint expressions see the bucket's features, so
+            // `needs_geometry` must agree.
+            const GROUP: [&str; 5] = ["type", "source", "source-layer", "filter", "layout"];
+            let layout_group = layers
+                .iter()
+                .zip(&grouped)
+                .find(|(g, gl)| g.needs_geometry == needs_geometry && GROUP.iter().all(|k| gl.get(*k) == l.get(*k)))
+                .map_or_else(|| id.clone(), |(g, _)| g.layout_group.clone());
+            grouped.push(l);
             layers.push(Layer {
-                id: l["id"].as_str().unwrap_or("").to_string(),
+                id,
                 ty: ty.to_string(),
                 source: l["source"].as_str().map(String::from),
                 source_layer: l["source-layer"].as_str().map(String::from),
@@ -210,7 +226,8 @@ impl Style {
                 filter,
                 layout,
                 paint,
-                needs_geometry: contains_op(&l, &["within", "distance"]),
+                needs_geometry,
+                layout_group,
             });
         }
         Style { json, layers, global_state: Rc::new(state) }

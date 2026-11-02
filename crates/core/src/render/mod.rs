@@ -29,11 +29,85 @@ pub struct Ctx<'a> {
     dems: RefCell<HashMap<String, Rc<Vec<Option<dem::DemTile>>>>>,
 }
 
+/// Camera-independent bucket data of one tile, by layout group. It lives as long as the tile's
+/// data stays cached, so later renders of other views reuse it.
+pub type TileBuckets = RefCell<HashMap<String, Rc<dyn std::any::Any>>>;
+
 /// A tile's features for one style layer, with its clip mask.
 pub struct TileFeatures<'a> {
     pub tile: RenderTile,
     pub mask: &'a Mask,
     pub layer: &'a mvt::Layer,
+    /// Where `bucket` keeps its results; `None` builds them afresh.
+    pub buckets: Option<&'a TileBuckets>,
+}
+
+impl TileFeatures<'_> {
+    /// `build`'s result for `layer` in this tile, shared by its layout group. It must depend
+    /// only on the tile and the layer's source data and layout (not on paint or the camera): it
+    /// is reused across layers and renders.
+    pub fn bucket<T: 'static>(&self, layer: &Layer, build: impl FnOnce() -> T) -> Rc<T> {
+        let Some(cache) = self.buckets else { return Rc::new(build()) };
+        if let Some(Ok(b)) = cache.borrow().get(&layer.layout_group).map(|b| Rc::clone(b).downcast::<T>()) {
+            return b;
+        }
+        let b = Rc::new(build());
+        cache.borrow_mut().insert(layer.layout_group.clone(), b.clone());
+        b
+    }
+}
+
+/// A fill layer's polygons in one tile, triangulated.
+struct FillBucket {
+    features: Vec<BucketFeature>,
+    /// Per polygon feature (by index into `features`): its polygons.
+    polygons: Vec<(usize, Vec<FillPolygon>)>,
+}
+
+struct FillPolygon {
+    /// Ring vertices, concatenated (exterior first), in tile units.
+    points: Vec<[f64; 2]>,
+    ring_lens: Vec<usize>,
+    /// `earcut` indices into `points`.
+    triangles: Vec<usize>,
+}
+
+impl FillBucket {
+    fn new(layer: &Layer, ctx: &Ctx, tf: &TileFeatures) -> Self {
+        let features = ctx.bucket_features(layer, tf, Some("fill-sort-key"));
+        let polygons = features
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.ty == GeomType::Polygon)
+            .map(|(i, f)| {
+                let polygons = classify_rings(&f.geometry, 500)
+                    .into_iter()
+                    .map(|polygon| {
+                        let mut flat = Vec::new();
+                        let mut holes = Vec::new();
+                        for (i, ring) in polygon.iter().enumerate() {
+                            if i > 0 {
+                                holes.push(flat.len() / 2);
+                            }
+                            for p in ring {
+                                flat.push(p[0]);
+                                flat.push(p[1]);
+                            }
+                        }
+                        let triangles = earcutr::earcut(&flat, &holes, 2).unwrap_or_default();
+                        FillPolygon { points: polygon.concat(), ring_lens: polygon.iter().map(Vec::len).collect(), triangles }
+                    })
+                    .collect();
+                (i, polygons)
+            })
+            .collect();
+        // Only the triangulated polygons are drawn.
+        let mut features = features;
+        for f in &mut features {
+            f.geometry = Vec::new();
+        }
+        Self { features, polygons }
+    }
 }
 
 /// A feature ready for bucket building: geometry in EXTENT (8192) units.
@@ -295,7 +369,7 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
     let pattern_prop = layer.paint("fill-pattern");
     let mut prepared = Vec::new();
     for tf in tiles {
-        let features = ctx.bucket_features(layer, tf, Some("fill-sort-key"));
+        let bucket = tf.bucket(layer, || FillBucket::new(layer, ctx, tf));
         let to_world = ctx.tile_to_world(&tf.tile);
         let tr = ctx.translate(layer, "fill", &tf.tile);
         let to_screen = |p: [f64; 2]| {
@@ -306,7 +380,8 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
         // Pixels covered by opaque fills, standing in for the depth buffer.
         let mut covered = vec![false; if constant_opaque { target.w * target.h } else { 0 }];
         let mut outlines = Vec::new();
-        for f in features.iter().filter(|f| f.ty == GeomType::Polygon) {
+        for (i, polygons) in &bucket.polygons {
+            let f = &bucket.features[*i];
             let opacity = num(&ctx.paint(layer, "fill-opacity", Some(f), &tf.tile));
             let fill_color = color(&ctx.paint(layer, "fill-color", Some(f), &tf.tile), opacity);
             let paint = if has_pattern {
@@ -333,24 +408,11 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
                     FillPaint::Pattern { img, tint, opacity } => FillPaint::Pattern { img, tint: *tint, opacity: *opacity },
                 }
             };
-            for polygon in classify_rings(&f.geometry, 500) {
-                let mut flat = Vec::new();
-                let mut holes = Vec::new();
-                for (i, ring) in polygon.iter().enumerate() {
-                    if i > 0 {
-                        holes.push(flat.len() / 2);
-                    }
-                    for p in ring {
-                        flat.push(p[0]);
-                        flat.push(p[1]);
-                    }
-                }
-                let tile_pts: Vec<[f64; 2]> = flat.chunks(2).map(|p| [p[0], p[1]]).collect();
-                let screen: Vec<[f64; 2]> = tile_pts.iter().map(|p| to_screen(*p)).collect();
-                let vary: Vec<[f32; 2]> = tile_pts.iter().map(|p| tp.pattern_pos(size, *p)).collect();
+            for polygon in polygons {
+                let screen: Vec<[f64; 2]> = polygon.points.iter().map(|p| to_screen(*p)).collect();
+                let vary: Vec<[f32; 2]> = polygon.points.iter().map(|p| tp.pattern_pos(size, *p)).collect();
                 if opacity >= 0.01 {
-                    let tris = earcutr::earcut(&flat, &holes, 2).unwrap_or_default();
-                    for t in tris.chunks_exact(3) {
+                    for t in polygon.triangles.chunks_exact(3) {
                         let p = [screen[t[0]], screen[t[1]], screen[t[2]]];
                         let v = [vary[t[0]], vary[t[1]], vary[t[2]]];
                         let g = raster::varying_gradients(p, v);
@@ -368,12 +430,12 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
                 }
                 if antialias && opacity >= 0.01 {
                     let mut start = 0;
-                    for ring in &polygon {
-                        for i in 1..ring.len() {
+                    for &len in &polygon.ring_lens {
+                        for i in 1..len {
                             let (a, b) = (start + i - 1, start + i);
                             outlines.push((screen[a], screen[b], vary[a], vary[b], clone_paint(&outline_paint)));
                         }
-                        start += ring.len();
+                        start += len;
                     }
                 }
             }

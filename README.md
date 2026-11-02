@@ -14,9 +14,9 @@ rustup target add wasm32-unknown-unknown
 pnpm demo
 ```
 
-`pnpm demo` は WASM をビルドして Vite の比較画面を起動します。左は MapLibre GL JS、右は本レンダラが生成した 256px ラスタータイルを MapLibre GL JS の raster ソースで表示します。どちらの地図を動かしても、もう一方の中心とズームが同期します。Style JSON は画面上で直接編集し、「適用・再描画」で両方の地図へ適用します。初期値は同梱の `examples/browser/src/style.json`（[MapLibre demotiles](https://demotiles.maplibre.org/style.json)）を使用し、Style JSON のネットワーク取得は行いません。右側のリソース取得と WASM 描画は Web Worker で実行し、Worker 内で `ImageBitmap` に変換して所有権を移譲し、メインスレッドでタイルに表示します。デモでは取得リソースのキャッシュを無期限 TTL にし、容量上限は既定の 64 MiB を使います。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
+`pnpm demo` は WASM をビルドして Vite の比較画面を起動します。左は MapLibre GL JS、右は本レンダラが生成した 256px ラスタータイルを MapLibre GL JS の raster ソースで表示します。どちらの地図を動かしても、もう一方の中心とズームが同期します。Style JSON は画面上で直接編集し、「適用・再描画」で両方の地図へ適用します。初期値は同梱の `examples/browser/src/style.json`（[MapLibre demotiles](https://demotiles.maplibre.org/style.json)）を使用し、Style JSON のネットワーク取得は行いません。右側のリソース取得と WASM 描画は複数の Web Worker（最大4、CPUコア数−1）で並列に実行し、Worker 内で `ImageBitmap` に変換して所有権を移譲し、メインスレッドでタイルに表示します。デモではレンダラを無期限に再利用し（`ttlMs: Infinity`）、取得はブラウザの HTTP キャッシュに任せます。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
 
-デモの統計欄には、完了タイル数と直近200タイルの生成時間（平均・p95・最大）、平均Worker往復時間、初期化時間を表示します。生成時間には素材取得を含み、往復時間には画像変換・通信・待ち時間も含みます。画面への表示時間やWASM単体のCPU時間ではありません。「再描画」は素材キャッシュを維持し、「適用・再描画」はスタイルとキャッシュ、統計を初期化します。
+デモの統計欄には、完了タイル数と直近200タイルの生成時間（平均・p95・最大）、平均Worker往復時間、初期化時間を表示します。生成時間には素材取得を含み、往復時間には画像変換・通信・待ち時間も含みます。画面への表示時間やWASM単体のCPU時間ではありません。「再描画」は Worker 内のレンダラ（デコード済みタイル）を維持し、「適用・再描画」はスタイルとレンダラ、統計を初期化します。
 
 ## JavaScript API
 
@@ -29,7 +29,7 @@ import { MapRenderer } from 'ml2drender';
 
 const style = await (await fetch('/style.json')).json();
 const renderer = await MapRenderer.init(style, {
-  cache: { ttlMs: 300_000, maxBytes: 64 * 1024 * 1024 },
+  cache: { ttlMs: 300_000 },
 });
 const image = await renderer.render({
   center: [139.767, 35.681], // [経度, 緯度]
@@ -51,8 +51,8 @@ canvas.getContext('2d')!.putImageData(
 - `MapRenderer.init(style, options?)`: 公式 `StyleSpecification` 型の Style オブジェクトを受け取り、WASM をロードします。Style JSON の取得（`fetch` や `fs.readFile`）は呼び出し側で行ってください。呼び出し時点の内容をコピーして使用します。スタイル内のリソース URL は書かれたまま `loadResource` に渡します。Style Spec では `glyphs` と TileJSON の `url` は絶対 URL のため、絶対 URL を使ってください（ブラウザの既定 fetch では相対 URL はページ基準で解決されます）。
 - `options.loadResource`: タイル・TileJSON・sprite・glyph・既定の Wasm を取得する `(url: string) => Promise<Uint8Array<ArrayBuffer> | null>`。既定は HTTP fetch です。HTTP 404 は欠落リソース（`null`）として描画を続行します。それ以外の HTTP エラーや通信・本文読み取りの失敗は例外になります。空タイルを表す HTTP 204 は成功として扱います。Wasm は必須のため、欠落時は初期化に失敗します。ホスト側の同時数制限・再試行・タイムアウトを実装する場合に指定できます。
 - `options.wasm`: コンパイル済みの `WebAssembly.Module`。指定時はWASMのfetch・実行時コンパイルを行わず、モジュールから専用インスタンスを生成します。Cloudflare Workersでは必須です。
-- `options.cache.ttlMs`: 取得したタイル・sprite・グリフなどをメモリに保持する期間（ミリ秒）。既定は 5 分。`0` ならキャッシュせず、`Infinity` なら期限切れになりません。期限は取得完了から計測します。
-- `options.cache.maxBytes`: キャッシュするデータの合計上限（バイト）。既定は 64 MiB。上限に達すると最近使っていないデータから削除します。上限を超える単体のデータは保持しません。取得失敗はキャッシュしません。Style と WASM はインスタンス内で再利用します。
+- `options.cache.ttlMs`: WASM 内のレンダラを描画をまたいで再利用する期間（ミリ秒）。既定は 5 分。レンダラはデコード済みのタイルと線・塗りのジオメトリ（ソースごとに最近使った8タイル分）、GeoJSON・sprite・グリフなどを保持し、生成から `ttlMs` 経過後の描画で作り直します。`0` なら描画ごとに作り直し、`Infinity` なら作り直しません。密な低ズームのタイルではこの保持に数十 MiB を使うため、メモリが厳しい環境では `0` にしてください。Style と WASM はインスタンス内で再利用します。
+- 取得したバイト列はキャッシュしません。同じ URL を同時に要求した場合は取得を 1 回にまとめます。再取得を避けるには、ブラウザの HTTP キャッシュに任せるか、`loadResource` 内でキャッシュしてください（Cloudflare Workers なら Cache API など）。
 - `options.transformFillExtrusion`: Style JSON にある各 `fill-extrusion` レイヤを、対応する 2D レイヤ定義へ変換する関数です。省略時は `fill` に変換し、ID・metadata・source・source-layer・ズーム範囲・filter・visibility を維持します。色・不透明度・パターン・平行移動・移動の基準と、それらの式・transition を対応する fill プロパティへ引き継ぎます。高さ・底面の高さ・立体の陰影・角の丸みは反映しません。不透明度は fill のフィーチャ単位の合成に従うため、重なる地物の見え方は異なる場合があります。独自の関数を指定すると既定の変換を置き換えます。`init()` 時に適用されます。引数の `FillExtrusionLayer` は公式 [`@maplibre/maplibre-gl-style-spec`](https://github.com/maplibre/maplibre-style-spec) の `FillExtrusionLayerSpecification`、返り値の `StyleLayer` は公式 `LayerSpecification` から `fill-extrusion` を除いた型です。レイヤ種別ごとの必須項目・paint・layout を型チェックします。型定義は取得した JSON の実行時検証を行うものではありません。
 - `renderer.render(view)`: 必要なタイル・画像・グリフを取得し、`Promise<RenderedImage>` を返します。同じインスタンスで異なる視点を繰り返し描画できます。
 - `renderer.renderPng(view)`: 同じリソース取得・描画処理を使い、WASM内でPNG化した `Promise<Uint8Array<ArrayBuffer>>` を返します。RGBA8の可逆圧縮で、速度重視の圧縮設定です。寸法・DPR・余白切り出しは `render()` と同じです。返すバイト列は独立したコピーなので、続けて描画しても書き換わりません。

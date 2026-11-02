@@ -19,21 +19,22 @@ const LINE_ATLAS_WIDTH: usize = 256;
 #[derive(Clone, Copy)]
 struct Vertex {
     pos: [f64; 2],
-    /// Extrude vector, quantized like the byte attribute.
-    extrude: [f64; 2],
-    offset: [f64; 2],
+    /// Extrude vector and offset normal, quantized like the byte attributes (`quantize`).
+    extrude: [i8; 2],
+    offset: [i8; 2],
     round: bool,
     up: bool,
     linesofar: f64,
-    /// Gradient texture coordinates: progress within the clip, and its row (1-based).
-    uv_x: f64,
-    split: usize,
+    /// Gradient texture coordinates: progress within the clip, and its row (1-based). The
+    /// shader reads the progress as f32.
+    uv_x: f32,
+    split: u32,
 }
 
 #[derive(Default)]
 struct Builder {
     vertices: Vec<Vertex>,
-    triangles: Vec<[usize; 3]>,
+    triangles: Vec<[u32; 3]>,
     e1: Option<usize>,
     e2: Option<usize>,
     distance: f64,
@@ -73,17 +74,11 @@ fn js_round(v: f64) -> f64 {
     crate::expression::value::js_round(v)
 }
 
-/// `a_data` extrude bytes: `Math.round(63 * v) + 128` stored in a `Uint8Array` (wrapping),
-/// decoded as `byte - 128`.
-fn q_extrude(v: f64) -> f64 {
-    let byte = (js_round(EXTRUDE_SCALE * v) as i64 + 128).rem_euclid(256);
-    (byte - 128) as f64 / EXTRUDE_SCALE
-}
-
-/// `a_offset_normal`: `Math.round(63 * v)` stored in an `Int8Array` (wrapping).
-fn q_offset(v: f64) -> f64 {
-    let b = (js_round(EXTRUDE_SCALE * v) as i64 + 128).rem_euclid(256) - 128;
-    b as f64 / EXTRUDE_SCALE
+/// `Math.round(63 * v)` as stored in the vertex attributes: the extrude bytes go into a
+/// `Uint8Array` offset by 128 (decoded as `byte - 128`), `a_offset_normal` into an `Int8Array`.
+/// Both wrap to the same signed byte; the shader divides it by 63 again.
+fn quantize(v: f64) -> i8 {
+    ((js_round(EXTRUDE_SCALE * v) as i64 + 128).rem_euclid(256) - 128) as i8
 }
 
 impl Builder {
@@ -92,12 +87,12 @@ impl Builder {
         let total = if self.clip.is_some() { self.scaled_distance * (MAX_LINE_DISTANCE - 1.0) } else { self.scaled_distance };
         // Stored as an integer of half the distance (LINE_DISTANCE_SCALE), decoded times two.
         let linesofar = ((total * 0.5) as i64 as f64) * 2.0;
-        let uv_x = self.clip.map_or(0.0, |(s, e)| (self.scaled_distance - s) / (e - s));
-        let split = self.clips.len();
-        self.vertices.push(Vertex { pos: p, extrude: [q_extrude(ex), q_extrude(ey)], offset: [q_offset(ox), q_offset(oy)], round, up, linesofar, uv_x, split });
+        let uv_x = self.clip.map_or(0.0, |(s, e)| (self.scaled_distance - s) / (e - s)) as f32;
+        let split = self.clips.len() as u32;
+        self.vertices.push(Vertex { pos: p, extrude: [quantize(ex), quantize(ey)], offset: [quantize(ox), quantize(oy)], round, up, linesofar, uv_x, split });
         let e = self.vertices.len() - 1;
         if let (Some(e1), Some(e2)) = (self.e1, self.e2) {
-            self.triangles.push([e1, e, e2]);
+            self.triangles.push([e1 as u32, e as u32, e2 as u32]);
         }
         if up {
             self.e2 = Some(e);
@@ -219,30 +214,30 @@ impl Builder {
                 }
             }
             let middle = prev_vertex.is_some() && next_vertex.is_some();
-            let mut cj = if middle { join } else if is_polygon { "butt" } else { cap }.to_string();
+            let mut cj = if middle { join } else if is_polygon { "butt" } else { cap };
             if middle && cj == "round" {
                 if miter_length < round_limit {
-                    cj = "miter".into();
+                    cj = "miter";
                 } else if miter_length <= 2.0 {
-                    cj = "fakeround".into();
+                    cj = "fakeround";
                 }
             }
             if cj == "miter" && miter_length > miter_limit {
-                cj = "bevel".into();
+                cj = "bevel";
             }
             if cj == "bevel" {
                 if miter_length > 2.0 {
-                    cj = "flipbevel".into();
+                    cj = "flipbevel";
                 }
                 if miter_length < miter_limit {
-                    cj = "miter".into();
+                    cj = "miter";
                 }
             }
             if let Some(pv) = prev_vertex {
                 self.update_distance(pv, cur);
             }
             let on = Some(offset_normal);
-            match cj.as_str() {
+            match cj {
                 "miter" => {
                     join_normal = mult(join_normal, miter_length);
                     self.add_current_vertex(cur, join_normal, 0.0, 0.0, false, on, 0.0);
@@ -483,24 +478,24 @@ impl Gradient {
     }
 }
 
-struct Prepared<'a> {
-    f: &'a BucketFeature,
-    b: Builder,
+/// A line layer's tessellated features in one tile (`LineBucket`).
+struct LineBucket {
+    features: Vec<BucketFeature>,
+    /// Built lines, by index into `features`.
+    lines: Vec<(usize, Builder)>,
+    /// `lineMetrics` clips of all lines; the gradient texture covers the whole tile bucket.
+    clips: Vec<(f64, f64)>,
+    max_line_length: f64,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn draw_line(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeatures], source_maxzoom: u8, map_max_zoom: f64, has_gradient: bool, has_pattern: bool) {
-    let dpr = ctx.transform.pixel_ratio;
-    for tf in tiles {
+impl LineBucket {
+    fn new(layer: &Layer, ctx: &Ctx, tf: &TileFeatures) -> Self {
         let features = ctx.bucket_features(layer, tf, Some("line-sort-key"));
-        let to_world = ctx.tile_to_world(&tf.tile);
-        let tr = ctx.translate(layer, "line", &tf.tile);
         let overscaling = 2f64.powi(tf.tile.overscaled_z as i32 - tf.tile.canonical.z as i32);
-        // Build all features first: the gradient texture covers the whole tile bucket.
         let mut clips: Vec<(f64, f64)> = Vec::new();
         let mut max_line_length: f64 = 0.0;
-        let mut prepared = Vec::new();
-        for f in features.iter().filter(|f| matches!(f.ty, GeomType::LineString | GeomType::Polygon)) {
+        let mut lines = Vec::new();
+        for (i, f) in features.iter().enumerate().filter(|(_, f)| matches!(f.ty, GeomType::LineString | GeomType::Polygon)) {
             let l = |name: &str| ctx.layout(layer, name, Some(f), &tf.tile);
             let mut b = Builder { clips: std::mem::take(&mut clips), ..Default::default() };
             let props = &f.feature.properties;
@@ -522,21 +517,39 @@ pub fn draw_line(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
             }
             clips = std::mem::take(&mut b.clips);
             max_line_length = max_line_length.max(b.max_line_length);
-            prepared.push(Prepared { f, b });
+            // The bucket outlives this render; drop the growth slack.
+            b.vertices.shrink_to_fit();
+            b.triangles.shrink_to_fit();
+            lines.push((i, b));
         }
+        let mut features = features;
+        for f in &mut features {
+            f.geometry = Vec::new();
+        }
+        Self { features, lines, clips, max_line_length }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_line(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeatures], source_maxzoom: u8, map_max_zoom: f64, has_gradient: bool, has_pattern: bool) {
+    let dpr = ctx.transform.pixel_ratio;
+    for tf in tiles {
+        let bucket = tf.bucket(layer, || LineBucket::new(layer, ctx, tf));
+        let to_world = ctx.tile_to_world(&tf.tile);
+        let tr = ctx.translate(layer, "line", &tf.tile);
         let gradient = has_gradient.then(|| {
             let step = matches!(layer.paint("line-gradient"), crate::style::PropValue::Expr(e) if e.is_step());
             let width = if step {
                 let overzoom = if tf.tile.canonical.z == source_maxzoom { (2f64.powf(map_max_zoom - tf.tile.canonical.z as f64)).ceil() } else { 1.0 };
-                let coverage = max_line_length / EXTENT * 1024.0 * overzoom;
+                let coverage = bucket.max_line_length / EXTENT * 1024.0 * overzoom;
                 (coverage.max(1.0) as u64).next_power_of_two().clamp(256, MAX_TEXTURE_SIZE) as usize
             } else {
                 256
             };
-            Gradient::new(layer, ctx, &clips, width)
+            Gradient::new(layer, ctx, &bucket.clips, width)
         });
-        for p in &prepared {
-            draw_feature(target, layer, ctx, tf, p.f, &p.b, &to_world, tr, dpr, gradient.as_ref(), has_pattern);
+        for (i, b) in &bucket.lines {
+            draw_feature(target, layer, ctx, tf, &bucket.features[*i], b, &to_world, tr, dpr, gradient.as_ref(), has_pattern);
         }
     }
 }
@@ -619,8 +632,10 @@ fn draw_feature(
         .map(|v| {
             let normal_y = if v.up { 1.0 } else { -1.0 };
             let w = to_world(v.pos);
-            let ox = offset * v.offset[0] * normal_y + outset * v.extrude[0];
-            let oy = offset * v.offset[1] * normal_y + outset * v.extrude[1];
+            let [ex, ey] = v.extrude.map(|e| e as f64 / EXTRUDE_SCALE);
+            let [nx, ny] = v.offset.map(|o| o as f64 / EXTRUDE_SCALE);
+            let ox = offset * nx * normal_y + outset * ex;
+            let oy = offset * ny * normal_y + outset * ey;
             ctx.transform.world_to_screen([w[0] + ox + tr[0], w[1] + oy + tr[1]])
         })
         .collect();
@@ -644,8 +659,9 @@ fn draw_feature(
     let floorwidth_f = floorwidth as f32;
     let opacity_f = opacity as f32;
     for t in &b.triangles {
+        let t = t.map(|i| i as usize);
         // All three vertices of a triangle share the split row.
-        let split = b.vertices[t[0]].split;
+        let split = b.vertices[t[0]].split as usize;
         let mut shade = |v: &[f32; 4]| {
             let d = (v[0] * v[0] + v[1] * v[1]).sqrt() * outset_f;
             let mut alpha = ((d - (inset_f - blur2)).min(outset_f - d) / blur2).clamp(0.0, 1.0);
@@ -666,7 +682,7 @@ fn draw_feature(
         };
         let vary = t.map(|i| {
             let v = &b.vertices[i];
-            [if v.round { 1.0 } else { 0.0 }, if v.up { 1.0 } else { -1.0 }, (v.linesofar * scale_x) as f32, v.uv_x as f32]
+            [if v.round { 1.0 } else { 0.0 }, if v.up { 1.0 } else { -1.0 }, (v.linesofar * scale_x) as f32, v.uv_x]
         });
         raster::triangle(target, Some(tf.mask), [screen[t[0]], screen[t[1]], screen[t[2]]], vary, &mut shade);
     }
