@@ -1,0 +1,162 @@
+// Compare rendering performance of WASM builds on upstream fixtures (`pnpm fixtures`), offline.
+// Each variant is a checkout whose own JS API (packages/ml2drender/src/index.ts) drives its WASM, so
+// ABI changes between them are fine. The first variant is the baseline; renders alternate between
+// variants. Prints a Markdown report; exits 1 if a case is slower than the baseline by > threshold.
+//
+// Usage: pnpm bench <name>=<checkout>[:<wasm>] ... [--samples 15] [--threshold 0.1] [--png <dir>]
+//   <wasm> (relative to the current directory) defaults to <checkout>/target/wasm32-unknown-unknown/wasm/ml2drender_wasm.wasm (`pnpm build:wasm`).
+// Example, working tree vs main: git worktree add ../main main && (cd ../main && pnpm build:wasm) && pnpm build:wasm
+//   && pnpm bench main=../main head=.
+import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join, resolve} from 'node:path';
+import {pathToFileURL} from 'node:url';
+
+const root = resolve(import.meta.dirname, '..');
+const assets = join(root, 'fixtures/render/assets');
+const args = process.argv.slice(2);
+const option = (name: string, fallback: string) => {
+  const i = args.indexOf(`--${name}`);
+  return i < 0 ? fallback : args.splice(i, 2)[1];
+};
+const samples = Number(option('samples', '15'));
+const threshold = Number(option('threshold', '0.1'));
+const pngDir = option('png', '');
+const variants = args.map((arg) => {
+  const [name, spec] = arg.split('=');
+  const [dir, wasm] = spec.split(':');
+  return {name, dir: resolve(dir), wasm: resolve(wasm ?? join(dir, 'target/wasm32-unknown-unknown/wasm/ml2drender_wasm.wasm'))};
+});
+if (variants.length < 2) throw new Error('usage: node scripts/bench.ts base=<checkout>[:<wasm>] head=<checkout>[:<wasm>] [--samples N] [--threshold R] [--png dir]');
+
+interface View {center: [number, number]; zoom: number; bearing?: number; width: number; height: number; pixelRatio?: number}
+interface Renderer {render(view: View): Promise<{data: Uint8ClampedArray}>; renderPng(view: View): Promise<Uint8Array>}
+interface Api {MapRenderer: {init(url: string, options: object): Promise<Renderer>}}
+
+// Synthetic styles, served as bench://<name>.json. Fixture resources are local://<path under assets>.
+const tile = (z: number, x: number, y: number): [number, number] =>
+  [x / 2 ** z * 360 - 180, Math.atan(Math.sinh(Math.PI * (1 - 2 * y / 2 ** z))) * 180 / Math.PI];
+// The corner shared by the dense Berlin streets tiles 14/8802..8803/5374..5375.
+const berlin = tile(14, 8803, 5375);
+const streets = (file: string) => {
+  const style = JSON.parse(readFileSync(join(assets, 'styles', file), 'utf8'));
+  style.sources.maplibre = {type: 'vector', tiles: ['local://tiles/{z}-{x}-{y}.mvt'], maxzoom: 14};
+  return style;
+};
+const geojson = (features: object[]) => ({type: 'geojson', data: {type: 'FeatureCollection', features}});
+const point = (i: number, columns: number, step: number): [number, number] =>
+  [berlin[0] - 0.02 + (i % columns) * step, berlin[1] - 0.012 + Math.floor(i / columns) * step * 0.6];
+const styles: Record<string, object> = {
+  bright: streets('bright-v9.json'),
+  basic: streets('basic-v9.json'),
+  dem: {version: 8, sources: {dem: {type: 'raster-dem', tiles: ['local://tiles/{z}-{x}-{y}.terrain.png'], tileSize: 256, maxzoom: 12}}, layers: [
+    {id: 'relief', type: 'color-relief', source: 'dem', paint: {'color-relief-color': ['interpolate', ['linear'], ['elevation'], 0, '#004400', 500, '#88aa44', 1500, '#ccaa66', 3000, '#ffffff']}},
+    {id: 'shade', type: 'hillshade', source: 'dem'},
+  ]},
+  satellite: {version: 8, sources: {satellite: {type: 'raster', tiles: ['local://tiles/{z}-{x}-{y}.satellite.png'], tileSize: 256, maxzoom: 12}}, layers: [{id: 'satellite', type: 'raster', source: 'satellite'}]},
+  // Many layers filtering one GeoJSON source.
+  lines: {version: 8, sources: {data: geojson(Array.from({length: 1500}, (_, i) => ({type: 'Feature', properties: {kind: i % 8}, geometry: {type: 'LineString', coordinates: Array.from({length: 24}, (_, j) => {
+    const [x, y] = point(i, 50, 0.0008);
+    return [x + j * 0.00002, y + j * 0.00004];
+  })}})))}, layers: Array.from({length: 8}, (_, i) => ({id: `line-${i}`, type: 'line', source: 'data', filter: ['==', ['get', 'kind'], i], paint: {'line-width': 1 + i % 3, 'line-color': '#557799'}}))},
+  labels: {version: 8, glyphs: 'local://glyphs/{fontstack}/{range}.pbf', sources: {data: geojson(Array.from({length: 10000}, (_, i) => ({type: 'Feature', properties: {name: `Label ${i % 97}`}, geometry: {type: 'Point', coordinates: point(i, 100, 0.0004)}})))},
+    layers: [{id: 'labels', type: 'symbol', source: 'data', layout: {'text-field': ['get', 'name'], 'text-font': ['Noto Sans Regular'], 'text-size': 10}}]},
+  icons: {version: 8, sprite: 'local://sprites/bright-v9', sources: {data: geojson(Array.from({length: 1024}, (_, i) => ({type: 'Feature', properties: {}, geometry: {type: 'Point', coordinates: point(i, 32, 0.0012)}})))},
+    layers: [{id: 'icons', type: 'symbol', source: 'data', layout: {'icon-image': 'cafe-15', 'icon-allow-overlap': true, 'icon-ignore-placement': true}}]},
+};
+const terrain = tile(12, 759, 1609);
+// The fixture sprites are 1x only, so cases with icons use DPR 1. The dense tiles span 1024 px at z15.
+const cases: {name: string; style: string; view: View}[] = [
+  {name: 'bright z14', style: 'bright', view: {center: berlin, zoom: 14, width: 512, height: 512}},
+  {name: 'bright z15', style: 'bright', view: {center: berlin, zoom: 15, width: 1024, height: 1024}},
+  {name: 'bright z16.5 bearing 17°', style: 'bright', view: {center: berlin, zoom: 16.5, bearing: 17, width: 1024, height: 1024}},
+  {name: 'basic z15', style: 'basic', view: {center: berlin, zoom: 15, width: 1024, height: 1024}},
+  {name: 'hillshade + color-relief', style: 'dem', view: {center: terrain, zoom: 13, width: 512, height: 512, pixelRatio: 2}},
+  {name: 'raster', style: 'satellite', view: {center: terrain, zoom: 13.5, bearing: 17, width: 512, height: 512, pixelRatio: 2}},
+  {name: 'GeoJSON lines, 8 layers', style: 'lines', view: {center: berlin, zoom: 14, width: 512, height: 512, pixelRatio: 2}},
+  {name: 'GeoJSON 10k labels', style: 'labels', view: {center: berlin, zoom: 14, width: 512, height: 512}},
+  {name: 'GeoJSON 1024 icons', style: 'icons', view: {center: berlin, zoom: 14, width: 1024, height: 1024}},
+];
+
+globalThis.fetch = async (input: RequestInfo | URL) => {
+  const url = input instanceof Request ? input.url : String(input);
+  if (url.startsWith('bench://')) return new Response(JSON.stringify(styles[url.slice(8, -5)]));
+  try {
+    return new Response(readFileSync(join(assets, decodeURIComponent(url.replace(/^local:\/\//, '')))));
+  } catch {
+    return new Response(null, {status: 404});
+  }
+};
+
+// Transpile each checkout's API with this checkout's TypeScript (no type check: its node_modules may be absent).
+const tsc = join(root, 'packages/ml2drender/node_modules/.bin/tsc');
+const loaded = await Promise.all(variants.map(async (v) => {
+  const out = mkdtempSync(join(tmpdir(), 'ml2drender-bench-'));
+  execFileSync(tsc, ['--noCheck', '--skipLibCheck', '--target', 'es2024', '--module', 'esnext', '--outDir', out, join(v.dir, 'packages/ml2drender/src/index.ts')]);
+  const api: Api = await import(pathToFileURL(join(out, 'index.js')).href);
+  return {...v, api, module: await WebAssembly.compile(readFileSync(v.wasm))};
+}));
+
+const median = (xs: number[]) => {
+  const s = [...xs].sort((a, b) => a - b);
+  return s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+};
+// Interquartile range relative to the median: how noisy a measurement was.
+const spread = (xs: number[]) => {
+  const s = [...xs].sort((a, b) => a - b);
+  return (s[Math.floor(s.length * 0.75)] - s[Math.floor(s.length * 0.25)]) / median(xs);
+};
+const pct = (r: number) => `${r >= 0 ? '+' : ''}${(r * 100).toFixed(1)}%`;
+const mib = (bytes: number) => `${(bytes / 2 ** 20).toFixed(1)} MiB`;
+
+const [base, ...others] = loaded;
+const head = `| ケース | ${loaded.map((v) => v.name).join(' | ')} | 差 | ばらつき | 出力 |`;
+const rows = [head, `|---|${loaded.map(() => '---:|').join('')}---:|---:|---|`];
+const memory = loaded.map(() => 0);
+let regressions = 0;
+for (const c of cases) {
+  const runs = await Promise.all(loaded.map(async (v) => ({
+    renderer: await v.api.MapRenderer.init(`bench://${c.style}.json`, {wasm: v.module, cache: {ttlMs: Infinity}}),
+    times: [] as number[],
+    hash: '',
+  })));
+  for (let i = 0; i < samples + 2; i++) {
+    // Alternate the order to spread warm-up, JIT and thermal effects; the first two rounds warm up.
+    for (const run of i % 2 ? [...runs].reverse() : runs) {
+      const start = performance.now();
+      const image = await run.renderer.render(c.view);
+      const ms = performance.now() - start;
+      if (i >= 2) run.times.push(ms);
+      run.hash ||= createHash('sha256').update(image.data).digest('hex');
+    }
+  }
+  runs.forEach((run, i) => {
+    const wasm = (run.renderer as unknown as {wasm?: {memory: WebAssembly.Memory}}).wasm;
+    memory[i] = Math.max(memory[i], wasm?.memory.buffer.byteLength ?? 0);
+  });
+  if (pngDir) {
+    mkdirSync(pngDir, {recursive: true});
+    for (const [i, run] of runs.entries()) writeFileSync(join(pngDir, `${c.name.replace(/[^\w.-]+/g, '_')}.${loaded[i].name}.png`), await run.renderer.renderPng(c.view));
+  }
+  const medians = runs.map((r) => median(r.times));
+  const ratios = medians.slice(1).map((m) => m / medians[0] - 1);
+  const worst = Math.max(...ratios);
+  if (worst > threshold) regressions++;
+  const mark = worst > threshold ? ' ⚠️ 劣化' : Math.min(...ratios) < -threshold ? ' 改善' : '';
+  const same = runs.every((r) => r.hash === runs[0].hash);
+  rows.push(`| ${c.name} | ${medians.map((m) => `${m.toFixed(1)} ms`).join(' | ')} | ${ratios.map(pct).join(', ')}${mark} | ${(Math.max(...runs.map((r) => spread(r.times))) * 100).toFixed(1)}% | ${same ? '同一' : '**変化あり**'} |`);
+}
+const sizes = loaded.map((v) => statSync(v.wasm).size);
+const vs = (xs: number[], f: (x: number) => string) =>
+  `| ${xs.map(f).join(' | ')} | ${xs.slice(1).map((x) => pct(x / xs[0] - 1)).join(', ')} | | |`;
+rows.push(`| WASM サイズ ${vs(sizes, (b) => `${(b / 1e6).toFixed(3)} MB`)}`);
+rows.push(`| WASM メモリ最大 ${vs(memory, mib)}`);
+
+console.log(`## ベンチマーク: ${others.map((v) => v.name).join(', ')} vs ${base.name}
+
+${rows.join('\n')}
+
+各ケース ${samples} 回(ウォームアップ 2 回)の中央値。描画ごとに素材のデコードから行い、取得はメモリ上のfixture。差が ±${threshold * 100}% を超えると印を付ける。「ばらつき」は四分位範囲/中央値で、これより小さい差は誤差とみなす。「出力」は ${base.name} とのRGBA一致。Node ${process.version}。`);
+process.exitCode = regressions ? 1 : 0;

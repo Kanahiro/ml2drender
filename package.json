@@ -13,6 +13,7 @@
     "test": "cargo test --release",
     "test:render": "cargo run --release -p ml2drender-cli -- render-tests",
     "test:expression": "cargo run --release -p ml2drender-cli -- expression-tests",
+    "bench": "node scripts/bench.ts",
     "demo": "pnpm build:wasm && pnpm --filter demo-browser dev",
     "demo:workers": "pnpm build:wasm && pnpm --filter demo-workers dev",
     "typecheck": "pnpm -r typecheck"

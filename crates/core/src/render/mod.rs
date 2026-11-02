@@ -25,6 +25,8 @@ pub struct Ctx<'a> {
     // A context borrows one immutable transform and lives for one render. Keeping the
     // cache here avoids stale masks after a camera clamp or a change in resolved tiles.
     masks: RefCell<HashMap<(usize, usize, Vec<RenderTile>), Rc<Vec<Mask>>>>,
+    /// Backfilled DEM tiles by source id, aligned with the source's resolved tiles.
+    dems: RefCell<HashMap<String, Rc<Vec<Option<dem::DemTile>>>>>,
 }
 
 /// A tile's features for one style layer, with its clip mask.
@@ -46,7 +48,18 @@ pub struct BucketFeature {
 
 impl<'a> Ctx<'a> {
     pub fn new(transform: &'a Transform, global_state: &'a Rc<Object>, images: &'a HashMap<String, Rc<crate::sprite::StyleImage>>) -> Self {
-        Self { transform, global_state, images, masks: RefCell::new(HashMap::new()) }
+        Self { transform, global_state, images, masks: RefCell::new(HashMap::new()), dems: RefCell::new(HashMap::new()) }
+    }
+
+    /// The DEM tiles of `source`, built once per render and shared by its hillshade and
+    /// color-relief layers.
+    pub fn dem_tiles(&self, source: &str, build: impl FnOnce() -> Vec<Option<dem::DemTile>>) -> Rc<Vec<Option<dem::DemTile>>> {
+        if let Some(cached) = self.dems.borrow().get(source) {
+            return Rc::clone(cached);
+        }
+        let tiles = Rc::new(build());
+        self.dems.borrow_mut().insert(source.to_string(), Rc::clone(&tiles));
+        tiles
     }
 
     pub fn tile_px(&self, tile: &RenderTile) -> f64 {

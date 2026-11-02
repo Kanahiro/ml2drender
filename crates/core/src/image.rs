@@ -135,8 +135,8 @@ impl Texture {
             .data
             .chunks_exact(4)
             .map(|p| {
-                let a = p[3] as f64;
-                let m = |c: u8| (c as f64 * a / 255.0).round() as u8;
+                // round(c·a / 255) in integers: c·a / 255 is never a tie.
+                let m = |c: u8| ((c as u32 * p[3] as u32 + 127) / 255) as u8;
                 [m(p[0]), m(p[1]), m(p[2]), p[3]]
             })
             .collect();
@@ -183,6 +183,21 @@ impl Texture {
                 let (x0, y0) = (x.floor(), y.floor());
                 let (fx, fy) = (x - x0, y - y0);
                 let (x0, y0) = (x0 as i64, y0 as i64);
+                // The same per-channel operations as below, four lanes at once.
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                {
+                    use core::arch::wasm32::*;
+                    let texel = |x: i64, y: i64| {
+                        let p = l.px[(y.clamp(0, l.h as i64 - 1) as usize) * l.w + x.clamp(0, l.w as i64 - 1) as usize];
+                        f32x4_div(f32x4_convert_u32x4(u32x4_extend_low_u16x8(u16x8_extend_low_u8x16(u32x4(u32::from_ne_bytes(p), 0, 0, 0)))), f32x4_splat(255.0))
+                    };
+                    let (a, b, c, d) = (texel(x0, y0), texel(x0 + 1, y0), texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
+                    let (gx, hx, gy, hy) = (f32x4_splat(1.0 - fx), f32x4_splat(fx), f32x4_splat(1.0 - fy), f32x4_splat(fy));
+                    let lerp = |p, q| f32x4_add(f32x4_mul(p, gx), f32x4_mul(q, hx));
+                    let r = f32x4_add(f32x4_mul(lerp(a, b), gy), f32x4_mul(lerp(c, d), hy));
+                    return [f32x4_extract_lane::<0>(r), f32x4_extract_lane::<1>(r), f32x4_extract_lane::<2>(r), f32x4_extract_lane::<3>(r)];
+                }
+                #[allow(unreachable_code)]
                 let (a, b, c, d) = (texel(x0, y0), texel(x0 + 1, y0), texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
                 std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
             }

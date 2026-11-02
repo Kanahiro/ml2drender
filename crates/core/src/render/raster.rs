@@ -24,11 +24,29 @@ impl Target {
     /// `gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA)` into a unorm8 target.
     #[inline]
     pub fn blend(&mut self, i: usize, c: Rgba) {
+        // The same per-channel operations as below, four lanes at once (exact, not approximated).
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        {
+            use core::arch::wasm32::*;
+            let d = &mut self.px[i];
+            let one = f32x4_splat(1.0);
+            let src = f32x4_min(f32x4_max(f32x4(c[0], c[1], c[2], c[3]), f32x4_splat(0.0)), one);
+            let inv = f32x4_splat(1.0 - c[3].clamp(0.0, 1.0));
+            let dst = f32x4_convert_u32x4(u32x4_extend_low_u16x8(u16x8_extend_low_u8x16(u32x4(u32::from_ne_bytes(*d), 0, 0, 0))));
+            let x = f32x4_mul(f32x4_add(src, f32x4_mul(f32x4_div(dst, f32x4_splat(255.0)), inv)), f32x4_splat(255.0));
+            let t = f32x4_trunc(x);
+            let up = f32x4_ge(f32x4_abs(f32x4_sub(x, t)), f32x4_splat(0.5));
+            let r = f32x4_add(t, v128_and(up, v128_bitselect(x, one, f32x4_splat(-0.0))));
+            let v = i32x4_trunc_sat_f32x4(f32x4_min(f32x4_max(r, f32x4_splat(0.0)), f32x4_splat(255.0)));
+            *d = u32x4_extract_lane::<0>(u8x16_narrow_i16x8(i16x8_narrow_i32x4(v, v), v)).to_ne_bytes();
+            return;
+        }
+        #[allow(unreachable_code)]
         let d = &mut self.px[i];
         let inv = 1.0 - c[3].clamp(0.0, 1.0);
         for k in 0..4 {
             let v = c[k].clamp(0.0, 1.0) + d[k] as f32 / 255.0 * inv;
-            d[k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+            d[k] = round(v * 255.0).clamp(0.0, 255.0) as u8;
         }
     }
 
@@ -51,6 +69,15 @@ impl Target {
         }
         out
     }
+}
+
+/// `f32::round` (half away from zero) built from `trunc`, which WASM has natively: the libm
+/// call costs more than the blend and keeps the four channels from vectorizing.
+#[inline]
+pub fn round(x: f32) -> f32 {
+    let t = x.trunc();
+    // `x - t` is exact.
+    if (x - t).abs() >= 0.5 { t + 1.0f32.copysign(x) } else { t }
 }
 
 /// Pixel coverage mask (like the stencil clip of a tile).
@@ -309,6 +336,23 @@ pub fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_matches_std() {
+        // A sweep of the blend's range, a few ulps around every tie and integer, non-finite values.
+        let near = (0..=512).flat_map(|k| ((k as f32 * 0.5).to_bits().saturating_sub(4)..=(k as f32 * 0.5).to_bits() + 4));
+        let sweep = (0..=256.0f32.to_bits()).step_by(4099);
+        for bits in near.chain(sweep).chain([f32::INFINITY.to_bits(), f32::NAN.to_bits()]) {
+            for x in [f32::from_bits(bits), -f32::from_bits(bits)] {
+                assert_eq!(round(x).to_bits(), x.round().to_bits(), "{x}");
+            }
+        }
+        for c in 0..=255u32 {
+            for a in 0..=255u32 {
+                assert_eq!((c * a + 127) / 255, (c as f64 * a as f64 / 255.0).round() as u32);
+            }
+        }
+    }
 
     // Brute-force oracle: test every pixel, with no scanline bounds or incremental edges.
     // Keep weights as bits so changing interpolation arithmetic cannot hide behind tolerances.

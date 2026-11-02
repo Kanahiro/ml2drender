@@ -8,6 +8,7 @@ use crate::expression::Value;
 use crate::image::{Filter, Image, Texture};
 use crate::style::Layer;
 use crate::tile::RenderTile;
+use std::cell::OnceCell;
 use std::f32::consts::PI;
 
 /// Decoded DEM tile: RGB texels with a 2px border (edge-replicated until backfilled).
@@ -80,10 +81,8 @@ impl Dem {
     pub fn prepare(&self, zoom: f64) -> Texture {
         let size = self.dim + 2;
         let u = self.unpack;
-        let elevation = |x: usize, y: usize| -> f32 {
-            let p = self.data[y * self.stride + x];
-            p[0] as f32 * u[0] + p[1] as f32 * u[1] + p[2] as f32 * u[2] - u[3]
-        };
+        let elevations: Vec<f32> = self.data.iter().map(|p| p[0] as f32 * u[0] + p[1] as f32 * u[1] + p[2] as f32 * u[2] - u[3]).collect();
+        let elevation = |x: usize, y: usize| elevations[y * self.stride + x];
         let zoom = zoom as f32;
         let factor = if zoom < 2.0 { 0.4 } else if zoom < 4.5 { 0.35 } else { 0.3 };
         let exaggeration = if zoom < 15.0 { (zoom - 15.0) * factor } else { 0.0 };
@@ -107,13 +106,35 @@ impl Dem {
     }
 }
 
+/// A drawn tile's DEM after `backfillDEM`, shared by its source's layers in one render; the
+/// hillshade slopes are prepared on first use (`needsHillshadePrepare`).
+pub struct DemTile {
+    pub dem: Dem,
+    slopes: OnceCell<Texture>,
+}
+
+impl DemTile {
+    pub fn new(dem: Dem) -> DemTile {
+        DemTile { dem, slopes: OnceCell::new() }
+    }
+
+    pub fn slopes(&self, zoom: f64) -> &Texture {
+        self.slopes.get_or_init(|| self.dem.prepare(zoom))
+    }
+}
+
 /// `hillshadeUniformValues`.
 pub struct HillshadeParams {
     method: u8,
     exaggeration: f32,
     accent: Rgba,
-    altitudes: Vec<f32>,
-    azimuths: Vec<f32>,
+    /// The first light's azimuth + π (standard, igor).
+    azimuth: f32,
+    /// Per light: sin(altitude), cos(altitude), and the azimuth's cos, sin as used by `cang`.
+    lights: Vec<[f32; 4]>,
+    /// Standard: the exaggeration's power base and `base^(π/2) - 1`.
+    base: f32,
+    base_max: f32,
     shadows: Vec<Rgba>,
     highlights: Vec<Rgba>,
     /// `NUM_ILLUMINATION_SOURCES`: the number of highlight colors.
@@ -151,19 +172,32 @@ impl HillshadeParams {
         pad(&mut shadows, n, [0.0, 0.0, 0.0, 1.0]);
         let viewport = p("hillshade-illumination-anchor").as_str() != Some("map");
         let bearing = -ctx.transform.bearing_rad;
-        let azimuths = direction.iter().map(|d| (d.to_radians() + if viewport { bearing } else { 0.0 }) as f32).collect();
+        let azimuths: Vec<f32> = direction.iter().map(|d| (d.to_radians() + if viewport { bearing } else { 0.0 }) as f32).collect();
+        let altitudes: Vec<f32> = altitude.iter().map(|a| a.to_radians() as f32).collect();
+        let method = match p("hillshade-method").as_str() {
+            Some("basic") => 4,
+            Some("combined") => 1,
+            Some("igor") => 2,
+            Some("multidirectional") => 3,
+            _ => 0,
+        };
+        let azimuth = azimuths[0] + PI;
+        let lights = (0..if method == 3 { sources } else { 1 })
+            .map(|i| {
+                let (cos_az, sin_az) = if method == 3 { (-azimuths[i].cos(), -azimuths[i].sin()) } else { (azimuth.cos(), azimuth.sin()) };
+                [altitudes[i].sin(), altitudes[i].cos(), cos_az, sin_az]
+            })
+            .collect();
+        let exaggeration = num(&p("hillshade-exaggeration")) as f32;
+        let base = 1.875 - exaggeration * 1.75;
         HillshadeParams {
-            method: match p("hillshade-method").as_str() {
-                Some("basic") => 4,
-                Some("combined") => 1,
-                Some("igor") => 2,
-                Some("multidirectional") => 3,
-                _ => 0,
-            },
-            exaggeration: num(&p("hillshade-exaggeration")) as f32,
+            method,
+            exaggeration,
             accent: color(&p("hillshade-accent-color"), 1.0),
-            altitudes: altitude.iter().map(|a| a.to_radians() as f32).collect(),
-            azimuths,
+            azimuth,
+            lights,
+            base,
+            base_max: base.powf(0.5 * PI) - 1.0,
             shadows,
             highlights,
             sources,
@@ -181,8 +215,7 @@ impl HillshadeParams {
         // GLSL `mod`.
         let gmod = |x: f32, y: f32| x - y * (x / y).floor();
         let boosted = [deriv[0] * self.exaggeration * 2.0, deriv[1] * self.exaggeration * 2.0];
-        let cang = |d: [f32; 2], alt: f32, cos_az: f32, sin_az: f32| {
-            let (cos_alt, sin_alt) = (alt.cos(), alt.sin());
+        let cang = |d: [f32; 2], [sin_alt, cos_alt, cos_az, sin_az]: [f32; 4]| {
             (sin_alt - (d[1] * cos_az * cos_alt - d[0] * sin_az * cos_alt)) / (1.0 + d[0] * d[0] + d[1] * d[1]).sqrt()
         };
         let lit = |shade: f32, hi: Rgba, sh: Rgba| if shade > 0.5 { scale(hi, 2.0 * shade - 1.0) } else { scale(sh, 1.0 - 2.0 * shade) };
@@ -190,15 +223,13 @@ impl HillshadeParams {
             // igor
             2 => {
                 let d = boosted;
-                let azimuth = self.azimuths[0] + PI;
                 let slope = len(d).atan() * 2.0 / PI;
-                let aspect_strength = 1.0 - (gmod((aspect(d) + azimuth) / PI + 0.5, 2.0) - 1.0).abs();
+                let aspect_strength = 1.0 - (gmod((aspect(d) + self.azimuth) / PI + 0.5, 2.0) - 1.0).abs();
                 add(scale(self.shadows[0], slope * aspect_strength), scale(self.highlights[0], slope * (1.0 - aspect_strength)))
             }
             // basic
             4 => {
-                let azimuth = self.azimuths[0] + PI;
-                let shade = cang(boosted, self.altitudes[0], azimuth.cos(), azimuth.sin()).clamp(0.0, 1.0);
+                let shade = cang(boosted, self.lights[0]).clamp(0.0, 1.0);
                 lit(shade, self.highlights[0], self.shadows[0])
             }
             // multidirectional
@@ -206,29 +237,26 @@ impl HillshadeParams {
                 let n = self.sources as f32;
                 let mut out = [0.0; 4];
                 for i in 0..self.sources {
-                    let shade = cang(boosted, self.altitudes[i], -self.azimuths[i].cos(), -self.azimuths[i].sin()).clamp(0.0, 1.0);
+                    let shade = cang(boosted, self.lights[i]).clamp(0.0, 1.0);
                     out = add(out, scale(lit(shade, self.highlights[i], self.shadows[i]), 1.0 / n));
                 }
                 out
             }
             // combined
             1 => {
-                let azimuth = self.azimuths[0] + PI;
-                let c = cang(boosted, self.altitudes[0], azimuth.cos(), azimuth.sin()).acos().clamp(0.0, PI / 2.0);
+                let c = cang(boosted, self.lights[0]).acos().clamp(0.0, PI / 2.0);
                 let s = len(boosted).atan() * 4.0 / PI / PI;
                 add(scale(self.shadows[0], c * s), scale(self.highlights[0], (PI / 2.0 - c) * s))
             }
             // standard
             _ => {
-                let azimuth = self.azimuths[0] + PI;
                 let slope = (0.625 * len(deriv)).atan();
                 let intensity = self.exaggeration;
-                let base = 1.875 - intensity * 1.75;
                 let max = 0.5 * PI;
-                let scaled = if intensity != 0.5 { ((base.powf(slope) - 1.0) / (base.powf(max) - 1.0)) * max } else { slope };
+                let scaled = if intensity != 0.5 { ((self.base.powf(slope) - 1.0) / self.base_max) * max } else { slope };
                 let k = (intensity * 2.0).clamp(0.0, 1.0);
                 let accent = scale(self.accent, (1.0 - scaled.cos()) * k);
-                let shade = (gmod((aspect(deriv) + azimuth) / PI + 0.5, 2.0) - 1.0).abs();
+                let shade = (gmod((aspect(deriv) + self.azimuth) / PI + 0.5, 2.0) - 1.0).abs();
                 let shade_color = scale(mix(self.shadows[0], self.highlights[0], shade), scaled.sin() * k);
                 add(scale(accent, 1.0 - shade_color[3]), shade_color)
             }

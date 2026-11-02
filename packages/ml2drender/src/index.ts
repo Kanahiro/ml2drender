@@ -1,4 +1,4 @@
-import type { FillExtrusionLayerSpecification, LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
 
 export interface View {
   center: [lng: number, lat: number];
@@ -30,7 +30,7 @@ export interface InitOptions {
   wasm?: WebAssembly.Module;
   /** Resource cache. ttlMs = 0 disables it; Infinity never expires. Defaults: 5 minutes, 64 MiB. */
   cache?: { ttlMs?: number; maxBytes?: number };
-  /** Replace each fill-extrusion layer before the style reaches the renderer. */
+  /** Replace each fill-extrusion layer. Defaults to a fill preserving its 2D appearance. */
   transformFillExtrusion?: (layer: FillExtrusionLayer) => StyleLayer;
 }
 
@@ -141,8 +141,29 @@ class ResourceCache {
   }
 }
 
-function prepareStyle(bytes: Uint8Array<ArrayBuffer>, transform?: InitOptions['transformFillExtrusion']): Uint8Array {
-  if (!transform) return new Uint8Array(bytes);
+function flattenFillExtrusion(layer: FillExtrusionLayer): FillLayerSpecification {
+  const { type, paint, layout, ...base } = layer;
+  // Shared paint properties have the same defaults; leaving absent values unset
+  // preserves them without duplicating Style Spec defaults. Expressions stay intact.
+  return {
+    ...base,
+    type: 'fill',
+    layout: { visibility: layout?.visibility },
+    paint: {
+      'fill-color': paint?.['fill-extrusion-color'],
+      'fill-opacity': paint?.['fill-extrusion-opacity'],
+      'fill-pattern': paint?.['fill-extrusion-pattern'],
+      'fill-translate': paint?.['fill-extrusion-translate'],
+      'fill-translate-anchor': paint?.['fill-extrusion-translate-anchor'],
+      'fill-color-transition': paint?.['fill-extrusion-color-transition'],
+      'fill-opacity-transition': paint?.['fill-extrusion-opacity-transition'],
+      'fill-pattern-transition': paint?.['fill-extrusion-pattern-transition'],
+      'fill-translate-transition': paint?.['fill-extrusion-translate-transition'],
+    },
+  };
+}
+
+function prepareStyle(bytes: Uint8Array<ArrayBuffer>, transform: NonNullable<InitOptions['transformFillExtrusion']> = flattenFillExtrusion): Uint8Array {
   const style: unknown = JSON.parse(decoder.decode(bytes));
   if (!style || typeof style !== 'object' || !('layers' in style) || !Array.isArray(style.layers)) {
     throw new Error('Style must contain a layers array');
