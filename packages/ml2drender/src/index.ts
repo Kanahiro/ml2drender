@@ -16,6 +16,10 @@ export interface RenderedImage {
   height: number;
   /** Row-major, 8-bit RGBA pixels. */
   data: Uint8ClampedArray<ArrayBuffer>;
+  /** Encode `data` inside WASM as an owned, lossless RGBA8 PNG. */
+  toPng(): Uint8Array<ArrayBuffer>;
+  /** Encode `data` inside WASM as an owned, lossless WebP. */
+  toWebp(): Uint8Array<ArrayBuffer>;
 }
 
 /** Style Spec layers supported by the 2D renderer. */
@@ -51,7 +55,8 @@ interface WasmExports {
   renderer_needs(handle: number): number;
   renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
   renderer_render(handle: number): number;
-  renderer_render_png(handle: number): number;
+  encode_png(ptr: number, len: number, width: number, height: number): number;
+  encode_webp(ptr: number, len: number, width: number, height: number): number;
   renderer_free(handle: number): void;
 }
 
@@ -143,7 +148,7 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
   return encoder.encode(JSON.stringify({ ...style, layers }));
 }
 
-/** Render a MapLibre Style as a static 2D RGBA image or PNG. */
+/** Render a MapLibre Style as a static 2D RGBA image. */
 export class MapRenderer {
   private core?: Core;
   /** Fetches in flight, shared by overlapping renders. */
@@ -167,21 +172,10 @@ export class MapRenderer {
 
   /** Fetch required resources and return a new RGBA image for the requested view. */
   async render(view: View): Promise<RenderedImage> {
-    const bytes = await this.renderOutput(view, 'rgba');
-    const width = Math.round(view.width * (view.pixelRatio ?? 1));
-    const height = Math.round(view.height * (view.pixelRatio ?? 1));
-    return { width, height, data: new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength) };
-  }
-
-  /** Fetch required resources and return an owned, lossless PNG encoded inside WASM. */
-  renderPng(view: View): Promise<Uint8Array<ArrayBuffer>> {
-    return this.renderOutput(view, 'png');
-  }
-
-  private async renderOutput(view: View, format: 'rgba' | 'png'): Promise<Uint8Array<ArrayBuffer>> {
     const args = viewArgs(view);
     const w = this.wasm;
     const core = this.acquire(args);
+    let bytes: Uint8Array<ArrayBuffer>;
     try {
       // Other renders may move the camera while this one awaits resources.
       for (let round = 0; ; round++) {
@@ -195,13 +189,22 @@ export class MapRenderer {
           this.withBytes(resources[i] ?? new Uint8Array(), (dataPtr, dataLen) =>
             w.renderer_provide(core.handle, urlPtr, urlLen, dataPtr, dataLen, resources[i] === null ? 0 : 1))));
       }
-      const ok = format === 'png' ? w.renderer_render_png(core.handle) : w.renderer_render(core.handle);
-      if (!ok) throw new Error(decoder.decode(this.output()));
+      if (!w.renderer_render(core.handle)) throw new Error(decoder.decode(this.output()));
       // Own the bytes before another render can overwrite or grow WASM memory.
-      return this.output();
+      bytes = this.output();
     } finally {
       this.release(core);
     }
+    const width = Math.round(view.width * (view.pixelRatio ?? 1));
+    const height = Math.round(view.height * (view.pixelRatio ?? 1));
+    const data = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const encode = (format: typeof w.encode_png) => () => {
+      if (!this.withBytes(bytes, (ptr, len) => format(ptr, len, width, height))) {
+        throw new Error(decoder.decode(this.output()));
+      }
+      return this.output();
+    };
+    return { width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp) };
   }
 
   private fetch(url: string): Promise<Uint8Array<ArrayBuffer> | null> {

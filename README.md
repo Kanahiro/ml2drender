@@ -55,10 +55,11 @@ canvas.getContext('2d')!.putImageData(
 - 取得したバイト列はキャッシュしません。同じ URL を同時に要求した場合は取得を 1 回にまとめます。再取得を避けるには、ブラウザの HTTP キャッシュに任せるか、`loadResource` 内でキャッシュしてください（Cloudflare Workers なら Cache API など）。
 - `options.transformFillExtrusion`: Style JSON にある各 `fill-extrusion` レイヤを、対応する 2D レイヤ定義へ変換する関数です。省略時は `fill` に変換し、ID・metadata・source・source-layer・ズーム範囲・filter・visibility を維持します。色・不透明度・パターン・平行移動・移動の基準と、それらの式・transition を対応する fill プロパティへ引き継ぎます。高さ・底面の高さ・立体の陰影・角の丸みは反映しません。不透明度は fill のフィーチャ単位の合成に従うため、重なる地物の見え方は異なる場合があります。独自の関数を指定すると既定の変換を置き換えます。`init()` 時に適用されます。引数の `FillExtrusionLayer` は公式 [`@maplibre/maplibre-gl-style-spec`](https://github.com/maplibre/maplibre-style-spec) の `FillExtrusionLayerSpecification`、返り値の `StyleLayer` は公式 `LayerSpecification` から `fill-extrusion` を除いた型です。レイヤ種別ごとの必須項目・paint・layout を型チェックします。型定義は取得した JSON の実行時検証を行うものではありません。
 - `renderer.render(view)`: 必要なタイル・画像・グリフを取得し、`Promise<RenderedImage>` を返します。同じインスタンスで異なる視点を繰り返し描画できます。
-- `renderer.renderPng(view)`: 同じリソース取得・描画処理を使い、WASM内でPNG化した `Promise<Uint8Array<ArrayBuffer>>` を返します。RGBA8の可逆圧縮で、速度重視の圧縮設定です。寸法・DPR・余白切り出しは `render()` と同じです。返すバイト列は独立したコピーなので、続けて描画しても書き換わりません。
 - `view`: `center: [lng, lat]`、`zoom`、`width`、`height` は必須。`bearing`（時計回りの度数、既定 0）と `pixelRatio`（既定 1）は省略できます。幅・高さは CSS ピクセル単位です。
 - `view.margin`: 四辺に追加する描画余白（CSS ピクセル単位の非負整数、既定 0）。余白までタイル取得・symbol の衝突判定・描画を行い、中央の指定サイズを返します。出力サイズ・中心・ズームは変わりません。タイル境界の外側にアンカーを持つ symbol の欠落を軽減できますが、タイルごとの衝突判定の一致を保証するものではありません。余白を増やすほど取得量・描画時間・メモリ使用量も増えます。デモでは `64` CSS ピクセルを指定しています。大きな symbol には、より広い余白が必要になる場合があります。
 - `RenderedImage`: `width`、`height`、行優先の 8 bit RGBA 画素列 `data: Uint8ClampedArray` を持ちます。取得や描画の失敗は例外になります。
+- `image.toPng()`: `data` を WASM 内で PNG 化した `Uint8Array<ArrayBuffer>` を返します（同期）。RGBA8の可逆圧縮で、速度重視の圧縮設定です。返すバイト列は独立したコピーなので、続けて描画しても書き換わりません。
+- `image.toWebp()`: 同様に可逆（VP8L）WebP を返します。地図画像では PNG より小さくなります（bright スタイル 512×512 で約 3 割減）。非可逆 WebP には対応していません。
 
 ## Cloudflare Workers
 
@@ -72,9 +73,10 @@ export default {
   async fetch() {
     const style = await (await fetch('https://demotiles.maplibre.org/style.json')).json();
     const renderer = await MapRenderer.init(style, { wasm });
-    const png = await renderer.renderPng({
+    const image = await renderer.render({
       center: [0, 0], zoom: 0, width: 512, height: 512, margin: 64,
     });
+    const png = image.toPng();
     return new Response(png, { headers: { 'Content-Type': 'image/png' } });
   },
 };
