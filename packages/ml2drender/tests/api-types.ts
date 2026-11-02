@@ -1,9 +1,10 @@
-import type { FillLayerSpecification, LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import { MapRenderer, type FillExtrusionLayer, type InitOptions, type StyleLayer } from '../src/index';
 import wasm from 'ml2drender/renderer.wasm';
 
 async function pngResponse() {
-  const renderer = await MapRenderer.init('https://example.com/style.json', { wasm });
+  const style: StyleSpecification = await (await fetch('https://example.com/style.json')).json();
+  const renderer = await MapRenderer.init(style, { wasm });
   const png: Uint8Array<ArrayBuffer> = await renderer.renderPng({ center: [0, 0], zoom: 0, width: 256, height: 256 });
   return new Response(png, { headers: { 'Content-Type': 'image/png' } });
 }
@@ -41,3 +42,9 @@ const customResourceLoader: InitOptions = {
   loadResource: async (url) => new Uint8Array(await (await fetch(url)).arrayBuffer()),
 };
 const missingResourceLoader: InitOptions = { loadResource: async () => null };
+
+MapRenderer.init({ version: 8, sources: {}, layers: [] }, { wasm });
+// @ts-expect-error The style must be an object; fetch a style URL first.
+MapRenderer.init('https://example.com/style.json', { wasm });
+// @ts-expect-error Style Spec version must be 8.
+MapRenderer.init({ version: 7, sources: {}, layers: [] });

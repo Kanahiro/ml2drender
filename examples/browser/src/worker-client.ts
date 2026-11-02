@@ -1,5 +1,8 @@
 import type { View } from 'ml2drender';
+import type { StyleSpecification } from 'maplibre-gl';
 import type { WorkerRequest, WorkerResponse } from './render-worker';
+
+type TileImage = Pick<Extract<WorkerResponse, { kind: 'image' }>, 'bitmap' | 'renderMs'>;
 
 /** Owns the worker protocol so the map only deals with images and style changes. */
 export class TileWorker {
@@ -7,7 +10,7 @@ export class TileWorker {
   private generation = 0;
   private nextId = 0;
   private initializing?: { resolve: () => void; reject: (error: Error) => void };
-  private readonly pending = new Map<number, { resolve: (image: ImageBitmap) => void; reject: (error: Error) => void }>();
+  private readonly pending = new Map<number, { resolve: (image: TileImage) => void; reject: (error: Error) => void }>();
 
   constructor() {
     this.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
@@ -21,7 +24,7 @@ export class TileWorker {
         this.initializing = undefined;
       } else if (response.kind === 'image') {
         const request = this.pending.get(response.id);
-        if (request) request.resolve(response.bitmap);
+        if (request) request.resolve({ bitmap: response.bitmap, renderMs: response.renderMs });
         else response.bitmap.close();
         this.pending.delete(response.id);
       } else if (response.id === undefined) {
@@ -41,7 +44,7 @@ export class TileWorker {
     };
   }
 
-  init(styleUrl: string): Promise<void> {
+  init(style: StyleSpecification): Promise<void> {
     this.generation++;
     const replaced = new Error('Style changed');
     this.initializing?.reject(replaced);
@@ -50,11 +53,11 @@ export class TileWorker {
     const generation = this.generation;
     return new Promise((resolve, reject) => {
       this.initializing = { resolve, reject };
-      this.worker.postMessage({ kind: 'init', generation, styleUrl } satisfies WorkerRequest);
+      this.worker.postMessage({ kind: 'init', generation, style } satisfies WorkerRequest);
     });
   }
 
-  render(view: View): Promise<ImageBitmap> {
+  render(view: View): Promise<TileImage> {
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });

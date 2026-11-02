@@ -1,13 +1,14 @@
 /// <reference lib="webworker" />
 import { MapRenderer, type View } from 'ml2drender';
+import type { StyleSpecification } from 'maplibre-gl';
 
 export type WorkerRequest =
-  | { kind: 'init'; generation: number; styleUrl: string }
+  | { kind: 'init'; generation: number; style: StyleSpecification }
   | { kind: 'render'; generation: number; id: number; view: View };
 
 export type WorkerResponse =
   | { kind: 'ready'; generation: number }
-  | { kind: 'image'; generation: number; id: number; bitmap: ImageBitmap }
+  | { kind: 'image'; generation: number; id: number; bitmap: ImageBitmap; renderMs: number }
   | { kind: 'error'; generation: number; id?: number; message: string };
 
 let generation = 0;
@@ -19,7 +20,7 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
   if (request.kind === 'init') {
     generation = request.generation;
     renderer = undefined;
-    void MapRenderer.init(request.styleUrl, { cache: { ttlMs: Infinity } })
+    void MapRenderer.init(request.style, { cache: { ttlMs: Infinity } })
       .then((loaded) => {
         if (request.generation !== generation) return;
         renderer = loaded;
@@ -34,8 +35,11 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
   }
   const active = renderer;
   if (request.generation !== generation || !active) return;
+  const started = performance.now();
   void active.render(request.view)
     .then(async (image) => {
+      // Includes resource loading and overlapping renders; this is elapsed time, not CPU time.
+      const renderMs = performance.now() - started;
       if (request.generation !== generation) return;
       const bitmap = await createImageBitmap(new ImageData(image.data, image.width, image.height));
       if (request.generation !== generation) {
@@ -43,7 +47,7 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
         return;
       }
       try {
-        worker.postMessage({ kind: 'image', generation, id: request.id, bitmap } satisfies WorkerResponse, [bitmap]);
+        worker.postMessage({ kind: 'image', generation, id: request.id, bitmap, renderMs } satisfies WorkerResponse, [bitmap]);
       } catch (error) {
         bitmap.close();
         throw error;

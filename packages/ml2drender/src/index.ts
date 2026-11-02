@@ -1,4 +1,4 @@
-import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 
 export interface View {
   center: [lng: number, lat: number];
@@ -22,6 +22,7 @@ export interface RenderedImage {
 export type StyleLayer = Exclude<LayerSpecification, FillExtrusionLayerSpecification>;
 
 export type FillExtrusionLayer = FillExtrusionLayerSpecification;
+export type { StyleSpecification };
 
 export interface InitOptions {
   /** Load complete resource bytes, or null for a missing resource (HTTP 404). Other failures must reject. */
@@ -163,12 +164,11 @@ function flattenFillExtrusion(layer: FillExtrusionLayer): FillLayerSpecification
   };
 }
 
-function prepareStyle(bytes: Uint8Array<ArrayBuffer>, transform: NonNullable<InitOptions['transformFillExtrusion']> = flattenFillExtrusion): Uint8Array {
-  const style: unknown = JSON.parse(decoder.decode(bytes));
-  if (!style || typeof style !== 'object' || !('layers' in style) || !Array.isArray(style.layers)) {
+function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOptions['transformFillExtrusion']> = flattenFillExtrusion): Uint8Array {
+  if (!style || typeof style !== 'object' || !Array.isArray(style.layers)) {
     throw new Error('Style must contain a layers array');
   }
-  style.layers = style.layers.map((layer: unknown) => {
+  const layers = style.layers.map((layer: unknown) => {
     if (!layer || typeof layer !== 'object' || !('type' in layer) || layer.type !== 'fill-extrusion') return layer;
     const replacement = transform(layer as FillExtrusionLayer);
     if (!replacement || typeof replacement.id !== 'string' || !SUPPORTED_LAYERS.has(replacement.type)) {
@@ -176,7 +176,7 @@ function prepareStyle(bytes: Uint8Array<ArrayBuffer>, transform: NonNullable<Ini
     }
     return replacement;
   });
-  return encoder.encode(JSON.stringify(style));
+  return encoder.encode(JSON.stringify({ ...style, layers }));
 }
 
 /** Render a MapLibre Style as a static 2D RGBA image or PNG. */
@@ -184,21 +184,17 @@ export class MapRenderer {
   private constructor(
     private readonly wasm: WasmExports,
     private readonly style: Uint8Array,
-    private readonly styleUrl: string,
     private readonly cache: ResourceCache,
   ) {}
 
-  /** Fetch the style JSON and load the renderer. The URL is used to resolve style resources. */
-  static async init(styleUrl: string, options: InitOptions = {}): Promise<MapRenderer> {
+  /** Snapshot a style object and load the renderer. Resource URLs are passed to `loadResource` as written. */
+  static async init(style: StyleSpecification, options: InitOptions = {}): Promise<MapRenderer> {
     const ttlMs = options.cache?.ttlMs ?? DEFAULT_TTL_MS;
     if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
     const maxBytes = nonnegative(options.cache?.maxBytes ?? DEFAULT_MAX_BYTES, 'cache.maxBytes');
-    const url = new URL(styleUrl, globalThis.location?.href);
     const loadResource = options.loadResource ?? fetchResource;
-    const [style, wasm] = await Promise.all([loadResource(url.href), loadWasm(options.wasm, loadResource)]);
-    if (style === null) throw new Error(`Style not found: ${url}`);
-    return new MapRenderer(wasm,
-      prepareStyle(style, options.transformFillExtrusion), url.href, new ResourceCache(ttlMs, maxBytes, loadResource));
+    const prepared = prepareStyle(style, options.transformFillExtrusion);
+    return new MapRenderer(await loadWasm(options.wasm, loadResource), prepared, new ResourceCache(ttlMs, maxBytes, loadResource));
   }
 
   /** Fetch required resources and return a new RGBA image for the requested view. */
@@ -228,7 +224,7 @@ export class MapRenderer {
         if (count === 0) break;
         if (round >= 32) throw new Error('Resource requests did not settle');
         const urls = decoder.decode(this.output()).split('\n');
-        const resources = await Promise.all(urls.map((url) => this.cache.get(new URL(url, this.styleUrl).href)));
+        const resources = await Promise.all(urls.map((url) => this.cache.get(url)));
         urls.forEach((url, i) => this.withBytes(encoder.encode(url), (urlPtr, urlLen) =>
           this.withBytes(resources[i] ?? new Uint8Array(), (dataPtr, dataLen) =>
             w.renderer_provide(handle, urlPtr, urlLen, dataPtr, dataLen, resources[i] === null ? 0 : 1))));

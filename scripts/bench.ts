@@ -33,7 +33,7 @@ if (variants.length < 2) throw new Error('usage: node scripts/bench.ts base=<che
 
 interface View {center: [number, number]; zoom: number; bearing?: number; width: number; height: number; pixelRatio?: number}
 interface Renderer {render(view: View): Promise<{data: Uint8ClampedArray}>; renderPng(view: View): Promise<Uint8Array>}
-interface Api {MapRenderer: {init(url: string, options: object): Promise<Renderer>}}
+interface Api {MapRenderer: {init(style: object | string, options: object): Promise<Renderer>}}
 
 // Synthetic styles, served as bench://<name>.json. Fixture resources are local://<path under assets>.
 const tile = (z: number, x: number, y: number): [number, number] =>
@@ -118,7 +118,9 @@ const memory = loaded.map(() => 0);
 let regressions = 0;
 for (const c of cases) {
   const runs = await Promise.all(loaded.map(async (v) => ({
-    renderer: await v.api.MapRenderer.init(`bench://${c.style}.json`, {wasm: v.module, cache: {ttlMs: Infinity}}),
+    // ponytail: falls back to the old URL-only init for older base checkouts; drop once main takes style objects.
+    renderer: await v.api.MapRenderer.init(styles[c.style], {wasm: v.module, cache: {ttlMs: Infinity}})
+      .catch(() => v.api.MapRenderer.init(`bench://${c.style}.json`, {wasm: v.module, cache: {ttlMs: Infinity}})),
     times: [] as number[],
     hash: '',
   })));

@@ -2,11 +2,13 @@ import { addProtocol, Map as MapLibreMap, setWorkerUrl, type StyleSpecification 
 import 'maplibre-gl/dist/maplibre-gl.css';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { TileWorker } from './worker-client';
+import initialStyle from './style.json?raw';
 
 const TILE_SIZE = 256;
 const MARGIN = 64;
 const form = document.getElementById('controls') as HTMLFormElement;
-const input = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
+const styleInput = form.elements.namedItem('style') as HTMLTextAreaElement;
+styleInput.value = initialStyle;
 const logEl = document.getElementById('log')!;
 const statusEl = document.getElementById('status')!;
 const status = (message: string, error = false) => {
@@ -26,19 +28,45 @@ let styleGeneration = 0;
 let tileRevision = 0;
 let ready = false;
 
+// Bound the sample window so long pan/zoom sessions do not grow memory indefinitely.
+const samples: { renderMs: number; roundTripMs: number }[] = [];
+let completedTiles = 0;
+let initMs: number | undefined;
+const metric = (id: string, value: string) => { document.getElementById(id)!.textContent = value; };
+const milliseconds = (value: number | undefined) => value === undefined ? '—' : `${value.toFixed(1)} ms`;
+function updateStats() {
+  const sorted = samples.map((sample) => sample.renderMs).sort((a, b) => a - b);
+  const mean = (key: 'renderMs' | 'roundTripMs') => samples.length
+    ? samples.reduce((sum, sample) => sum + sample[key], 0) / samples.length : undefined;
+  metric('stat-tiles', completedTiles.toLocaleString());
+  metric('stat-mean', milliseconds(mean('renderMs')));
+  metric('stat-p95', milliseconds(sorted[Math.ceil(sorted.length * 0.95) - 1]));
+  metric('stat-max', milliseconds(sorted.at(-1)));
+  metric('stat-roundtrip', milliseconds(mean('roundTripMs')));
+  metric('stat-init', milliseconds(initMs));
+}
+function resetStats() {
+  samples.length = 0;
+  completedTiles = 0;
+  updateStats();
+}
+document.getElementById('reset-stats')!.onclick = resetStats;
+
 addProtocol('ml2drender', async (request, controller) => {
   const url = new URL(request.url);
   const generation = Number(url.hostname);
+  const revision = Number(url.searchParams.get('revision'));
   const checkActive = () => {
     controller.signal.throwIfAborted();
-    if (!ready || generation !== styleGeneration) throw new DOMException('Style changed', 'AbortError');
+    if (!ready || generation !== styleGeneration || revision !== tileRevision) throw new DOMException('Style changed', 'AbortError');
   };
   checkActive();
   const [z, x, y] = url.pathname.slice(1).split('/').map(Number);
   const n = 2 ** z;
   const lng = ((x + 0.5) / n) * 360 - 180;
   const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
-  const bitmap = await tileWorker.render({
+  const started = performance.now();
+  const { bitmap, renderMs } = await tileWorker.render({
     center: [lng, lat],
     // A 256px XYZ tile is one zoom below MapLibre's 512px world convention.
     zoom: z - 1,
@@ -49,6 +77,10 @@ addProtocol('ml2drender', async (request, controller) => {
   });
   try {
     checkActive();
+    samples.push({ renderMs, roundTripMs: performance.now() - started });
+    if (samples.length > 200) samples.shift();
+    completedTiles++;
+    updateStats();
     return { data: bitmap };
   } catch (error) {
     bitmap.close();
@@ -68,7 +100,7 @@ const camera = {
   attributionControl: false as const,
 };
 const emptyStyle = (): StyleSpecification => ({ version: 8, sources: {}, layers: [] });
-const map = new MapLibreMap({ ...camera, container: 'map', style: input('style').value });
+const map = new MapLibreMap({ ...camera, container: 'map', style: emptyStyle() });
 const rasterMap = new MapLibreMap({ ...camera, container: 'out', style: emptyStyle() });
 for (const view of [map, rasterMap]) {
   view.touchZoomRotate.disableRotation();
@@ -94,7 +126,7 @@ for (const [source, destination] of [[map, rasterMap], [rasterMap, map]]) {
 
 function redraw() {
   if (!ready) return;
-  status('rendering tiles…');
+  status('タイルを描画中…');
   // A new URL revision bypasses GL JS's tile cache on explicit redraw.
   rasterMap.setStyle({
     version: 8,
@@ -111,39 +143,45 @@ function redraw() {
 }
 
 async function loadStyle() {
+  let style: StyleSpecification;
+  try {
+    style = JSON.parse(styleInput.value);
+    if (!style || style.version !== 8 || !style.sources || typeof style.sources !== 'object' || Array.isArray(style.sources) || !Array.isArray(style.layers)) {
+      throw new Error('Style JSONには version: 8、sourcesオブジェクト、layers配列が必要です。');
+    }
+  } catch (error) {
+    fail(error);
+    return;
+  }
   const generation = ++styleGeneration;
   ready = false;
+  initMs = undefined;
+  resetStats();
   rasterMap.setStyle(emptyStyle(), { diff: false });
   logEl.textContent = '';
-  status('loading style and WASM…');
+  status('スタイルとWASMを初期化中…');
   try {
-    await tileWorker.init(new URL(input('style').value, location.href).href);
+    map.setStyle(style, { diff: false });
+    const started = performance.now();
+    await tileWorker.init(style);
     if (generation !== styleGeneration) return;
+    initMs = performance.now() - started;
+    updateStats();
     ready = true;
     redraw();
   } catch (error) {
     if (generation === styleGeneration) fail(error);
   }
 }
-input('style').addEventListener('change', () => {
-  map.setStyle(input('style').value);
-  void loadStyle();
-});
 
-document.getElementById('tile')!.onclick = () => {
-  const [z, x, y] = ['z', 'x', 'y'].map((key) => Number(input(key).value));
-  const n = 2 ** z;
-  const lng = ((x + 0.5) / n) * 360 - 180;
-  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
-  map.jumpTo({ center: [lng, lat], zoom: z, bearing: 0 });
-};
 form.onsubmit = (event) => {
   event.preventDefault();
-  redraw();
+  void loadStyle();
 };
+document.getElementById('redraw')!.onclick = redraw;
 rasterMap.on('idle', () => {
   if (ready && rasterMap.getSource('rendered') && rasterMap.isSourceLoaded('rendered') && !statusEl.classList.contains('error')) {
-    status(`tiles ready (zoom ${map.getZoom().toFixed(2)})`);
+    status(`描画完了 · zoom ${map.getZoom().toFixed(2)}`);
   }
 });
 void loadStyle();
