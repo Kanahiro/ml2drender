@@ -3,7 +3,7 @@
 
 use crate::image::{Image, Texture};
 use serde_json::Value as J;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::rc::Rc;
 
 pub struct StyleImage {
@@ -61,7 +61,7 @@ impl Sprites {
                     png: None,
                 })
                 .collect(),
-            images: HashMap::new(),
+            images: HashMap::default(),
         }
     }
 

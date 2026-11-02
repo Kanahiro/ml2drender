@@ -6,7 +6,7 @@ use super::glyphs::{Glyph, Glyphs, Metrics, BORDER};
 use super::unicode;
 use crate::expression::value::Formatted;
 use crate::sprite::StyleImage;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::rc::Rc;
 
 pub const ONE_EM: f64 = 24.0;

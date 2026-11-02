@@ -6,7 +6,7 @@ use super::color::{Color, ColorSpace};
 use super::value::{js_number_to_string, Object, Value};
 use super::Feature;
 use serde_json::Value as J;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -132,7 +132,7 @@ impl LegacyFunction {
             },
             space,
             stops: vec![],
-            categories: HashMap::new(),
+            categories: HashMap::default(),
             key_type: "string",
             zoom_dependent: zoom_and_feature || !feature_dependent,
             composite: zoom_and_feature,

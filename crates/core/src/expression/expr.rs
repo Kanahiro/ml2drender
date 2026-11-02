@@ -5,7 +5,7 @@ use super::geometry;
 use super::intl::{self, Collator};
 use super::types::{check_subtype, Type};
 use super::value::*;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]

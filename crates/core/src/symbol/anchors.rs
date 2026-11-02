@@ -187,7 +187,7 @@ fn resample(line: &[P], offset: f64, spacing: f64, window: f64, max_angle: f64, 
 /// `mergeLines`: join lines with the same text that share endpoints. Takes `(text, line)` per
 /// feature and returns, per feature, its merged line (`None` = merged into another).
 pub fn merge_lines(items: &[(Option<String>, Vec<P>)]) -> Vec<Option<Vec<P>>> {
-    use std::collections::HashMap;
+    use crate::hash::HashMap;
     let key = |text: &str, p: P| format!("{text}:{}:{}", p[0], p[1]);
     // Each merged line: owning feature, chunks (feature indices) in order.
     let mut merged: Vec<(usize, Vec<usize>)> = Vec::new();

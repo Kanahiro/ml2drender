@@ -48,6 +48,8 @@ pub struct Transform {
     pub pixel_ratio: f64,
     /// Original viewport size, preserved for raster pixel alignment when adding coverage.
     viewport_size: [f64; 2],
+    /// `sin_cos` of `bearing_rad` and of `-bearing_rad`, for per-point projections.
+    rot: [(f64, f64); 2],
 }
 
 impl Transform {
@@ -63,7 +65,9 @@ impl Transform {
         } else {
             c[1] = world_size / 2.0;
         }
-        Transform { zoom, world_size, center: c, bearing_rad: -bearing_deg.to_radians(), width, height, pixel_ratio, viewport_size: [width, height] }
+        let bearing_rad = -bearing_deg.to_radians();
+        let rot = [bearing_rad.sin_cos(), (-bearing_rad).sin_cos()];
+        Transform { zoom, world_size, center: c, bearing_rad, width, height, pixel_ratio, viewport_size: [width, height], rot }
     }
 
     /// Extend coverage without constraining the camera again or shifting its pixel grid.
@@ -77,7 +81,7 @@ impl Transform {
     pub fn world_to_screen(&self, p: [f64; 2]) -> [f64; 2] {
         let dx = p[0] - self.center[0];
         let dy = p[1] - self.center[1];
-        let (s, c) = self.bearing_rad.sin_cos();
+        let (s, c) = self.rot[0];
         [(dx * c - dy * s + self.width / 2.0) * self.pixel_ratio, (dx * s + dy * c + self.height / 2.0) * self.pixel_ratio]
     }
 
@@ -99,7 +103,7 @@ impl Transform {
     pub fn screen_to_world(&self, p: [f64; 2]) -> [f64; 2] {
         let x = p[0] / self.pixel_ratio - self.width / 2.0;
         let y = p[1] / self.pixel_ratio - self.height / 2.0;
-        let (s, c) = (-self.bearing_rad).sin_cos();
+        let (s, c) = self.rot[1];
         [x * c - y * s + self.center[0], x * s + y * c + self.center[1]]
     }
 

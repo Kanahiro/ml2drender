@@ -11,7 +11,8 @@ use crate::mvt::GeomType;
 use crate::render::{num, num2, BucketFeature, Ctx, TileFeatures, EXTENT};
 use crate::style::{Layer, PropValue};
 use crate::tile::RenderTile;
-use std::collections::{BTreeSet, HashMap};
+use crate::hash::HashMap;
+use std::collections::BTreeSet;
 
 const SIZE_PACK_FACTOR: f64 = 128.0;
 const MAX_PACKED_SIZE: f64 = 255.0 * SIZE_PACK_FACTOR;
@@ -411,7 +412,7 @@ impl Builder<'_> {
         }
         self.populate(&mut bucket, tf, &res);
         let sizes = Sizes { text: layer.layout("text-size"), icon: layer.layout("icon-size") };
-        let mut compare_text: HashMap<String, Vec<P>> = HashMap::new();
+        let mut compare_text: HashMap<String, Vec<P>> = HashMap::default();
         let mut sdf_icons: Option<bool> = None;
         let features = std::mem::take(&mut bucket.features);
         for (fi, feature) in features.iter().enumerate() {

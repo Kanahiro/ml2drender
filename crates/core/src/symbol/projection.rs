@@ -5,7 +5,7 @@ use super::anchors::P;
 use super::layout::{PlacedSymbol, SymbolBucket};
 use super::shaping::WritingMode;
 use crate::render::{Ctx, EXTENT};
-use std::collections::HashMap;
+use crate::hash::HashMap;
 
 /// A placed glyph: label-plane point, rotation and the path walked to reach it.
 pub struct PlacedGlyph {

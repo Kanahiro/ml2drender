@@ -167,6 +167,17 @@ fn decode_geometry(cmds: &[u32]) -> Vec<Vec<[i32; 2]>> {
     lines
 }
 
+fn layer_name(data: &[u8]) -> Option<&[u8]> {
+    let mut r = Reader { buf: data, pos: 0 };
+    while let Some((f, w)) = r.field() {
+        if (f, w) == (1, 2) {
+            return r.bytes();
+        }
+        r.skip(w)?;
+    }
+    Some(&[])
+}
+
 fn decode_layer(data: &[u8]) -> Option<Layer> {
     let mut r = Reader { buf: data, pos: 0 };
     let mut name = String::new();
@@ -204,7 +215,7 @@ fn decode_layer(data: &[u8]) -> Option<Layer> {
                 _ => r.skip(w)?,
             }
         }
-        let mut properties = crate::expression::Object::new();
+        let mut properties = crate::expression::Object::default();
         for kv in tags.chunks_exact(2) {
             if let (Some(k), Some(v)) = (keys.get(kv[0] as usize), values.get(kv[1] as usize)) {
                 properties.insert(k.clone(), v.clone());
@@ -215,8 +226,9 @@ fn decode_layer(data: &[u8]) -> Option<Layer> {
     Some(Layer { name, extent, features })
 }
 
-/// Decode a (possibly gzip/zlib-compressed) vector tile.
-pub fn decode(data: &[u8]) -> Option<Vec<Layer>> {
+/// Decode a (possibly gzip/zlib-compressed) vector tile, keeping only the layers whose name
+/// passes `keep` (the others are skipped undecoded).
+pub fn decode(data: &[u8], keep: impl Fn(&[u8]) -> bool) -> Option<Vec<Layer>> {
     let inflated;
     let data = if data.starts_with(&[0x1f, 0x8b]) {
         inflated = inflate_gzip(data)?;
@@ -228,7 +240,10 @@ pub fn decode(data: &[u8]) -> Option<Vec<Layer>> {
     let mut layers = Vec::new();
     while let Some((f, w)) = r.field() {
         if (f, w) == (3, 2) {
-            layers.push(decode_layer(r.bytes()?)?);
+            let bytes = r.bytes()?;
+            if keep(layer_name(bytes)?) {
+                layers.push(decode_layer(bytes)?);
+            }
         } else {
             r.skip(w)?;
         }

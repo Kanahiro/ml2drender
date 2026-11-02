@@ -333,7 +333,7 @@ impl ClusterIndex {
             let d = &tree.data[i];
             let cluster = d.num > 1;
             let (props, px, py, id) = if cluster {
-                let mut props = if d.prop < 0 { Object::new() } else { self.cluster_props[d.prop as usize].clone() };
+                let mut props = if d.prop < 0 { Object::default() } else { self.cluster_props[d.prop as usize].clone() };
                 let count = d.num as f64;
                 let abbrev = if count >= 10000.0 {
                     Value::str(&format!("{}k", js_number_to_string(js_round(count / 1000.0))))
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn clusters_nearby_points() {
-        let pt = |x: f64, y: f64| Point { id: None, xy: [x, y], props: Rc::new(Object::new()) };
+        let pt = |x: f64, y: f64| Point { id: None, xy: [x, y], props: Rc::new(Object::default()) };
         let opts = Options { max_zoom: 16, min_points: 2, radius: 800.0, extent: 8192.0, generate_id: false, properties: vec![] };
         let idx = ClusterIndex::new(vec![pt(0.5, 0.5), pt(0.500001, 0.5), pt(0.9, 0.9)], opts);
         let z0 = idx.tile(0, 0, 0);

@@ -3,6 +3,7 @@
 //! Host loop: `new` → while `needs()` is non-empty { fetch each; `provide` } → `render`.
 //! Minimal use: `Renderer::new(style, View::tile(z, x, y, 512))` → one XYZ tile image.
 
+mod hash;
 pub mod expression;
 pub(crate) mod geojson;
 mod image;
@@ -15,7 +16,8 @@ mod symbol;
 mod tile;
 
 use serde_json::Value as J;
-use std::collections::{BTreeSet, HashMap};
+use hash::HashMap;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use tile::{RenderTile, TileId, Transform};
 
@@ -302,7 +304,7 @@ impl Renderer {
     /// The style's own `center`/`zoom`/`bearing` are ignored; `view` decides the camera.
     pub fn new(style_json: &str, view: View) -> Result<Self, Error> {
         let json: J = serde_json::from_str(style_json).map_err(|e| Error::Style(e.to_string()))?;
-        let mut sources = HashMap::new();
+        let mut sources = HashMap::default();
         for (id, src) in json["sources"].as_object().into_iter().flatten() {
             let ty = src["type"].as_str().unwrap_or("").to_string();
             let data = match ty.as_str() {
@@ -320,7 +322,7 @@ impl Renderer {
                 }
                 _ => Data::Failed,
             };
-            sources.insert(id.clone(), Source { ty, json: src.clone(), data, tiles: HashMap::new(), vector_layers: Default::default(), buckets: Default::default(), last_used: Default::default() });
+            sources.insert(id.clone(), Source { ty, json: src.clone(), data, tiles: HashMap::default(), vector_layers: Default::default(), buckets: Default::default(), last_used: Default::default() });
         }
         let sprites = sprite::Sprites::new(&json["sprite"], view.pixel_ratio);
         let glyphs = symbol::glyphs::Glyphs::new(json["glyphs"].as_str());
@@ -377,7 +379,7 @@ impl Renderer {
             let Some(excess) = last_used.len().checked_sub(MAX_CACHED_TILES).filter(|&n| n > 0) else { continue };
             let mut old: Vec<(u64, TileId)> = last_used.iter().filter(|&(_, &t)| t < self.clock).map(|(&id, &t)| (t, id)).collect();
             old.sort_unstable();
-            let evicted: std::collections::HashSet<TileId> = old.into_iter().take(excess).map(|(_, id)| id).collect();
+            let evicted: hash::HashSet<TileId> = old.into_iter().take(excess).map(|(_, id)| id).collect();
             last_used.retain(|id, _| !evicted.contains(id));
             src.tiles.retain(|id, _| !evicted.contains(id));
             src.vector_layers.get_mut().retain(|(data, _), _| !evicted.contains(data));
@@ -647,7 +649,13 @@ impl Renderer {
                             ("raster", Some(b)) => image::Image::decode(b).map(|i| TileData::Raster(Rc::new(image::Texture::new(&i, true)))),
                             ("raster-dem", Some(b)) => image::Image::decode(b).and_then(|i| dem_from(&i, &src.json, tj.encoding.as_deref())).map(|d| TileData::Dem(Rc::new(d))),
                             _ if raster => None,
-                            _ => Some(TileData::Vector(Rc::new(bytes.and_then(mvt::decode).unwrap_or_default()))),
+                            _ => {
+                                let used = |name: &[u8]| {
+                                    let name = String::from_utf8_lossy(name);
+                                    self.style.layers.iter().any(|l| l.source.as_deref() == Some(id) && l.source_layer.as_deref() == Some(&*name))
+                                };
+                                Some(TileData::Vector(Rc::new(bytes.and_then(|b| mvt::decode(b, used)).unwrap_or_default())))
+                            }
                         };
                         src.tiles.insert(t, decoded);
                         src.last_used.get_mut().insert(t, self.clock);
@@ -683,7 +691,7 @@ impl Renderer {
         // Layers with identical layout share one bucket (`groupByLayout`): it is laid out and
         // placed once, for the first layer, and drawn by each with its own paint.
         let mut symbol_layers: Vec<(&style::Layer, &serde_json::Value, Vec<Rc<symbol::layout::SymbolBucket>>)> = Vec::new();
-        let mut leader_of: HashMap<&str, usize> = HashMap::new();
+        let mut leader_of: HashMap<&str, usize> = HashMap::default();
         for layer in &self.style.layers {
             if layer.ty != "symbol" || layer.is_hidden(t.zoom, &self.style.global_state) {
                 continue;

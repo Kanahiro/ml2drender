@@ -4,7 +4,7 @@ mod filter;
 
 use crate::expression::{self as ex, CanonicalTileId, EvalCtx, Expression, Feature, Globals, Object, Value};
 use serde_json::Value as J;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -178,7 +178,7 @@ fn deref_layers(layers: &[J]) -> Vec<J> {
 
 impl Style {
     pub fn parse(json: J) -> Style {
-        let mut state = Object::new();
+        let mut state = Object::default();
         for (k, v) in json["state"].as_object().into_iter().flatten() {
             state.insert(k.clone(), Value::from_json(&v["default"]));
         }
@@ -188,8 +188,8 @@ impl Style {
         let mut grouped: Vec<&J> = Vec::new();
         for l in &derefed {
             let Some(ty) = l["type"].as_str() else { continue };
-            let mut layout = HashMap::new();
-            let mut paint = HashMap::new();
+            let mut layout = HashMap::default();
+            let mut paint = HashMap::default();
             for (kind, map) in [("layout", &mut layout), ("paint", &mut paint)] {
                 let Some(props) = spec().get(format!("{kind}_{ty}")).and_then(J::as_object) else { continue };
                 for (name, pspec) in props {

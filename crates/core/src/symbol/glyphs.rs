@@ -5,7 +5,8 @@
 //! load leaves its glyphs missing (MapLibre would draw them with the browser's fonts instead).
 
 use crate::mvt::Reader;
-use std::collections::{BTreeSet, HashMap};
+use crate::hash::HashMap;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 /// SDF border around each glyph bitmap (`GLYPH_PBF_BORDER`).
@@ -56,7 +57,7 @@ fn parse_glyph(data: &[u8]) -> Option<(u32, Glyph)> {
 
 /// `parseGlyphPbf`: glyphs → stacks (field 1) → glyph (field 3).
 pub fn parse(data: &[u8]) -> HashMap<u32, Rc<Glyph>> {
-    let mut out = HashMap::new();
+    let mut out = HashMap::default();
     let mut r = Reader { buf: data, pos: 0 };
     while let Some((field, wire)) = r.field() {
         let Some(stack) = (if (field, wire) == (1, 2) { r.bytes() } else { r.skip(wire).map(|_| &[][..]) }) else { break };
@@ -87,7 +88,7 @@ pub struct Glyphs {
 
 impl Glyphs {
     pub fn new(url: Option<&str>) -> Glyphs {
-        Glyphs { url: url.map(String::from), ranges: HashMap::new() }
+        Glyphs { url: url.map(String::from), ranges: HashMap::default() }
     }
 
     pub fn range_url(&self, stack: &str, range: u32) -> Option<String> {

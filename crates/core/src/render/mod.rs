@@ -13,7 +13,7 @@ use crate::style::{Layer, PropValue};
 use crate::tile::{RenderTile, Transform};
 use raster::{Mask, Rgba, Target};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::rc::Rc;
 
 pub const EXTENT: f64 = 8192.0;
@@ -21,7 +21,7 @@ pub const EXTENT: f64 = 8192.0;
 pub struct Ctx<'a> {
     pub transform: &'a Transform,
     pub global_state: &'a Rc<Object>,
-    pub images: &'a std::collections::HashMap<String, Rc<crate::sprite::StyleImage>>,
+    pub images: &'a HashMap<String, Rc<crate::sprite::StyleImage>>,
     // A context borrows one immutable transform and lives for one render. Keeping the
     // cache here avoids stale masks after a camera clamp or a change in resolved tiles.
     masks: RefCell<HashMap<(usize, usize, Vec<RenderTile>), Rc<Vec<Mask>>>>,
@@ -128,7 +128,7 @@ pub struct BucketFeature {
 
 impl<'a> Ctx<'a> {
     pub fn new(transform: &'a Transform, global_state: &'a Rc<Object>, images: &'a HashMap<String, Rc<crate::sprite::StyleImage>>) -> Self {
-        Self { transform, global_state, images, masks: RefCell::new(HashMap::new()), dems: RefCell::new(HashMap::new()) }
+        Self { transform, global_state, images, masks: RefCell::new(HashMap::default()), dems: RefCell::new(HashMap::default()) }
     }
 
     /// The DEM tiles of `source`, built once per render and shared by its hillshade and
@@ -597,8 +597,8 @@ mod tests {
     #[test]
     fn masks_share_coverage_without_reusing_parent_only_or_wrapped_masks() {
         let transform = Transform::new([0.0, 0.0], 0.0, 0.0, 32.0, 32.0, 1.0);
-        let state = Rc::new(Object::new());
-        let images = HashMap::new();
+        let state = Rc::new(Object::default());
+        let images = HashMap::default();
         let ctx = Ctx::new(&transform, &state, &images);
         let parent = RenderTile { overscaled_z: 0, wrap: 0, canonical: TileId { z: 0, x: 0, y: 0 } };
         let child = RenderTile { overscaled_z: 1, wrap: 0, canonical: TileId { z: 1, x: 1, y: 1 } };
@@ -629,8 +629,8 @@ mod tests {
 
     #[test]
     fn new_render_context_reprojects_the_same_tile_set() {
-        let state = Rc::new(Object::new());
-        let images = HashMap::new();
+        let state = Rc::new(Object::default());
+        let images = HashMap::default();
         let tile = RenderTile { overscaled_z: 1, wrap: 0, canonical: TileId { z: 1, x: 1, y: 1 } };
         let first = Transform::new([0.0, 0.0], 0.0, 0.0, 32.0, 32.0, 1.0);
         let second = Transform::new([30.0, 0.0], 0.0, 0.0, 32.0, 32.0, 1.0);

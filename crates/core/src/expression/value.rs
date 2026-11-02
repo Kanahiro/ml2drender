@@ -3,7 +3,7 @@
 
 use super::color::Color;
 use super::types::Type;
-use indexmap::IndexMap;
+use crate::hash::IndexMap;
 use std::rc::Rc;
 
 pub type Object = IndexMap<String, Value>;
