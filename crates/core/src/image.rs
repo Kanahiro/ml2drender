@@ -163,6 +163,7 @@ impl Texture {
 
     /// Sample at normalized `(u, v)`. `lambda` is log2 of texels per pixel: `> 0` minifies with
     /// `min` (and picks the nearest mip level, `*_MIPMAP_NEAREST`), otherwise `mag` applies.
+    #[inline(always)]
     pub fn sample(&self, u: f32, v: f32, mag: Filter, min: Filter, lambda: f32) -> [f32; 4] {
         let level = if lambda <= 0.5 || self.levels.len() == 1 {
             0
@@ -171,13 +172,14 @@ impl Texture {
         };
         let filter = if lambda > 0.0 { min } else { mag };
         let l = &self.levels[level];
-        let texel = |x: i64, y: i64| -> [f32; 4] {
+        #[inline(always)]
+        fn texel(l: &Level, x: i64, y: i64) -> [f32; 4] {
             let p = l.px[(y.clamp(0, l.h as i64 - 1) as usize) * l.w + x.clamp(0, l.w as i64 - 1) as usize];
             p.map(|c| c as f32 / 255.0)
-        };
+        }
         let (tx, ty) = (u * l.w as f32, v * l.h as f32);
         match filter {
-            Filter::Nearest => texel(tx.floor() as i64, ty.floor() as i64),
+            Filter::Nearest => texel(l, tx.floor() as i64, ty.floor() as i64),
             Filter::Linear => {
                 let (x, y) = (tx - 0.5, ty - 0.5);
                 let (x0, y0) = (x.floor(), y.floor());
@@ -187,18 +189,19 @@ impl Texture {
                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
                 {
                     use core::arch::wasm32::*;
-                    let texel = |x: i64, y: i64| {
+                    #[inline(always)]
+                    fn texel(l: &Level, x: i64, y: i64) -> v128 {
                         let p = l.px[(y.clamp(0, l.h as i64 - 1) as usize) * l.w + x.clamp(0, l.w as i64 - 1) as usize];
                         f32x4_div(f32x4_convert_u32x4(u32x4_extend_low_u16x8(u16x8_extend_low_u8x16(u32x4(u32::from_ne_bytes(p), 0, 0, 0)))), f32x4_splat(255.0))
-                    };
-                    let (a, b, c, d) = (texel(x0, y0), texel(x0 + 1, y0), texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
+                    }
+                    let (a, b, c, d) = (texel(l, x0, y0), texel(l, x0 + 1, y0), texel(l, x0, y0 + 1), texel(l, x0 + 1, y0 + 1));
                     let (gx, hx, gy, hy) = (f32x4_splat(1.0 - fx), f32x4_splat(fx), f32x4_splat(1.0 - fy), f32x4_splat(fy));
                     let lerp = |p, q| f32x4_add(f32x4_mul(p, gx), f32x4_mul(q, hx));
                     let r = f32x4_add(f32x4_mul(lerp(a, b), gy), f32x4_mul(lerp(c, d), hy));
                     return [f32x4_extract_lane::<0>(r), f32x4_extract_lane::<1>(r), f32x4_extract_lane::<2>(r), f32x4_extract_lane::<3>(r)];
                 }
                 #[allow(unreachable_code)]
-                let (a, b, c, d) = (texel(x0, y0), texel(x0 + 1, y0), texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
+                let (a, b, c, d) = (texel(l, x0, y0), texel(l, x0 + 1, y0), texel(l, x0, y0 + 1), texel(l, x0 + 1, y0 + 1));
                 std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
             }
         }

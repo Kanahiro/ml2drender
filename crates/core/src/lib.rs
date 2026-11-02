@@ -522,6 +522,26 @@ impl Renderer {
     /// Resolved tiles of a vector/GeoJSON source with their decoded layers (sliced when
     /// overzoomed).
     /// Each also gets its bucket cache.
+    /// Calls `f` with the source's resolved tiles: their clip masks and `layer`'s features.
+    fn with_tiles<R>(&self, ctx: &render::Ctx, src: &Source, layer: &style::Layer, w: usize, h: usize, f: impl FnOnce(&[render::TileFeatures]) -> R) -> R {
+        let empty = mvt::Layer { name: String::new(), extent: 4096, features: vec![] };
+        let layers_by_tile = self.tile_layers(src);
+        let render_tiles: Vec<RenderTile> = layers_by_tile.iter().map(|r| r.0).collect();
+        let masks = ctx.masks(&render_tiles, w, h);
+        let tiles: Vec<render::TileFeatures> = layers_by_tile
+            .iter()
+            .zip(masks.iter())
+            .map(|((rt, tl, buckets), mask)| render::TileFeatures { tile: *rt, mask, layer: self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty), buckets: Some(buckets) })
+            .collect();
+        f(&tiles)
+    }
+
+    /// `*-layer-opacity`, if the layer type has one.
+    fn layer_opacity(&self, layer: &style::Layer) -> Option<f64> {
+        let p = layer.paint.get(&format!("{}-layer-opacity", layer.ty))?;
+        Some(render::num(&p.eval(self.transform.zoom, None, None, &self.style.global_state)))
+    }
+
     fn tile_layers(&self, src: &Source) -> Vec<(RenderTile, Option<Rc<Vec<mvt::Layer>>>, Rc<render::TileBuckets>)> {
         self.resolve(src)
             .0
@@ -632,7 +652,7 @@ impl Renderer {
         let no_mask = render::raster::Mask::empty();
         // Layers with identical layout share one bucket (`groupByLayout`): it is laid out and
         // placed once, for the first layer, and drawn by each with its own paint.
-        let mut symbol_layers: Vec<(&style::Layer, &serde_json::Value, Vec<symbol::layout::SymbolBucket>)> = Vec::new();
+        let mut symbol_layers: Vec<(&style::Layer, &serde_json::Value, Vec<Rc<symbol::layout::SymbolBucket>>)> = Vec::new();
         let mut leader_of: HashMap<&str, usize> = HashMap::new();
         for layer in &self.style.layers {
             if layer.ty != "symbol" || layer.is_hidden(t.zoom, &self.style.global_state) {
@@ -647,9 +667,13 @@ impl Renderer {
             }
             let builder = symbol::layout::Builder { layer, ctx: &ctx, glyphs: &self.glyphs, raw };
             let mut buckets = Vec::new();
-            for (rt, tl, _) in self.tile_layers(src) {
+            for (rt, tl, tile_buckets) in self.tile_layers(src) {
                 let l = self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty);
-                buckets.push(builder.build(&render::TileFeatures { tile: rt, mask: &no_mask, layer: l, buckets: None }));
+                let tf = render::TileFeatures { tile: rt, mask: &no_mask, layer: l, buckets: Some(&tile_buckets) };
+                // The layout is camera-independent except for the world copy (in its tile) and the
+                // pixel ratio (icon scaling and the sprite); placement is redone each render.
+                let key = format!("{}\0{}\0{}", layer.layout_group, rt.wrap, t.pixel_ratio);
+                buckets.push(tf.bucket_keyed(&key, || builder.build(&tf)));
             }
             leader_of.insert(&layer.id, symbol_layers.len());
             symbol_layers.push((layer, raw, buckets));
@@ -674,17 +698,50 @@ impl Renderer {
         // Heatmaps drawn so far: MapLibre draws them without depth test, so they stay on top of
         // the opaque-pass pixels (opaque backgrounds and fill interiors) of layers above them.
         let mut heatmaps: Vec<Vec<render::raster::Rgba>> = Vec::new();
-        for layer in &self.style.layers {
-            if layer.is_hidden(t.zoom, &self.style.global_state) {
+        let visible: Vec<bool> = self.style.layers.iter().map(|l| !l.is_hidden(t.zoom, &self.style.global_state)).collect();
+        // Opaque pass, top-down (see `render::Pass`). Heatmaps stay on top of the opaque pixels of
+        // the layers above them, which the occlusion buffer can't express, so they draw all
+        // layers in style order.
+        let mut opaque_drawn = vec![false; self.style.layers.len()];
+        // Only a background or fill above another visible layer can hide anything.
+        let lowest = visible.iter().position(|v| *v);
+        let occlusion = self.style.layers.len() < u16::MAX as usize
+            && !self.style.layers.iter().zip(&visible).any(|(l, v)| *v && l.ty == "heatmap")
+            && self.style.layers.iter().zip(&visible).enumerate().any(|(i, (l, v))| *v && Some(i) > lowest && matches!(l.ty.as_str(), "background" | "fill"));
+        if occlusion {
+            target.occ = vec![0; w * h];
+            target.cull = true;
+            for (i, layer) in self.style.layers.iter().enumerate().rev() {
+                if !visible[i] {
+                    continue;
+                }
+                target.layer = i as u16 + 1;
+                let raw = self.style.layer_json(&layer.id);
+                opaque_drawn[i] = match layer.ty.as_str() {
+                    "background" => render::draw_background(&mut target, layer, &ctx, raw, render::Pass::Opaque),
+                    "fill" if self.layer_opacity(layer).is_none_or(|o| o >= 1.0) => {
+                        let Some(src) = layer.source.as_deref().and_then(|s| self.sources.get(s)) else { continue };
+                        self.with_tiles(&ctx, src, layer, w, h, |tiles| render::draw_fill(&mut target, layer, &ctx, tiles, raw, render::Pass::Opaque))
+                    }
+                    _ => false,
+                };
+            }
+            target.cull = opaque_drawn.iter().rposition(|d| *d) > lowest;
+        }
+        for (i, layer) in self.style.layers.iter().enumerate() {
+            if !visible[i] {
                 continue;
             }
+            target.layer = i as u16 + 1;
             if !heatmaps.is_empty() {
                 render::heatmap::reapply(&mut target, &heatmaps);
                 target.opaque = vec![false; w * h];
             }
             let raw = self.style.layer_json(&layer.id);
             if layer.ty == "background" {
-                render::draw_background(&mut target, layer, &ctx, raw);
+                if !opaque_drawn[i] {
+                    render::draw_background(&mut target, layer, &ctx, raw, render::Pass::All);
+                }
                 continue;
             }
             if layer.ty == "symbol" {
@@ -707,25 +764,17 @@ impl Renderer {
                 self.draw_raster(&mut target, layer, &ctx, src, w, h);
                 continue;
             }
-            let layers_by_tile = self.tile_layers(src);
-            let render_tiles: Vec<RenderTile> = layers_by_tile.iter().map(|r| r.0).collect();
-            let masks = ctx.masks(&render_tiles, w, h);
-            let tiles: Vec<render::TileFeatures> = layers_by_tile
-                .iter()
-                .zip(masks.iter())
-                .map(|((rt, tl, buckets), mask)| render::TileFeatures { tile: *rt, mask, layer: self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty), buckets: Some(buckets) })
-                .collect();
             // `*-layer-opacity`: the layer is drawn offscreen, then composited.
-            let layer_opacity = layer.paint.get(&format!("{}-layer-opacity", layer.ty)).map(|p| {
-                render::num(&p.eval(t.zoom, None, None, &self.style.global_state))
-            });
+            let layer_opacity = self.layer_opacity(layer);
             if layer_opacity == Some(0.0) {
                 continue;
             }
             let mut offscreen = layer_opacity.filter(|o| *o < 1.0).map(|_| render::raster::Target::new(w, h));
             let dest = offscreen.as_mut().unwrap_or(&mut target);
-            match layer.ty.as_str() {
-                "fill" => render::draw_fill(dest, layer, &ctx, &tiles, raw),
+            self.with_tiles(&ctx, src, layer, w, h, |tiles| match layer.ty.as_str() {
+                "fill" => {
+                    render::draw_fill(dest, layer, &ctx, tiles, raw, if opaque_drawn[i] { render::Pass::Translucent } else { render::Pass::All });
+                }
                 "line" => {
                     let source_maxzoom = match &src.data {
                         Data::Tiled(tj) => tj.maxzoom,
@@ -734,19 +783,19 @@ impl Renderer {
                     };
                     let has_gradient = raw["paint"].get("line-gradient").is_some();
                     let has_pattern = raw["paint"].get("line-pattern").is_some();
-                    render::draw_line(dest, layer, &ctx, &tiles, source_maxzoom, self.max_zoom, has_gradient, has_pattern)
+                    render::draw_line(dest, layer, &ctx, tiles, source_maxzoom, self.max_zoom, has_gradient, has_pattern)
                 }
-                "circle" => render::draw_circle(dest, layer, &ctx, &tiles),
+                "circle" => render::draw_circle(dest, layer, &ctx, tiles),
                 "heatmap" => {
-                    let colors = render::heatmap::draw_heatmap(dest, layer, &ctx, &tiles);
+                    let colors = render::heatmap::draw_heatmap(dest, layer, &ctx, tiles);
                     render::heatmap::blend(dest, &colors, None);
                     heatmaps.push(colors);
                 }
                 _ => {}
-            }
+            });
             if let (Some(off), Some(o)) = (offscreen, layer_opacity) {
                 for (i, p) in off.px.iter().enumerate() {
-                    if p[3] != 0 || p[0] != 0 || p[1] != 0 || p[2] != 0 {
+                    if (p[3] != 0 || p[0] != 0 || p[1] != 0 || p[2] != 0) && target.visible(i) {
                         target.blend(i, p.map(|c| c as f32 / 255.0 * o as f32));
                     }
                 }
@@ -1069,12 +1118,26 @@ mod tests {
             features.push(serde_json::json!({"type": "Feature", "properties": {"k": i % 3}, "geometry": {"type": "Polygon", "coordinates": [[[x, y], [x + 40.0, y + 3.0], [x + 15.0, y + 19.0], [x, y]]]}}));
             features.push(serde_json::json!({"type": "Feature", "properties": {"k": i % 3}, "geometry": {"type": "LineString", "coordinates": [[x, y], [x + 50.0, y + 15.0], [x + 10.0, y + 25.0]]}}));
         }
-        let style = serde_json::json!({"version": 8, "sources": {"g": {"type": "geojson", "maxzoom": 3, "data": {"type": "FeatureCollection", "features": features}}}, "layers": [
+        let style = serde_json::json!({"version": 8, "sprite": "/sprite", "sources": {"g": {"type": "geojson", "maxzoom": 3, "data": {"type": "FeatureCollection", "features": features}}}, "layers": [
             {"id": "f", "type": "fill", "source": "g", "paint": {"fill-color": ["match", ["get", "k"], 0, "#c33", 1, "#3c3", "#33c"], "fill-opacity": 0.7}},
             {"id": "l", "type": "line", "source": "g", "layout": {"line-join": "round", "line-cap": "round"}, "paint": {"line-width": 3}},
+            // Line labels depend on the world copy; icon sizes on the sprite's pixel ratio.
+            {"id": "s", "type": "symbol", "source": "g", "layout": {"icon-image": "marker", "symbol-placement": "line", "symbol-spacing": 40}},
         ]})
         .to_string();
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 8, 8);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&[0, 0, 0, 255].repeat(64)).unwrap();
+        }
         let render = |r: &mut Renderer| {
+            for need in r.needs() {
+                let ratio = if need.url.contains("@2x") { 2 } else { 1 };
+                let json = format!(r#"{{"marker":{{"x":0,"y":0,"width":8,"height":8,"pixelRatio":{ratio}}}}}"#);
+                r.provide(&need.url, Some(if need.url.ends_with(".json") { json.as_bytes() } else { &png }));
+            }
             assert!(r.needs().is_empty());
             r.render().unwrap()
         };
@@ -1085,6 +1148,9 @@ mod tests {
         views.extend((0..16).map(|i| tile(4, 4 + i % 4, 4 + i / 4)));
         views.extend((0..64).map(|i| tile(3, i % 8, i / 8)));
         views.push(View { pixel_ratio: 0.5, ..views[9] });
+        views.push(View { pixel_ratio: 2.0, ..views[9] });
+        // Another world copy of a cached tile.
+        views.push(View { center: [views[9].center[0] + 360.0, views[9].center[1]], ..views[9] });
         let mut shared = Renderer::new(&style, views[0]).unwrap();
         let mut drawn = 0;
         for (i, &view) in views.iter().enumerate() {

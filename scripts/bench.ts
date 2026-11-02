@@ -67,8 +67,20 @@ const styles: Record<string, object> = {
     layers: [{id: 'icons', type: 'symbol', source: 'data', layout: {'icon-image': 'cafe-15', 'icon-allow-overlap': true, 'icon-ignore-placement': true}}]},
 };
 const terrain = tile(12, 759, 1609);
+// `center` moved by (dx, dy) CSS px at `zoom`.
+const shift = ([lng, lat]: [number, number], zoom: number, dx: number, dy: number): [number, number] => {
+  const size = 512 * 2 ** zoom;
+  const x = (lng + 180) / 360 * size + dx;
+  const y = (1 - Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)) / Math.PI) / 2 * size + dy;
+  return [x / size * 360 - 180, Math.atan(Math.sinh(Math.PI * (1 - 2 * y / size))) * 180 / Math.PI];
+};
+// The four quadrants of `view`, as views of half its size: neighboring output tiles of one renderer.
+const quadrants = (view: View): View[] => [[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([i, j]) =>
+  ({...view, center: shift(view.center, view.zoom, i * view.width / 4, j * view.height / 4), width: view.width / 2, height: view.height / 2}));
 // The fixture sprites are 1x only, so cases with icons use DPR 1. The dense tiles span 1024 px at z15.
-const cases: {name: string; style: string; view: View}[] = [
+// With `then`, one renderer renders `view` untimed and then `then` (timed, per view), as a tile
+// server or map client does with `set_view`.
+const cases: {name: string; style: string; view: View; then?: View[]}[] = [
   {name: 'bright z14', style: 'bright', view: {center: berlin, zoom: 14, width: 512, height: 512}},
   {name: 'bright z15', style: 'bright', view: {center: berlin, zoom: 15, width: 1024, height: 1024}},
   {name: 'bright z16.5 bearing 17°', style: 'bright', view: {center: berlin, zoom: 16.5, bearing: 17, width: 1024, height: 1024}},
@@ -78,6 +90,10 @@ const cases: {name: string; style: string; view: View}[] = [
   {name: 'GeoJSON lines, 8 layers', style: 'lines', view: {center: berlin, zoom: 14, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON 10k labels', style: 'labels', view: {center: berlin, zoom: 14, width: 512, height: 512}},
   {name: 'GeoJSON 1024 icons', style: 'icons', view: {center: berlin, zoom: 14, width: 1024, height: 1024}},
+  // One z14 data tile: the whole of it, then its four z15 quadrants.
+  ...[{name: 'bright z15, 4 tiles of one data tile (reuse)', style: 'bright', view: {center: shift(berlin, 15, -512, -512), zoom: 15, width: 1024, height: 1024}},
+    {name: 'GeoJSON 10k labels, 4 tiles (reuse)', style: 'labels', view: {center: shift(berlin, 14, -256, -256), zoom: 14, width: 512, height: 512}},
+  ].map((c) => ({...c, then: quadrants(c.view)})),
 ];
 
 globalThis.fetch = async (input: RequestInfo | URL) => {
@@ -122,9 +138,12 @@ for (const c of cases) {
     for (const run of i % 2 ? [...runs].reverse() : runs) {
       // A new renderer each time: renderers keep decoded tiles, and this measures a cold render.
       run.renderer = await run.v.api.MapRenderer.init(styles[c.style], {wasm: run.v.module, cache: {ttlMs: Infinity}});
+      if (c.then) await run.renderer.render(c.view);
+      const views = c.then ?? [c.view];
       const start = performance.now();
-      const image = await run.renderer.render(c.view);
-      const ms = performance.now() - start;
+      let image!: {data: Uint8ClampedArray};
+      for (const view of views) image = await run.renderer.render(view);
+      const ms = (performance.now() - start) / views.length;
       if (i >= 2) run.times.push(ms);
       run.hash ||= createHash('sha256').update(image.data).digest('hex');
     }
@@ -135,7 +154,7 @@ for (const c of cases) {
   });
   if (pngDir) {
     mkdirSync(pngDir, {recursive: true});
-    for (const [i, run] of runs.entries()) writeFileSync(join(pngDir, `${c.name.replace(/[^\w.-]+/g, '_')}.${loaded[i].name}.png`), await run.renderer!.renderPng(c.view));
+    for (const [i, run] of runs.entries()) writeFileSync(join(pngDir, `${c.name.replace(/[^\w.-]+/g, '_')}.${loaded[i].name}.png`), await run.renderer!.renderPng((c.then ?? [c.view]).at(-1)!));
   }
   const medians = runs.map((r) => median(r.times));
   const ratios = medians.slice(1).map((m) => m / medians[0] - 1);

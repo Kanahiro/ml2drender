@@ -10,6 +10,7 @@ use crate::image::Filter;
 use crate::render::raster::{self, Rgba, Target};
 use crate::render::{color, num, Ctx, EXTENT};
 use crate::style::Layer;
+use std::rc::Rc;
 
 type P = [f64; 2];
 
@@ -31,7 +32,7 @@ struct Paint {
     halo_blur: f32,
 }
 
-pub fn draw_symbol_layer(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serde_json::Value, buckets: &[SymbolBucket], placements: &[Vec<InstancePlacement>]) {
+pub fn draw_symbol_layer(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serde_json::Value, buckets: &[Rc<SymbolBucket>], placements: &[Vec<InstancePlacement>]) {
     let Some(first) = buckets.first() else { return };
     let res = Resolved::new(layer, ctx, &first.tile);
     let constant_or = |name: &str, default: f64| {
@@ -66,7 +67,7 @@ fn draw_pass(
     ctx: &Ctx,
     raw: &serde_json::Value,
     res: &Resolved,
-    buckets: &[SymbolBucket],
+    buckets: &[Rc<SymbolBucket>],
     placements: &[Vec<InstancePlacement>],
     order: &[usize],
     is_text: bool,

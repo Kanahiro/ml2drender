@@ -47,12 +47,18 @@ impl TileFeatures<'_> {
     /// only on the tile and the layer's source data and layout (not on paint or the camera): it
     /// is reused across layers and renders.
     pub fn bucket<T: 'static>(&self, layer: &Layer, build: impl FnOnce() -> T) -> Rc<T> {
+        self.bucket_keyed(&layer.layout_group, build)
+    }
+
+    /// `bucket` under an explicit key, for buckets that also depend on more than the tile's data
+    /// region and layout (e.g. the world copy or the pixel ratio).
+    pub fn bucket_keyed<T: 'static>(&self, key: &str, build: impl FnOnce() -> T) -> Rc<T> {
         let Some(cache) = self.buckets else { return Rc::new(build()) };
-        if let Some(Ok(b)) = cache.borrow().get(&layer.layout_group).map(|b| Rc::clone(b).downcast::<T>()) {
+        if let Some(Ok(b)) = cache.borrow().get(key).map(|b| Rc::clone(b).downcast::<T>()) {
             return b;
         }
         let b = Rc::new(build());
-        cache.borrow_mut().insert(layer.layout_group.clone(), b.clone());
+        cache.borrow_mut().insert(key.to_string(), b.clone());
         b
     }
 }
@@ -275,11 +281,25 @@ pub fn color(v: &Value, opacity: f64) -> Rgba {
     }
 }
 
-pub fn draw_background(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serde_json::Value) {
+/// Which part of a layer to draw. MapLibre draws opaque backgrounds and fill interiors in a
+/// top-down opaque pass, then everything else bottom-up (`Target::occ` stands in for the depth
+/// buffer that lets the opaque pass skip what it hides).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Pass {
+    /// Everything, in style order (no occlusion buffer).
+    All,
+    /// Only the opaque-pass part; the draw function returns whether there was one.
+    Opaque,
+    /// Everything but the opaque-pass part, which was drawn already.
+    Translucent,
+}
+
+/// Returns whether anything was drawn in `Pass::Opaque`.
+pub fn draw_background(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serde_json::Value, pass: Pass) -> bool {
     let tile = dummy_tile();
     let opacity = num(&ctx.paint(layer, "background-opacity", None, &tile));
     if opacity == 0.0 {
-        return;
+        return false;
     }
     let t = ctx.transform;
     // A set pattern is cross-faded (evaluated at the integer zoom); with no resolvable image
@@ -288,28 +308,34 @@ pub fn draw_background(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serd
         let v = layer.paint("background-pattern").eval(t.zoom.floor(), None, None, ctx.global_state);
         match pattern::image_name(&v).and_then(|n| ctx.images.get(&n)) {
             Some(img) => Some(img),
-            None => return,
+            None => return false,
         }
     } else {
         None
     };
     let Some(img) = image else {
         let c = color(&ctx.paint(layer, "background-color", None, &tile), opacity);
-        let opaque_pass = c[3] == 1.0;
+        if pass == Pass::Opaque && c[3] != 1.0 {
+            return false;
+        }
         // Drawn over the covering tiles, i.e. only within the world's vertical extent.
         for y in 0..target.h {
             for x in 0..target.w {
                 let wy = t.screen_to_world([x as f64 + 0.5, y as f64 + 0.5])[1];
                 if (0.0..t.world_size).contains(&wy) {
-                    target.blend(y * target.w + x, c);
-                    if opaque_pass {
-                        target.mark_opaque(y * target.w + x);
+                    if c[3] == 1.0 {
+                        target.cover(y * target.w + x, c);
+                    } else if target.visible(y * target.w + x) {
+                        target.blend(y * target.w + x, c);
                     }
                 }
             }
         }
-        return;
+        return true;
     };
+    if pass == Pass::Opaque {
+        return false;
+    }
     // Pattern: one quad per covering tile at the integer zoom.
     let size = pattern::display_size(img);
     let z = t.zoom.floor().max(0.0) as i32;
@@ -326,6 +352,7 @@ pub fn draw_background(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serd
             });
         }
     }
+    true
 }
 
 /// How a fill feature is painted: plain color, or an image pattern (optionally SDF, tinted
@@ -357,7 +384,8 @@ impl FillPaint<'_> {
     }
 }
 
-pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeatures], raw: &serde_json::Value) {
+/// Returns whether anything was drawn in `Pass::Opaque`.
+pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeatures], raw: &serde_json::Value, pass: Pass) -> bool {
     let has_outline_color = raw["paint"].get("fill-outline-color").is_some();
     let has_pattern = raw["paint"].get("fill-pattern").is_some();
     let constant_opaque = !has_pattern
@@ -365,7 +393,16 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
         && layer.paint("fill-opacity").is_constant()
         && matches!(ctx.paint(layer, "fill-color", None, &tiles.first().map_or(dummy_tile(), |t| t.tile)), Value::Color(c) if c.a == 1.0)
         && tiles.first().is_some_and(|t| num(&ctx.paint(layer, "fill-opacity", None, &t.tile)) == 1.0);
-    let antialias = tiles.first().is_some_and(|t| ctx.paint(layer, "fill-antialias", None, &t.tile).truthy());
+    if pass == Pass::Opaque && !constant_opaque {
+        return false;
+    }
+    // Pixels covered by this layer's opaque interiors, standing in for the depth buffer (tile
+    // masks are disjoint, so one buffer serves all tiles).
+    let mut covered = match pass {
+        Pass::Translucent if constant_opaque => target.occ.iter().map(|&o| o == target.layer).collect(),
+        _ => vec![false; if constant_opaque { target.w * target.h } else { 0 }],
+    };
+    let antialias = pass != Pass::Opaque && tiles.first().is_some_and(|t| ctx.paint(layer, "fill-antialias", None, &t.tile).truthy());
     let pattern_prop = layer.paint("fill-pattern");
     let mut prepared = Vec::new();
     for tf in tiles {
@@ -377,8 +414,6 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
             ctx.transform.world_to_screen([w[0] + tr[0], w[1] + tr[1]])
         };
         let tp = pattern::TilePattern::new(ctx, &tf.tile);
-        // Pixels covered by opaque fills, standing in for the depth buffer.
-        let mut covered = vec![false; if constant_opaque { target.w * target.h } else { 0 }];
         let mut outlines = Vec::new();
         for (i, polygons) in &bucket.polygons {
             let f = &bucket.features[*i];
@@ -411,21 +446,22 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
             for polygon in polygons {
                 let screen: Vec<[f64; 2]> = polygon.points.iter().map(|p| to_screen(*p)).collect();
                 let vary: Vec<[f32; 2]> = polygon.points.iter().map(|p| tp.pattern_pos(size, *p)).collect();
-                if opacity >= 0.01 {
+                if opacity >= 0.01 && pass != Pass::Translucent {
                     for t in polygon.triangles.chunks_exact(3) {
                         let p = [screen[t[0]], screen[t[1]], screen[t[2]]];
-                        let v = [vary[t[0]], vary[t[1]], vary[t[2]]];
-                        let g = raster::varying_gradients(p, v);
-                        let w = target.w;
-                        raster::triangle(target, Some(tf.mask), p, v, &mut |v: &[f32; 2]| Some(paint.shade(*v, &g)));
                         if constant_opaque {
+                            let w = target.w;
                             raster::for_each_pixel(target.w, target.h, p, |x, y, _| {
                                 if tf.mask.get(x, y) {
                                     covered[y * w + x] = true;
-                                    target.mark_opaque(y * w + x);
+                                    target.cover(y * w + x, fill_color);
                                 }
                             });
+                            continue;
                         }
+                        let v = [vary[t[0]], vary[t[1]], vary[t[2]]];
+                        let g = raster::varying_gradients(p, v);
+                        raster::triangle(target, Some(tf.mask), p, v, &mut |v: &[f32; 2]| Some(paint.shade(*v, &g)));
                     }
                 }
                 if antialias && opacity >= 0.01 {
@@ -440,10 +476,10 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
                 }
             }
         }
-        prepared.push((tf, outlines, covered));
+        prepared.push((tf, outlines));
     }
     // Outlines are drawn after all fills (MapLibre's separate outline pass).
-    for (tf, outlines, covered) in prepared {
+    for (tf, outlines) in prepared {
         let w = target.w;
         for (a, b, va, vb, paint) in outlines {
             let skip = |x: usize, y: usize| !has_outline_color && constant_opaque && covered[y * w + x];
@@ -456,6 +492,7 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
             });
         }
     }
+    pass == Pass::Opaque
 }
 
 fn clone_paint<'a>(p: &FillPaint<'a>) -> FillPaint<'a> {
