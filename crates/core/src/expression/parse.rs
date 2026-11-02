@@ -8,7 +8,7 @@ use super::types::{check_subtype, Type};
 use super::value::Value;
 use serde_json::Value as J;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -507,7 +507,7 @@ impl ParseCtx {
         }
         let mut input_type: Option<Type> = None;
         let mut out = self.output_type();
-        let mut cases = HashMap::new();
+        let mut cases = HashMap::default();
         let mut outputs = Vec::new();
         let mut i = 2;
         while i < args.len() - 1 {

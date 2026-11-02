@@ -297,7 +297,7 @@ fn convert_feature(out: &mut Vec<GFeature>, f: &J, index: usize, sq_tolerance: f
         _ => Default::default(),
     };
     let id = if let Some(p) = &o.promote_id {
-        props.get(p).cloned()
+        props.get(p.as_str()).cloned()
     } else if o.generate_id {
         Some(Value::Number(index as f64))
     } else {

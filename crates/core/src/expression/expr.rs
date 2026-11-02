@@ -5,7 +5,7 @@ use super::geometry;
 use super::intl::{self, Collator};
 use super::types::{check_subtype, Type};
 use super::value::*;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -599,7 +599,7 @@ impl Expr {
                 .globals
                 .global_state
                 .as_ref()
-                .and_then(|s| s.get(key).cloned())
+                .and_then(|s| s.get(key.as_str()).cloned())
                 .unwrap_or(Value::Null)),
             Node::Within(polygons) => Ok(Value::Bool(match (ctx.feature.and_then(|f| f.geometry.as_ref()), ctx.canonical) {
                 (Some(g), Some(c)) => geometry::within(ctx.geometry_type(), g, c, polygons),
