@@ -758,35 +758,41 @@ impl Renderer {
         let hillshade = (layer.ty == "hillshade").then(|| render::dem::HillshadeParams::new(layer, ctx));
         let ramp = (layer.ty == "color-relief").then(|| render::dem::ColorRamp::new(layer, ctx));
         let resolved = self.resolve(src).0;
-        let dems: Vec<Option<&Rc<render::dem::Dem>>> =
-            resolved.iter().map(|(_, id)| match src.tiles.get(id) {
-                Some(Some(TileData::Dem(d))) => Some(d),
-                _ => None,
-            }).collect();
         let tiles: Vec<RenderTile> = resolved.iter().map(|r| r.0).collect();
+        // The resolved tiles of a source are fixed for one render, so the source id keys them.
+        let dems = ctx.dem_tiles(layer.source.as_deref().unwrap_or_default(), || {
+            let raw: Vec<Option<&Rc<render::dem::Dem>>> =
+                resolved.iter().map(|(_, id)| match src.tiles.get(id) {
+                    Some(Some(TileData::Dem(d))) => Some(d),
+                    _ => None,
+                }).collect();
+            tiles.iter().enumerate().map(|(i, t)| {
+                let mut dem = (**raw[i]?).clone();
+                let n = 1i64 << t.canonical.z;
+                let world_x = |t: &RenderTile| t.wrap as i64 * n + t.canonical.x as i64;
+                for (j, u) in tiles.iter().enumerate() {
+                    let (dx, dy) = (world_x(u) - world_x(t), u.canonical.y as i64 - t.canonical.y as i64);
+                    let neighbor = u.overscaled_z == t.overscaled_z && u.canonical.z == t.canonical.z && dx.abs() <= 1 && dy.abs() <= 1 && (dx, dy) != (0, 0);
+                    if let (true, Some(b)) = (neighbor, raw[j]) {
+                        dem.backfill(b, dx as isize, dy as isize);
+                    }
+                }
+                Some(render::dem::DemTile::new(dem))
+            }).collect()
+        });
         let mixed = tiles.iter().any(|t| t.canonical.z != tiles[0].canonical.z);
         let masks = if mixed { Some(ctx.masks(&tiles, w, h)) } else { None };
         for (i, t) in tiles.iter().enumerate() {
-            let Some(dem) = dems[i] else { continue };
-            let mut dem = (**dem).clone();
-            let n = 1i64 << t.canonical.z;
-            let world_x = |t: &RenderTile| t.wrap as i64 * n + t.canonical.x as i64;
-            for (j, u) in tiles.iter().enumerate() {
-                let (dx, dy) = (world_x(u) - world_x(t), u.canonical.y as i64 - t.canonical.y as i64);
-                let neighbor = u.overscaled_z == t.overscaled_z && u.canonical.z == t.canonical.z && dx.abs() <= 1 && dy.abs() <= 1 && (dx, dy) != (0, 0);
-                if let (true, Some(b)) = (neighbor, dems[j]) {
-                    dem.backfill(b, dx as isize, dy as isize);
-                }
-            }
+            let Some(dem) = &dems[i] else { continue };
             let mask = masks.as_ref().map(|m| &m[i]);
             if let Some(params) = &hillshade {
                 // Raster sources are not reparsed when overzoomed: their tiles keep
                 // `overscaledZ` = the canonical zoom.
-                let tex = dem.prepare(t.canonical.z as f64);
-                render::dem::draw_hillshade_tile(target, ctx, t, &tex, params, mask);
+                let tex = dem.slopes(t.canonical.z as f64);
+                render::dem::draw_hillshade_tile(target, ctx, t, tex, params, mask);
             }
             if let Some(ramp) = &ramp {
-                render::dem::draw_color_relief_tile(target, ctx, t, &dem, ramp, mask);
+                render::dem::draw_color_relief_tile(target, ctx, t, &dem.dem, ramp, mask);
             }
         }
     }
