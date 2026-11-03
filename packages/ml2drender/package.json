@@ -11,7 +11,8 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-transform-types tests/single-flight.ts"
   },
   "peerDependencies": {
     "@maplibre/maplibre-gl-style-spec": "^26.4.4"

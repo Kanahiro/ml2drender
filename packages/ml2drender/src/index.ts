@@ -152,7 +152,7 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
 export class MapRenderer {
   private core?: Core;
   /** Fetches in flight, shared by overlapping renders. */
-  private readonly pending = new Map<string, Promise<Uint8Array<ArrayBuffer> | null>>();
+  private readonly pending = new Map<string, Promise<void>>();
 
   private constructor(
     private readonly wasm: WasmExports,
@@ -184,10 +184,7 @@ export class MapRenderer {
         if (count === 0) break;
         if (round >= 32) throw new Error('Resource requests did not settle');
         const urls = decoder.decode(this.output()).split('\n');
-        const resources = await Promise.all(urls.map((url) => this.fetch(url)));
-        urls.forEach((url, i) => this.withBytes(encoder.encode(url), (urlPtr, urlLen) =>
-          this.withBytes(resources[i] ?? new Uint8Array(), (dataPtr, dataLen) =>
-            w.renderer_provide(core.handle, urlPtr, urlLen, dataPtr, dataLen, resources[i] === null ? 0 : 1))));
+        await Promise.all(urls.map((url) => this.fetch(core, url)));
       }
       if (!w.renderer_render(core.handle)) throw new Error(decoder.decode(this.output()));
       // Own the bytes before another render can overwrite or grow WASM memory.
@@ -207,10 +204,17 @@ export class MapRenderer {
     return { width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp) };
   }
 
-  private fetch(url: string): Promise<Uint8Array<ArrayBuffer> | null> {
+  /** Fetch `url` once and provide it to `core`, which requested it, before it leaves `pending`. */
+  private fetch(core: Core, url: string): Promise<void> {
     let request = this.pending.get(url);
     if (!request) {
-      request = this.loadResource(url).finally(() => this.pending.delete(url));
+      request = this.loadResource(url).then((bytes) => {
+        // A freed core was retired by the TTL; its successor fetches again.
+        if (core.retired && core.active === 0) return;
+        this.withBytes(encoder.encode(url), (urlPtr, urlLen) =>
+          this.withBytes(bytes ?? new Uint8Array(), (dataPtr, dataLen) =>
+            this.wasm.renderer_provide(core.handle, urlPtr, urlLen, dataPtr, dataLen, bytes === null ? 0 : 1)));
+      }).finally(() => this.pending.delete(url));
       this.pending.set(url, request);
     }
     return request;
