@@ -84,16 +84,16 @@ impl Target {
 
     /// Non-premultiplied RGBA like the render-test harness produces from `readPixels`:
     /// each channel divided by alpha and truncated into a `Uint8Array`.
-    pub fn to_unpremultiplied(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.px.len() * 4);
-        for p in &self.px {
+    pub fn into_unpremultiplied(mut self) -> Vec<u8> {
+        for p in &mut self.px {
             let a = p[3] as f64 / 255.0;
             for k in 0..3 {
-                out.push(if a == 0.0 { p[k] } else { ((p[k] as f64 / a) as u32 & 0xff) as u8 });
+                p[k] = if a == 0.0 { p[k] } else { ((p[k] as f64 / a) as u32 & 0xff) as u8 };
             }
-            out.push(p[3]);
         }
-        out
+        // A pixel array and its flattened bytes have the same layout. Reuse the framebuffer
+        // allocation for the returned image instead of holding both full-size buffers.
+        self.px.into_flattened()
     }
 }
 
@@ -582,6 +582,6 @@ mod tests {
         let mut t = Target::new(1, 1);
         t.blend(0, [0.5, 0.0, 0.0, 0.5]);
         assert_eq!(t.px[0], [128, 0, 0, 128]);
-        assert_eq!(t.to_unpremultiplied(), vec![255, 0, 0, 128]);
+        assert_eq!(t.into_unpremultiplied(), vec![255, 0, 0, 128]);
     }
 }

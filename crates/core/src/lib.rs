@@ -847,19 +847,19 @@ impl Renderer {
             }
         }
         render::heatmap::reapply(&mut target, &heatmaps);
-        let rgba = target.to_unpremultiplied();
+        let mut rgba = target.into_unpremultiplied();
         let margin = (self.view.margin as f64 * t.pixel_ratio).round() as usize;
         if margin == 0 {
             return Ok(rgba);
         }
         let width = (self.view.width as f64 * t.pixel_ratio).round() as usize;
         let height = (self.view.height as f64 * t.pixel_ratio).round() as usize;
-        let mut cropped = Vec::with_capacity(width * height * 4);
-        for y in margin..margin + height {
+        for (row, y) in (margin..margin + height).enumerate() {
             let start = (y * w + margin) * 4;
-            cropped.extend_from_slice(&rgba[start..start + width * 4]);
+            rgba.copy_within(start..start + width * 4, row * width * 4);
         }
-        Ok(cropped)
+        rgba.truncate(width * height * 4);
+        Ok(rgba)
     }
 
     fn draw_raster(&self, target: &mut render::raster::Target, layer: &style::Layer, ctx: &render::Ctx, src: &Source, w: usize, h: usize) {
