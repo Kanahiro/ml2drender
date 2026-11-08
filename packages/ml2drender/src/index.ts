@@ -1,9 +1,56 @@
 import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 
+/** A Web Mercator camera. */
 export interface View {
   center: [lng: number, lat: number];
   zoom: number;
   bearing?: number;
+  width: number;
+  height: number;
+  pixelRatio?: number;
+  /** Non-negative integer CSS pixels of extra coverage, cropped from the output. Default: 0. */
+  margin?: number;
+}
+
+/** An XYZ tile of the Web Mercator grid (`tileSize` CSS pixels square). */
+export interface TileView {
+  z: number;
+  x: number;
+  y: number;
+  /** CSS pixels. Default: 256. */
+  tileSize?: number;
+  pixelRatio?: number;
+  /** Non-negative integer CSS pixels of extra coverage, cropped from the output. Default: 0. */
+  margin?: number;
+}
+
+/**
+ * A longitude/latitude box in Web Mercator. The image has the box's aspect ratio, `size` on its long side,
+ * at the zoom that fits the box into it.
+ */
+export interface LngLatView {
+  /** Degrees; `west > east` crosses the antimeridian. Latitudes are clamped to Web Mercator's ±85.0511°. */
+  bbox: [west: number, south: number, east: number, north: number];
+  /** Positive integer CSS pixels of the image's long side. */
+  size: number;
+  pixelRatio?: number;
+  /** Non-negative integer CSS pixels of extra coverage, cropped from the output. Default: 0. */
+  margin?: number;
+}
+
+/**
+ * A box of a projected CRS. Vector layers (background, fill, line, circle, heatmap, symbol) are drawn in it
+ * with projected vertices; raster, hillshade and color-relief are rendered in Web Mercator and warped.
+ */
+export interface ProjectedView {
+  /**
+   * PROJJSON of a geographic or projected CRS. Supported methods: Transverse Mercator, Mercator, Pseudo Mercator,
+   * Lambert Conic Conformal, Polar Stereographic, Lambert Azimuthal Equal Area, Equal Earth and PROJ's
+   * Geostationary Satellite, without datum shifts.
+   */
+  projjson: object;
+  /** In CRS units (degrees for longlat), always easting/longitude first whatever the CRS's axis order. */
+  bbox: [minX: number, minY: number, maxX: number, maxY: number];
   width: number;
   height: number;
   pixelRatio?: number;
@@ -35,9 +82,9 @@ export interface InitOptions {
   wasm?: WebAssembly.Module;
   /**
    * Decoded resources (tiles and their layer geometry, sprites, glyphs) are kept inside the
-   * renderer and reused by later renders, and dropped ttlMs after the renderer was created;
-   * 0 disables reuse, Infinity never expires. Default: 5 minutes. Fetched bytes are not
-   * cached: rely on the HTTP cache, or cache in `loadResource`.
+   * renderer and reused by later renders; the first render ttlMs or more after they started
+   * being kept drops them. 0 disables reuse, Infinity never expires. Default: 5 minutes.
+   * Fetched bytes are not cached: rely on the HTTP cache, or cache in `loadResource`.
    */
   cache?: { ttlMs?: number };
   /** Replace each fill-extrusion layer. Defaults to a fill preserving its 2D appearance. */
@@ -52,12 +99,26 @@ interface WasmExports {
   out_len(): number;
   renderer_new(stylePtr: number, styleLen: number, ...view: ViewArgs): number;
   renderer_set_view(handle: number, ...view: ViewArgs): void;
+  renderer_set_projected_view(handle: number, projjsonPtr: number, projjsonLen: number, minX: number, minY: number, maxX: number, maxY: number, width: number, height: number, pixelRatio: number, margin: number): number;
   renderer_needs(handle: number): number;
   renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
   renderer_render(handle: number): number;
   encode_png(ptr: number, len: number, width: number, height: number): number;
   encode_webp(ptr: number, len: number, width: number, height: number): number;
   renderer_free(handle: number): void;
+  projection_new(ptr: number, len: number): number;
+  projection_forward(handle: number, lng: number, lat: number): number;
+  projection_inverse(handle: number, x: number, y: number): number;
+  projection_free(handle: number): void;
+  xy_ptr(): number;
+}
+
+/** A CRS's projection, computed by the renderer itself. */
+export interface Projection {
+  /** `[lng, lat]` in degrees → `[x, y]` in CRS units; NaN where the CRS has no point (e.g. the far side of a geostationary view). */
+  forward(lngLat: number[]): number[];
+  /** `[x, y]` → `[lng, lat]` in degrees; NaN outside the projection's domain. */
+  inverse(xy: number[]): number[];
 }
 
 type ViewArgs = [lng: number, lat: number, zoom: number, bearing: number, width: number, height: number, pixelRatio: number, margin: number];
@@ -87,23 +148,153 @@ async function fetchResource(url: string): Promise<Uint8Array<ArrayBuffer> | nul
   return new Uint8Array(await response.arrayBuffer());
 }
 
-async function loadWasm(module: WebAssembly.Module | undefined, loadResource: NonNullable<InitOptions['loadResource']>): Promise<WasmExports> {
+/** The bundled module, compiled once. */
+let bundled: Promise<WebAssembly.Module> | undefined;
+
+async function loadWasm(module: WebAssembly.Module | undefined): Promise<WasmExports> {
   if (!module) {
     // Vite bundles this asset for browsers. Workers supply their imported module and
-    // never fetch or compile WASM at runtime.
-    const url = new URL('../wasm/ml2drender_wasm.wasm', import.meta.url);
-    const bytes = await loadResource(url.href);
-    if (bytes === null) throw new Error(`WASM not found: ${url}`);
-    module = await WebAssembly.compile(bytes);
+    // never fetch or compile WASM at runtime. Fetched directly: `loadResource` serves the style.
+    if (!bundled) {
+      const url = new URL('../wasm/ml2drender_wasm.wasm', import.meta.url).href;
+      bundled = fetchResource(url).then((bytes) => {
+        if (bytes === null) throw new Error(`WASM not found: ${url}`);
+        return WebAssembly.compile(bytes);
+      });
+      // A failed load is retried by the next call.
+      bundled.catch(() => { bundled = undefined; });
+    }
+    module = await bundled;
   }
   const instance = await WebAssembly.instantiate(module);
   return instance.exports as unknown as WasmExports;
 }
 
+/** Copied output buffer of the last call. */
+function output(w: WasmExports): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(w.memory.buffer, w.out_ptr(), w.out_len()).slice();
+}
+
+function withBytes<T>(w: WasmExports, bytes: Uint8Array, call: (ptr: number, len: number) => T): T {
+  const ptr = w.alloc(bytes.length);
+  new Uint8Array(w.memory.buffer, ptr, bytes.length).set(bytes);
+  try {
+    return call(ptr, bytes.length);
+  } finally {
+    w.dealloc(ptr, bytes.length);
+  }
+}
+
+/** One WASM instance per module for all projections (the bundled one under `undefined`). */
+const projectionWasm = new Map<WebAssembly.Module | undefined, Promise<WasmExports>>();
+const freeProjection = new FinalizationRegistry<{ w: WasmExports; handle: number }>(({ w, handle }) => w.projection_free(handle));
+
+/**
+ * Load a PROJJSON CRS the way `renderProjected` reads `ProjectedView.projjson`, e.g. to compute
+ * tile bounds or to register the CRS with MapLibre's `addProjection`, so both agree on the CRS.
+ * Throws for a CRS the renderer does not support.
+ */
+export async function loadProjection(projjson: object, options: Pick<InitOptions, 'wasm'> = {}): Promise<Projection> {
+  return (await loadProjectionFactory(options))(projjson);
+}
+
+/**
+ * Load the WASM once and return a synchronous `loadProjection`, for hosts that must build a
+ * projection without awaiting, such as MapLibre's worker `setProjectionHandler`.
+ */
+export async function loadProjectionFactory(options: Pick<InitOptions, 'wasm'> = {}): Promise<(projjson: object) => Projection> {
+  let instance = projectionWasm.get(options.wasm);
+  if (!instance) {
+    instance = loadWasm(options.wasm);
+    projectionWasm.set(options.wasm, instance);
+    // A failed load is retried by the next call.
+    instance.catch(() => projectionWasm.delete(options.wasm));
+  }
+  const w = await instance;
+  return (projjson) => {
+    if (!projjson || typeof projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
+    const handle = withBytes(w, encoder.encode(JSON.stringify(projjson)), (ptr, len) => w.projection_new(ptr, len));
+    if (!handle) throw new Error(decoder.decode(output(w)));
+    // A fresh view per call: memory growth detaches earlier ones.
+    const xy = () => [...new Float64Array(w.memory.buffer, w.xy_ptr(), 2)];
+    // The methods hold `owner`, which frees the handle once collected: callers may keep only them.
+    const owner = { handle };
+    const projection: Projection = {
+      forward: ([lng, lat]) => {
+        w.projection_forward(owner.handle, lng, lat);
+        return xy();
+      },
+      inverse: ([x, y]) => {
+        w.projection_inverse(owner.handle, x, y);
+        return xy();
+      },
+    };
+    freeProjection.register(owner, { w, handle });
+    return projection;
+  };
+}
+
 function viewArgs(view: View): ViewArgs {
-  const margin = nonnegative(view.margin ?? 0, 'margin');
+  const [lng, lat] = view.center;
+  for (const [name, value] of Object.entries({ lng, lat, zoom: view.zoom, bearing: view.bearing ?? 0 })) {
+    if (!Number.isFinite(value)) throw new RangeError(`${name} must be finite`);
+  }
+  return [lng, lat, view.zoom, view.bearing ?? 0, ...sizeArgs(view), marginArg(view.margin)];
+}
+
+/** Width and height (positive uint32 integers) and a finite, positive pixel ratio. */
+function sizeArgs({ width, height, pixelRatio = 1 }: { width: number; height: number; pixelRatio?: number }): [number, number, number] {
+  for (const [name, value] of [['width', width], ['height', height]] as const) {
+    if (!Number.isInteger(value) || value < 1 || value > 0xffffffff) throw new RangeError(`${name} must be a positive uint32 integer`);
+  }
+  if (!Number.isFinite(pixelRatio) || pixelRatio <= 0) throw new RangeError('pixelRatio must be finite and positive');
+  return [width, height, pixelRatio];
+}
+
+function tileView({ z, x, y, tileSize = 256, pixelRatio, margin }: TileView): View {
+  const n = 2 ** z;
+  if (!Number.isInteger(z) || z < 0 || z > 30) throw new RangeError('z must be an integer in 0..=30');
+  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) throw new RangeError('x and y must be integers in 0..2^z');
+  if (!Number.isInteger(tileSize) || tileSize < 1) throw new RangeError('tileSize must be a positive integer');
+  return {
+    center: [((x + 0.5) / n) * 360 - 180, Math.atan(Math.sinh(Math.PI * (1 - (2 * (y + 0.5)) / n))) * 180 / Math.PI],
+    // MapLibre's zoom puts the world in 512 CSS pixels at zoom 0.
+    zoom: z + Math.log2(tileSize / 512),
+    width: tileSize,
+    height: tileSize,
+    pixelRatio,
+    margin,
+  };
+}
+
+const MAX_LAT = 85.0511287798066;
+
+function fitLngLat({ bbox: [west, south, east, north], size, pixelRatio, margin }: LngLatView): View {
+  if (!Number.isInteger(size) || size < 1 || size > 0xffffffff) throw new RangeError('size must be a positive uint32 integer');
+  if (east < west) east += 360;
+  [south, north] = [south, north].map((lat) => Math.max(-MAX_LAT, Math.min(MAX_LAT, lat)));
+  if (!(east > west && north > south)) throw new RangeError('bbox must be [west, south, east, north] with a non-empty area');
+  // Web Mercator y in world units (0 at the north edge, 1 at the south edge).
+  const my = (lat: number) => (1 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / Math.PI) / 2;
+  const [y0, y1] = [my(north), my(south)];
+  const [dx, dy] = [(east - west) / 360, y1 - y0];
+  // CSS pixels per world: the long side spans `size`.
+  const scale = size / Math.max(dx, dy);
+  const lng = (west + east) / 2;
+  return {
+    center: [lng > 180 ? lng - 360 : lng, Math.atan(Math.sinh(Math.PI * (1 - (y0 + y1)))) * 180 / Math.PI],
+    zoom: Math.log2(scale / 512),
+    width: Math.max(1, Math.round(dx * scale)),
+    height: Math.max(1, Math.round(dy * scale)),
+    pixelRatio,
+    margin,
+  };
+}
+
+function marginArg(value = 0): number {
+  const margin = nonnegative(value, 'margin');
   if (!Number.isInteger(margin) || margin > 0xffffffff) throw new RangeError('margin must be a uint32 integer');
-  return [view.center[0], view.center[1], view.zoom, view.bearing ?? 0, view.width, view.height, view.pixelRatio ?? 1, margin];
+  return margin;
 }
 
 function nonnegative(value: number, name: string): number {
@@ -151,6 +342,8 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
 /** Render a MapLibre Style as a static 2D RGBA image. */
 export class MapRenderer {
   private core?: Core;
+  /** A trap (Rust panic or out of memory) left the WASM instance in an unknown state. */
+  private broken?: unknown;
   /** Fetches in flight, shared by overlapping renders. */
   private readonly pending = new Map<string, Promise<void>>();
 
@@ -167,19 +360,59 @@ export class MapRenderer {
     if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
     const loadResource = options.loadResource ?? fetchResource;
     const prepared = prepareStyle(style, options.transformFillExtrusion);
-    return new MapRenderer(await loadWasm(options.wasm, loadResource), prepared, loadResource, ttlMs);
+    return new MapRenderer(await loadWasm(options.wasm), prepared, loadResource, ttlMs);
   }
 
-  /** Fetch required resources and return a new RGBA image for the requested view. */
-  async render(view: View): Promise<RenderedImage> {
+  /** Fetch required resources and return a new RGBA image of a Web Mercator camera. */
+  async renderView(view: View): Promise<RenderedImage> {
     const args = viewArgs(view);
+    return this.draw(view, args, (handle) => this.wasm.renderer_set_view(handle, ...args));
+  }
+
+  /** `renderView` of an XYZ tile of the Web Mercator grid. */
+  async renderZxy(tile: TileView): Promise<RenderedImage> {
+    return this.renderView(tileView(tile));
+  }
+
+  /** `renderView` of a longitude/latitude box, `view.size` CSS pixels on the long side. */
+  async renderLngLat(view: LngLatView): Promise<RenderedImage> {
+    return this.renderView(fitLngLat(view));
+  }
+
+  /** Fetch required resources and return a new RGBA image of `view.bbox` in the CRS `view.projjson`. */
+  async renderProjected(view: ProjectedView): Promise<RenderedImage> {
+    if (!view.projjson || typeof view.projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
+    const margin = marginArg(view.margin);
+    const size = sizeArgs(view);
+    if (!view.bbox.every(Number.isFinite)) throw new RangeError('bbox must be finite');
+    const crs = encoder.encode(JSON.stringify(view.projjson));
+    // The initial camera is replaced before the first `needs`.
+    const args: ViewArgs = [0, 0, 0, 0, ...size, 0];
+    return this.draw(view, args, (handle) => {
+      const ok = this.withBytes(crs, (ptr, len) =>
+        this.wasm.renderer_set_projected_view(handle, ptr, len, ...view.bbox, ...size, margin));
+      if (!ok) throw new Error(decoder.decode(this.output()));
+    });
+  }
+
+  /** The fetch-and-render loop of Mercator and projected views; `setView` points a core at the view. */
+  private async draw(view: View | ProjectedView, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
+    try {
+      return await this.drawOnce(view, args, setView);
+    } catch (error) {
+      if (error instanceof WebAssembly.RuntimeError) this.broken = error;
+      throw error;
+    }
+  }
+
+  private async drawOnce(view: View | ProjectedView, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
     const w = this.wasm;
     const core = this.acquire(args);
     let bytes: Uint8Array<ArrayBuffer>;
     try {
       // Other renders may move the camera while this one awaits resources.
       for (let round = 0; ; round++) {
-        w.renderer_set_view(core.handle, ...args);
+        setView(core.handle);
         const count = w.renderer_needs(core.handle);
         if (count === 0) break;
         if (round >= 32) throw new Error('Resource requests did not settle');
@@ -222,6 +455,7 @@ export class MapRenderer {
 
   /** The current WASM renderer, replaced once older than the cache TTL. */
   private acquire(args: ViewArgs): Core {
+    if (this.broken) throw new Error('The renderer crashed earlier; create a new one', { cause: this.broken });
     const now = performance.now();
     if (this.core && now - this.core.createdAt >= this.ttlMs) {
       this.core.retired = true;
@@ -243,18 +477,10 @@ export class MapRenderer {
   }
 
   private output(): Uint8Array<ArrayBuffer> {
-    const w = this.wasm;
-    return new Uint8Array(w.memory.buffer, w.out_ptr(), w.out_len()).slice();
+    return output(this.wasm);
   }
 
   private withBytes<T>(bytes: Uint8Array, call: (ptr: number, len: number) => T): T {
-    const w = this.wasm;
-    const ptr = w.alloc(bytes.length);
-    new Uint8Array(w.memory.buffer, ptr, bytes.length).set(bytes);
-    try {
-      return call(ptr, bytes.length);
-    } finally {
-      w.dealloc(ptr, bytes.length);
-    }
+    return withBytes(this.wasm, bytes, call);
   }
 }

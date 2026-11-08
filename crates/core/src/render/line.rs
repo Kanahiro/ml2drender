@@ -34,6 +34,8 @@ struct Vertex {
 #[derive(Default)]
 struct Builder {
     vertices: Vec<Vertex>,
+    /// Index of each line's first vertex.
+    line_starts: Vec<usize>,
     triangles: Vec<[u32; 3]>,
     e1: Option<usize>,
     e2: Option<usize>,
@@ -134,6 +136,7 @@ impl Builder {
 
     #[allow(clippy::too_many_arguments)]
     fn add_line(&mut self, vertices: &[P], is_polygon: bool, join: &str, cap: &str, mut miter_limit: f64, round_limit: f64, overscaling: f64) {
+        self.line_starts.push(self.vertices.len());
         self.distance = 0.0;
         self.scaled_distance = 0.0;
         self.total_distance = 0.0;
@@ -504,7 +507,7 @@ impl LineBucket {
                 _ => None,
             };
             let (join, cap) = (l("line-join"), l("line-cap"));
-            for line in &f.geometry {
+            for line in super::drawn_geometry(ctx, &f.geometry).iter() {
                 b.add_line(
                     line,
                     f.ty == GeomType::Polygon,
@@ -536,7 +539,7 @@ pub fn draw_line(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
     // Dash textures by dasharray and cap (MapLibre's LineAtlas).
     let mut dashes = Vec::new();
     for tf in tiles {
-        let bucket = tf.bucket(layer, || LineBucket::new(layer, ctx, tf));
+        let bucket = tf.bucket(layer, ctx, || LineBucket::new(layer, ctx, tf));
         let to_world = ctx.tile_to_world(&tf.tile);
         let tr = ctx.translate(layer, "line", &tf.tile);
         let gradient = has_gradient.then(|| {
@@ -637,17 +640,57 @@ fn draw_feature(
     let offset = -offset;
     let inset = gapwidth + if gapwidth > 0.0 { aa } else { 0.0 };
     let outset = gapwidth + halfwidth * if gapwidth > 0.0 { 2.0 } else { 1.0 } + if halfwidth == 0.0 { 0.0 } else { aa };
+    let rotations = ctx.transform.is_projected().then(|| ctx.rotations(&tf.tile));
+    // Vertices come in pairs on the same point: its projection and rotation.
+    type Frame = (P, (f64, f64));
+    let mut frame: Option<(P, Frame)> = None;
+    // Projected: each line's points (tile position, screen position, distance along the projected
+    // line in device pixels), for dashes and patterns to repeat evenly on the output (`linesofar` is
+    // along the line in tile units), and each vertex's point.
+    let mut points: Vec<(P, P, f64)> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
+    let mut point_of: Vec<u32> = Vec::new();
+    let mut line_starts = b.line_starts.iter().peekable();
     let screen: Vec<P> = b
         .vertices
         .iter()
-        .map(|v| {
+        .enumerate()
+        .map(|(i, v)| {
             let normal_y = if v.up { 1.0 } else { -1.0 };
             let w = to_world(v.pos);
             let [ex, ey] = v.extrude.map(|e| e as f64 / EXTRUDE_SCALE);
             let [nx, ny] = v.offset.map(|o| o as f64 / EXTRUDE_SCALE);
             let ox = offset * nx * normal_y + outset * ex;
             let oy = offset * ny * normal_y + outset * ey;
-            ctx.transform.world_to_screen([w[0] + ox + tr[0], w[1] + oy + tr[1]])
+            let Some(rotations) = &rotations else {
+                return ctx.transform.world_to_screen([w[0] + ox + tr[0], w[1] + oy + tr[1]]);
+            };
+            // Projected: the point is projected and the width extruded in screen pixels.
+            // Vertices run along each line from its start (which may be the previous line's end).
+            // (Lines that added no vertices start at the same index as the next.)
+            let mut line_start = false;
+            while line_starts.next_if(|&&s| s <= i).is_some() {
+                line_start = true;
+            }
+            let (c, (sin, cos)) = match frame {
+                Some((p, f)) if p == v.pos && !line_start => f,
+                _ => {
+                    let f = (ctx.transform.world_to_screen(w), rotations.at(v.pos));
+                    frame = Some((v.pos, f));
+                    let d = match points.last() {
+                        Some(&(_, prev, d)) if !line_start => d + ((f.0[0] - prev[0]).powi(2) + (f.0[1] - prev[1]).powi(2)).sqrt(),
+                        _ => {
+                            starts.push(points.len());
+                            0.0
+                        }
+                    };
+                    points.push((v.pos, f.0, d));
+                    f
+                }
+            };
+            point_of.push(points.len() as u32 - 1);
+            let (ox, oy) = (ox + tr[0], oy + tr[1]);
+            [c[0] + (ox * cos - oy * sin) * dpr, c[1] + (ox * sin + oy * cos) * dpr]
         })
         .collect();
     let blur2 = (blur + 1.0 / dpr) as f32;
@@ -667,10 +710,33 @@ fn draw_feature(
         }
         (None, None) => (0.0, 0.0),
     };
+    // Projected: the distance on the output, in pixels of the integer zoom like `linesofar * tileratio`.
+    let along = (rotations.is_some() && scale_x != 0.0).then(|| {
+        edge_anchored(
+            &points,
+            &starts,
+            scale_x / tileratio / dpr / 2f64.powf(ctx.transform.zoom - floor_zoom.max(0.0)),
+        )
+    });
     let floorwidth_f = floorwidth as f32;
     let opacity_f = opacity as f32;
+    // Projected: segments across a singularity of the projection are left out (see `bent`).
+    let broken: Vec<bool> = match rotations {
+        Some(_) => points
+            .windows(2)
+            .map(|w| super::bent(|q| ctx.transform.world_to_screen(to_world(q)), w[0].0, w[1].0, w[0].1, w[1].1))
+            .collect(),
+        None => Vec::new(),
+    };
     for t in &b.triangles {
         let t = t.map(|i| i as usize);
+        if !broken.is_empty() {
+            let k = t.map(|i| point_of[i] as usize);
+            let (lo, hi) = (k.iter().min().unwrap(), k.iter().max().unwrap());
+            if hi > lo && broken[*lo] {
+                continue;
+            }
+        }
         // All three vertices of a triangle share the split row.
         let split = b.vertices[t[0]].split as usize;
         let mut shade = |v: &[f32; 4]| {
@@ -693,8 +759,95 @@ fn draw_feature(
         };
         let vary = t.map(|i| {
             let v = &b.vertices[i];
-            [if v.round { 1.0 } else { 0.0 }, if v.up { 1.0 } else { -1.0 }, (v.linesofar * scale_x) as f32, v.uv_x]
+            let x = match &along {
+                Some(a) => a[point_of[i] as usize],
+                None => v.linesofar * scale_x,
+            };
+            [if v.round { 1.0 } else { 0.0 }, if v.up { 1.0 } else { -1.0 }, x as f32, v.uv_x]
         });
         raster::triangle(target, Some(tf.mask), [screen[t[0]], screen[t[1]], screen[t[2]]], vary, &mut shade);
+    }
+}
+
+/// Projected: the dash / pattern position (in repeats, `k` per device pixel) of each line point.
+/// Tiles clip lines at their own buffer, so counting from the clipped start would break the pattern
+/// at tile edges: instead it starts at each crossing of the tile edge, stretched to a whole number
+/// of repeats between crossings. Lines without crossings count from their start as usual.
+fn edge_anchored(points: &[(P, P, f64)], starts: &[usize], k: f64) -> Vec<f64> {
+    let inside = |p: P| (0.0..=EXTENT).contains(&p[0]) && (0.0..=EXTENT).contains(&p[1]);
+    // Where a → b (one inside the tile, one outside) crosses the tile edge, as a fraction of a → b.
+    let crossing = |a: P, b: P| {
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        for i in 0..2 {
+            let d = b[i] - a[i];
+            if d != 0.0 {
+                let (u, v) = (-a[i] / d, (EXTENT - a[i]) / d);
+                t0 = t0.max(u.min(v));
+                t1 = t1.min(u.max(v));
+            }
+        }
+        if inside(a) { t1 } else { t0 }
+    };
+    let mut out = Vec::with_capacity(points.len());
+    for (l, &s) in starts.iter().enumerate() {
+        let line = &points[s..starts.get(l + 1).copied().unwrap_or(points.len())];
+        let anchors: Vec<f64> = line
+            .windows(2)
+            .filter(|w| inside(w[0].0) != inside(w[1].0))
+            .map(|w| (w[0].2 + (w[1].2 - w[0].2) * crossing(w[0].0, w[1].0)) * k)
+            .collect();
+        if anchors.is_empty() {
+            out.extend(line.iter().map(|p| p.2 * k));
+            continue;
+        }
+        // Repeats from anchor i to i + 1, and the stretch that makes them whole.
+        let span = |i: usize| {
+            let len = anchors[i + 1] - anchors[i];
+            if len > 0.0 {
+                let n = len.round().max(1.0);
+                (n, n / len)
+            } else {
+                (0.0, 1.0)
+            }
+        };
+        let (mut i, mut base) = (0, 0.0);
+        for p in line {
+            let x = p.2 * k;
+            while i + 1 < anchors.len() && x >= anchors[i + 1] {
+                base += span(i).0;
+                i += 1;
+            }
+            let stretch = if x < anchors[i] || i + 1 == anchors.len() {
+                1.0
+            } else {
+                span(i).1
+            };
+            out.push(base + (x - anchors[i]) * stretch);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashes_restart_at_tile_edges() {
+        // A straight line through the tile, starting in either buffer: the tile edges (x = 0 and
+        // x = EXTENT) are at whole repeats, up to interpolating across the edge between points.
+        for start in [-100.0, -37.0] {
+            let points: Vec<(P, P, f64)> = (0..=100).map(|i| start + i as f64 * 100.0).map(|x| ([x, 10.0], [x, 0.0], x - start)).collect();
+            let out = edge_anchored(&points, &[0], 0.03);
+            let at = |x: f64| {
+                let i = points.iter().position(|p| p.0[0] >= x).unwrap();
+                let (a, b) = (points[i - 1].0[0], points[i].0[0]);
+                out[i - 1] + (out[i] - out[i - 1]) * (x - a) / (b - a)
+            };
+            for edge in [0.0, EXTENT] {
+                let x = at(edge);
+                assert!((x - x.round()).abs() < 1e-3, "{start} {edge} {x}");
+            }
+        }
     }
 }

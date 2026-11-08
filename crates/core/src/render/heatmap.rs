@@ -71,10 +71,28 @@ pub fn draw_heatmap(target: &Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeat
                 }
                 // Quad vertices (extrude -1/1 per axis), indices (0, 3, 1), (0, 2, 3).
                 let corners = [[-1.0f32, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]];
+                // Projected: the kernel is extruded in screen pixels around the projected point.
+                let center = match t.is_projected() {
+                    true => match t.on_map(to_world(*p)) {
+                        Some(c) => Some(c),
+                        None => continue,
+                    },
+                    false => None,
+                };
                 let pos = corners.map(|e| {
-                    let off = (s * radius) as f64 * extrude_scale;
-                    let w = to_world([p[0] + e[0] as f64 * off, p[1] + e[1] as f64 * off]);
-                    let d = t.world_to_screen(w);
+                    let d = match center {
+                        Some(c) => {
+                            let off = (s * radius) as f64 * t.pixel_ratio;
+                            [c[0] + e[0] as f64 * off, c[1] + e[1] as f64 * off]
+                        }
+                        None => {
+                            let off = (s * radius) as f64 * extrude_scale;
+                            t.world_to_screen(to_world([
+                                p[0] + e[0] as f64 * off,
+                                p[1] + e[1] as f64 * off,
+                            ]))
+                        }
+                    };
                     [d[0] * sx, d[1] * sy]
                 });
                 let vary = corners.map(|e| [e[0] * s, e[1] * s]);

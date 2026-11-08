@@ -3,6 +3,8 @@
 //! blending into an 8-bit framebuffer. Anti-aliasing comes from the emulated shaders,
 //! exactly as in MapLibre (which renders without MSAA).
 
+use std::rc::Rc;
+
 /// Premultiplied RGBA8 framebuffer, row-major, top row first.
 pub struct Target {
     pub w: usize,
@@ -118,6 +120,8 @@ pub struct Mask {
 enum Coverage {
     Rectangle { x: [usize; 2], y: [usize; 2] },
     Pixels(Vec<bool>),
+    /// The pixels whose entry in a row-major map shared by disjoint masks is this one's index.
+    Owner(Rc<Vec<u32>>, u32),
 }
 
 impl Mask {
@@ -125,21 +129,32 @@ impl Mask {
         Mask { w: 0, h: 0, coverage: Coverage::Rectangle { x: [0, 0], y: [0, 0] } }
     }
 
+    /// Disjoint masks from the index of each pixel's mask (row-major; `u32::MAX` for none).
+    pub fn from_owners(w: usize, h: usize, owners: Vec<u32>, count: usize) -> Vec<Mask> {
+        let owners = Rc::new(owners);
+        (0..count as u32).map(|i| Mask { w, h, coverage: Coverage::Owner(Rc::clone(&owners), i) }).collect()
+    }
+
     #[inline]
     pub fn get(&self, x: usize, y: usize) -> bool {
         match &self.coverage {
             Coverage::Rectangle { x: xs, y: ys } => x >= xs[0] && x < xs[1] && y >= ys[0] && y < ys[1],
             Coverage::Pixels(bits) => bits[y * self.w + x],
+            Coverage::Owner(owners, i) => owners[y * self.w + x] == *i,
         }
     }
 
     pub fn subtract(&mut self, other: &Mask) {
-        if let Coverage::Rectangle { x, y } = self.coverage {
-            let mut bits = vec![false; self.w * self.h];
-            for row in y[0]..y[1] {
-                bits[row * self.w + x[0]..row * self.w + x[1]].fill(true);
+        match &self.coverage {
+            Coverage::Rectangle { x, y } => {
+                let mut bits = vec![false; self.w * self.h];
+                for row in y[0]..y[1] {
+                    bits[row * self.w + x[0]..row * self.w + x[1]].fill(true);
+                }
+                self.coverage = Coverage::Pixels(bits);
             }
-            self.coverage = Coverage::Pixels(bits);
+            Coverage::Owner(owners, i) => self.coverage = Coverage::Pixels(owners.iter().map(|o| o == i).collect()),
+            Coverage::Pixels(_) => {}
         }
         let Coverage::Pixels(bits) = &mut self.coverage else { unreachable!() };
         match &other.coverage {
@@ -151,6 +166,11 @@ impl Mask {
             Coverage::Pixels(other) => {
                 for (b, &o) in bits.iter_mut().zip(other) {
                     *b = *b && !o;
+                }
+            }
+            Coverage::Owner(owners, i) => {
+                for (b, o) in bits.iter_mut().zip(owners.iter()) {
+                    *b = *b && o != i;
                 }
             }
         }
@@ -373,7 +393,7 @@ pub fn triangle<const N: usize>(
 /// the line and the position along it (0 at `a`, 1 at `b`) for interpolating varyings.
 pub fn line(t: &mut Target, accept: &dyn Fn(usize, usize) -> bool, a: [f64; 2], b: [f64; 2], shade: &mut impl FnMut(f64, f64) -> Option<Rgba>) {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-    if dx == 0.0 && dy == 0.0 {
+    if (dx == 0.0 && dy == 0.0) || !(dx.is_finite() && dy.is_finite()) {
         return;
     }
     let x_major = dx.abs() >= dy.abs();
@@ -381,7 +401,9 @@ pub fn line(t: &mut Target, accept: &dyn Fn(usize, usize) -> bool, a: [f64; 2], 
     let (lo, hi) = if major_a <= major_b { (major_a, major_b) } else { (major_b, major_a) };
     let start = (lo - 0.5).ceil() as i64;
     let end = (hi - 0.5).ceil() as i64; // exclusive: diamond-exit drops the last pixel
-    for i in start..end {
+    // Only rows/columns of the target (projected endpoints can be far outside it).
+    let limit = if x_major { t.w } else { t.h } as i64;
+    for i in start.max(0)..end.min(limit) {
         let c = i as f64 + 0.5;
         let t_param = (c - major_a) / (major_b - major_a);
         let minor = if x_major { a[1] + dy * t_param } else { a[0] + dx * t_param };
@@ -430,7 +452,7 @@ mod tests {
     #[test]
     fn round_matches_std() {
         // A sweep of the blend's range, a few ulps around every tie and integer, non-finite values.
-        let near = (0..=512).flat_map(|k| ((k as f32 * 0.5).to_bits().saturating_sub(4)..=(k as f32 * 0.5).to_bits() + 4));
+        let near = (0..=512).flat_map(|k| (k as f32 * 0.5).to_bits().saturating_sub(4)..=(k as f32 * 0.5).to_bits() + 4);
         let sweep = (0..=256.0f32.to_bits()).step_by(4099);
         for bits in near.chain(sweep).chain([f32::INFINITY.to_bits(), f32::NAN.to_bits()]) {
             for x in [f32::from_bits(bits), -f32::from_bits(bits)] {

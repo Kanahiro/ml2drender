@@ -32,8 +32,9 @@ const variants = args.map((arg) => {
 if (variants.length < 2) throw new Error('usage: node scripts/bench.ts base=<checkout>[:<wasm>] head=<checkout>[:<wasm>] [--samples N] [--threshold R] [--png dir]');
 
 interface View {center: [number, number]; zoom: number; bearing?: number; width: number; height: number; pixelRatio?: number}
-// Base checkouts may predate RenderedImage.toPng().
-interface Renderer {render(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; renderPng?(view: View): Promise<Uint8Array>}
+// Base checkouts may predate RenderedImage.toPng() and renderView().
+interface Renderer {renderView?(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; render?(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; renderPng?(view: View): Promise<Uint8Array>}
+const draw = (r: Renderer, view: View) => r.renderView ? r.renderView(view) : r.render!(view);
 interface Api {MapRenderer: {init(style: object, options: object): Promise<Renderer>}}
 
 // Synthetic styles. Fixture resources are local://<path under assets>.
@@ -139,11 +140,11 @@ for (const c of cases) {
     for (const run of i % 2 ? [...runs].reverse() : runs) {
       // A new renderer each time: renderers keep decoded tiles, and this measures a cold render.
       run.renderer = await run.v.api.MapRenderer.init(styles[c.style], {wasm: run.v.module, cache: {ttlMs: Infinity}});
-      if (c.then) await run.renderer.render(c.view);
+      if (c.then) await draw(run.renderer, c.view);
       const views = c.then ?? [c.view];
       const start = performance.now();
       let image!: {data: Uint8ClampedArray};
-      for (const view of views) image = await run.renderer.render(view);
+      for (const view of views) image = await draw(run.renderer, view);
       const ms = (performance.now() - start) / views.length;
       if (i >= 2) run.times.push(ms);
       run.hash ||= createHash('sha256').update(image.data).digest('hex');
@@ -158,7 +159,7 @@ for (const c of cases) {
     const view = (c.then ?? [c.view]).at(-1)!;
     for (const [i, run] of runs.entries()) {
       const r = run.renderer!;
-      const png = r.renderPng ? await r.renderPng(view) : (await r.render(view)).toPng!();
+      const png = r.renderPng ? await r.renderPng(view) : (await draw(r, view)).toPng!();
       writeFileSync(join(pngDir, `${c.name.replace(/[^\w.-]+/g, '_')}.${loaded[i].name}.png`), png);
     }
   }

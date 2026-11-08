@@ -18,6 +18,101 @@ use std::rc::Rc;
 
 pub const EXTENT: f64 = 8192.0;
 
+/// Longest segment (tile units) of lines and polygon rings drawn into a projected output, where
+/// projected segments curve.
+const PROJECTED_SEGMENT: f64 = EXTENT / 32.0;
+
+/// `line` with segments longer than `max` split evenly.
+pub fn densify(line: &[[f64; 2]], max: f64) -> Vec<[f64; 2]> {
+    let mut out = Vec::with_capacity(line.len());
+    for (i, &p) in line.iter().enumerate() {
+        if let Some(&a) = i.checked_sub(1).map(|j| &line[j]) {
+            let n = (((p[0] - a[0]).powi(2) + (p[1] - a[1]).powi(2)).sqrt() / max).ceil() as usize;
+            out.extend((1..n).map(|k| {
+                let t = k as f64 / n as f64;
+                [a[0] + (p[0] - a[0]) * t, a[1] + (p[1] - a[1]) * t]
+            }));
+        }
+        out.push(p);
+    }
+    out
+}
+
+/// Splits every triangle edge longer than `max` at its midpoint (appended to `points`) until none
+/// is, for projections that curve them. An edge is split the same way in both of its triangles, so
+/// the mesh stays free of T-junctions (and of cracks between triangles).
+fn subdivide(points: &mut Vec<[f64; 2]>, triangles: &[usize], max: f64) -> Vec<usize> {
+    let mut mids: HashMap<(usize, usize), usize> = HashMap::default();
+    let mut out = Vec::with_capacity(triangles.len());
+    let mut todo: Vec<[usize; 3]> = triangles
+        .chunks_exact(3)
+        .map(|t| [t[0], t[1], t[2]])
+        .collect();
+    while let Some(t) = todo.pop() {
+        let long = |a: usize, b: usize, points: &[[f64; 2]]| {
+            let (p, q) = (points[a], points[b]);
+            (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) > max * max
+        };
+        // Edge i runs from t[i] to t[(i + 1) % 3].
+        let (mut split, mut n) = ([0; 3], 0);
+        for i in 0..3 {
+            if long(t[i], t[(i + 1) % 3], points) {
+                split[n] = i;
+                n += 1;
+            }
+        }
+        let split = &split[..n];
+        if split.is_empty() {
+            out.extend(t);
+            continue;
+        }
+        let mut mid = |a: usize, b: usize, points: &mut Vec<[f64; 2]>| {
+            *mids.entry((a.min(b), a.max(b))).or_insert_with(|| {
+                let (p, q) = (points[a], points[b]);
+                points.push([(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0]);
+                points.len() - 1
+            })
+        };
+        // Rotate so that the split edges come first: (a, b) and, then, (b, c).
+        let r = match split {
+            [i] | [i, _, _] => *i,
+            [0, 2] => 2,
+            [i, _] => *i,
+            _ => unreachable!(),
+        };
+        let [a, b, c] = [t[r], t[(r + 1) % 3], t[(r + 2) % 3]];
+        let mab = mid(a, b, points);
+        match split.len() {
+            1 => todo.extend([[a, mab, c], [mab, b, c]]),
+            2 => {
+                let mbc = mid(b, c, points);
+                todo.extend([[mab, b, mbc], [a, mab, mbc], [a, mbc, c]]);
+            }
+            _ => {
+                let (mbc, mca) = (mid(b, c, points), mid(c, a, points));
+                todo.extend([[a, mab, mca], [mab, b, mbc], [mca, mbc, c], [mab, mbc, mca]]);
+            }
+        }
+    }
+    out
+}
+
+/// A feature's lines or rings as drawn with `ctx`: split for a projected output.
+pub fn drawn_geometry<'a>(
+    ctx: &Ctx,
+    geometry: &'a [Vec<[f64; 2]>],
+) -> std::borrow::Cow<'a, [Vec<[f64; 2]>]> {
+    if ctx.transform.is_projected() {
+        geometry
+            .iter()
+            .map(|l| densify(l, PROJECTED_SEGMENT))
+            .collect::<Vec<_>>()
+            .into()
+    } else {
+        geometry.into()
+    }
+}
+
 pub struct Ctx<'a> {
     pub transform: &'a Transform,
     pub global_state: &'a Rc<Object>,
@@ -27,6 +122,8 @@ pub struct Ctx<'a> {
     masks: RefCell<HashMap<(usize, usize, Vec<RenderTile>), Rc<Vec<Mask>>>>,
     /// Backfilled DEM tiles by source id, aligned with the source's resolved tiles.
     dems: RefCell<HashMap<String, Rc<Vec<Option<dem::DemTile>>>>>,
+    /// `rotations` by tile.
+    rotations: RefCell<HashMap<RenderTile, Rc<RotationGrid>>>,
 }
 
 /// Camera-independent bucket data of one tile, by layout group. It lives as long as the tile's
@@ -44,9 +141,12 @@ pub struct TileFeatures<'a> {
 
 impl TileFeatures<'_> {
     /// `build`'s result for `layer` in this tile, shared by its layout group. It must depend
-    /// only on the tile and the layer's source data and layout (not on paint or the camera): it
-    /// is reused across layers and renders.
-    pub fn bucket<T: 'static>(&self, layer: &Layer, build: impl FnOnce() -> T) -> Rc<T> {
+    /// only on the tile, the layer's source data and layout, and whether `ctx` is projected
+    /// (geometry is split then), not on paint or the camera: it is reused across layers and renders.
+    pub fn bucket<T: 'static>(&self, layer: &Layer, ctx: &Ctx, build: impl FnOnce() -> T) -> Rc<T> {
+        if ctx.transform.is_projected() {
+            return self.bucket_keyed(&format!("{}\0projected", layer.layout_group), build);
+        }
         self.bucket_keyed(&layer.layout_group, build)
     }
 
@@ -60,6 +160,34 @@ impl TileFeatures<'_> {
         let b = Rc::new(build());
         cache.borrow_mut().insert(key.to_string(), b.clone());
         b
+    }
+}
+
+/// The rotations (sin, cos) of `Transform::local_frame` on a grid over a tile, interpolated in
+/// between: they vary slowly, and each costs two extra projections.
+pub struct RotationGrid(Vec<(f64, f64)>);
+
+impl RotationGrid {
+    const N: usize = 8;
+
+    /// At tile point `p` (tile units).
+    pub fn at(&self, p: [f64; 2]) -> (f64, f64) {
+        let n = Self::N;
+        let g = |v: f64| (v / EXTENT * n as f64).clamp(0.0, n as f64 - 1e-9);
+        let (gx, gy) = (g(p[0]), g(p[1]));
+        let (i, j, fx, fy) = (gx as usize, gy as usize, gx.fract(), gy.fract());
+        let at = |i: usize, j: usize| self.0[j * (n + 1) + i];
+        let lerp = |k: fn((f64, f64)) -> f64| {
+            (k(at(i, j)) * (1.0 - fx) + k(at(i + 1, j)) * fx) * (1.0 - fy)
+                + (k(at(i, j + 1)) * (1.0 - fx) + k(at(i + 1, j + 1)) * fx) * fy
+        };
+        let (s, c) = (lerp(|r| r.0), lerp(|r| r.1));
+        let len = (s * s + c * c).sqrt();
+        if len > 0.0 {
+            (s / len, c / len)
+        } else {
+            (0.0, 1.0)
+        }
     }
 }
 
@@ -86,7 +214,7 @@ impl FillBucket {
             .enumerate()
             .filter(|(_, f)| f.ty == GeomType::Polygon)
             .map(|(i, f)| {
-                let polygons = classify_rings(&f.geometry, 500)
+                let polygons = classify_rings(&drawn_geometry(ctx, &f.geometry), 500)
                     .into_iter()
                     .map(|polygon| {
                         let mut flat = Vec::new();
@@ -100,8 +228,13 @@ impl FillBucket {
                                 flat.push(p[1]);
                             }
                         }
-                        let triangles = earcutr::earcut(&flat, &holes, 2).unwrap_or_default();
-                        FillPolygon { points: polygon.concat(), ring_lens: polygon.iter().map(Vec::len).collect(), triangles }
+                        let mut triangles = earcutr::earcut(&flat, &holes, 2).unwrap_or_default();
+                        let mut points = polygon.concat();
+                        // Long interior edges curve in a projected output too (after the rings' points).
+                        if ctx.transform.is_projected() {
+                            triangles = subdivide(&mut points, &triangles, PROJECTED_SEGMENT);
+                        }
+                        FillPolygon { points, ring_lens: polygon.iter().map(Vec::len).collect(), triangles }
                     })
                     .collect();
                 (i, polygons)
@@ -128,7 +261,22 @@ pub struct BucketFeature {
 
 impl<'a> Ctx<'a> {
     pub fn new(transform: &'a Transform, global_state: &'a Rc<Object>, images: &'a HashMap<String, Rc<crate::sprite::StyleImage>>) -> Self {
-        Self { transform, global_state, images, masks: RefCell::new(HashMap::default()), dems: RefCell::new(HashMap::default()) }
+        Self { transform, global_state, images, masks: RefCell::new(HashMap::default()), dems: RefCell::new(HashMap::default()), rotations: RefCell::default() }
+    }
+
+    /// `Transform::local_frame`'s rotations over a tile (see `RotationGrid`), built once per render.
+    pub fn rotations(&self, tile: &RenderTile) -> Rc<RotationGrid> {
+        Rc::clone(self.rotations.borrow_mut().entry(*tile).or_insert_with(|| {
+            let to_world = self.tile_to_world(tile);
+            let step = EXTENT / RotationGrid::N as f64;
+            let n = RotationGrid::N;
+            Rc::new(RotationGrid(
+                (0..=n)
+                    .flat_map(|j| (0..=n).map(move |i| [i as f64 * step, j as f64 * step]))
+                    .map(|q| self.transform.local_frame(to_world(q)).1)
+                    .collect(),
+            ))
+        }))
     }
 
     /// The DEM tiles of `source`, built once per render and shared by its hillshade and
@@ -171,6 +319,17 @@ impl<'a> Ctx<'a> {
         let key = (w, h, tiles.to_vec());
         if let Some(cached) = self.masks.borrow().get(&key) {
             return Rc::clone(cached);
+        }
+        if let Some(world) = self.transform.pixel_world().filter(|p| p.len() == w * h) {
+            let masks = Rc::new(projected_masks(
+                tiles,
+                w,
+                h,
+                world,
+                self.transform.central_x(),
+            ));
+            self.masks.borrow_mut().insert(key, Rc::clone(&masks));
+            return masks;
         }
         let quads: Vec<Mask> = tiles.iter().map(|t| self.tile_mask(t, w, h)).collect();
         let masks = Rc::new(tiles.iter().enumerate().map(|(i, t)| {
@@ -323,6 +482,19 @@ pub fn draw_background(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serd
         if pass == Pass::Opaque && c[3] != 1.0 {
             return false;
         }
+        // In a projected output: wherever the projection has Mercator coordinates.
+        if let Some(world) = t.pixel_world().filter(|p| p.len() == target.w * target.h) {
+            for (i, m) in world.iter().enumerate() {
+                if m[0].is_finite() {
+                    if c[3] == 1.0 {
+                        target.cover(i, c);
+                    } else if target.visible(i) {
+                        target.blend(i, c);
+                    }
+                }
+            }
+            return true;
+        }
         // Drawn over the covering tiles, i.e. only within the world's vertical extent.
         for y in 0..target.h {
             for x in 0..target.w {
@@ -341,8 +513,20 @@ pub fn draw_background(target: &mut Target, layer: &Layer, ctx: &Ctx, raw: &serd
     if pass == Pass::Opaque {
         return false;
     }
-    // Pattern: one quad per covering tile at the integer zoom.
     let size = pattern::display_size(img);
+    // In a projected output: the pattern on the output's pixels, wherever there is map.
+    if let Some(world) = t.pixel_world().filter(|p| p.len() == target.w * target.h) {
+        let tp = pattern::TilePattern::new(ctx, &tile);
+        for (i, m) in world.iter().enumerate() {
+            if m[0].is_finite() && target.visible(i) {
+                let screen = [(i % target.w) as f64 + 0.5, (i / target.w) as f64 + 0.5];
+                let v = tp.pos(size, [0.0; 2], screen);
+                target.blend(i, pattern::sample_fill(img, v).map(|c| c * opacity as f32));
+            }
+        }
+        return true;
+    }
+    // Pattern: one quad per covering tile at the integer zoom.
     let z = t.zoom.floor().max(0.0) as i32;
     for (x, y, wrap) in t.covering_tiles(z) {
         let rt = RenderTile { overscaled_z: z as u8, wrap, canonical: crate::tile::TileId { z: z as u8, x: x as u32, y: y as u32 } };
@@ -410,7 +594,7 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
     let pattern_prop = layer.paint("fill-pattern");
     let mut prepared = Vec::new();
     for tf in tiles {
-        let bucket = tf.bucket(layer, || FillBucket::new(layer, ctx, tf));
+        let bucket = tf.bucket(layer, ctx, || FillBucket::new(layer, ctx, tf));
         let to_world = ctx.tile_to_world(&tf.tile);
         let tr = ctx.translate(layer, "fill", &tf.tile);
         let to_screen = |p: [f64; 2]| {
@@ -449,10 +633,23 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
             };
             for polygon in polygons {
                 let screen: Vec<[f64; 2]> = polygon.points.iter().map(|p| to_screen(*p)).collect();
-                let vary: Vec<[f32; 2]> = polygon.points.iter().map(|p| tp.pattern_pos(size, *p)).collect();
+                // Only patterns read the varying (outlines too: theirs is a color or this pattern).
+                let vary: Vec<[f32; 2]> = match paint {
+                    FillPaint::Pattern { .. } => polygon.points.iter().zip(&screen).map(|(p, s)| tp.pos(size, *p, *s)).collect(),
+                    FillPaint::Color(_) => vec![[0.0; 2]; screen.len()],
+                };
                 if opacity >= 0.01 && pass != Pass::Translucent {
                     for t in polygon.triangles.chunks_exact(3) {
                         let p = [screen[t[0]], screen[t[1]], screen[t[2]]];
+                        // Projections keep orientation and bend edges gently, except across a
+                        // singularity (e.g. near the antipode of an azimuthal projection, which spreads
+                        // a triangle's corners around the rim): its chord triangle would cover the map.
+                        let tri = [polygon.points[t[0]], polygon.points[t[1]], polygon.points[t[2]]];
+                        if ctx.transform.is_projected()
+                            && (0..3).any(|i| bent(to_screen, tri[i], tri[(i + 1) % 3], p[i], p[(i + 1) % 3]))
+                        {
+                            continue;
+                        }
                         if constant_opaque {
                             let w = target.w;
                             raster::for_each_pixel(target.w, target.h, p, |x, y, _| {
@@ -475,6 +672,10 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
                     for &len in &polygon.ring_lens {
                         for i in 1..len {
                             let (a, b) = (start + i - 1, start + i);
+                            let (pa, pb) = (polygon.points[a], polygon.points[b]);
+                            if ctx.transform.is_projected() && bent(to_screen, pa, pb, screen[a], screen[b]) {
+                                continue;
+                            }
                             outlines.push((screen[a], screen[b], vary[a], vary[b], clone_paint(&outline_paint)));
                         }
                         start += len;
@@ -520,6 +721,62 @@ fn clone_paint<'a>(p: &FillPaint<'a>) -> FillPaint<'a> {
     }
 }
 
+/// Tile masks of a projected output: each pixel belongs to the highest-zoom tile containing its
+/// Mercator position (tile boundaries curve there, so they are not drawn as quads), unwrapped
+/// to within 0.5 of `central_x` like the drawn geometry.
+fn projected_masks(
+    tiles: &[RenderTile],
+    w: usize,
+    h: usize,
+    world: &[[f64; 2]],
+    central_x: Option<f64>,
+) -> Vec<Mask> {
+    let mut zooms: Vec<u8> = tiles.iter().map(|t| t.canonical.z).collect();
+    zooms.sort_unstable_by(|a, b| b.cmp(a));
+    zooms.dedup();
+    // (z, x across world copies, y) → tile index.
+    let index: HashMap<(u8, i64, i64), usize> = tiles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            (
+                (
+                    t.canonical.z,
+                    t.wrap as i64 * (1i64 << t.canonical.z) + t.canonical.x as i64,
+                    t.canonical.y as i64,
+                ),
+                i,
+            )
+        })
+        .collect();
+    let mut owners = vec![u32::MAX; w * h];
+    // Neighboring pixels mostly fall in the same tiles: the last lookup per zoom.
+    type Lookup = ((i64, i64), Option<usize>);
+    let mut last: Vec<Option<Lookup>> = vec![None; zooms.len()];
+    for (p, m) in world.iter().enumerate() {
+        if m[0].is_nan() {
+            continue;
+        }
+        let x = central_x.map_or(m[0], |c| m[0] - (m[0] - c).round());
+        let found = zooms.iter().zip(&mut last).find_map(|(&z, last)| {
+            let n = (1u64 << z) as f64;
+            let key = ((x * n).floor() as i64, (m[1] * n).floor() as i64);
+            match *last {
+                Some((k, i)) if k == key => i,
+                _ => {
+                    let i = index.get(&(z, key.0, key.1)).copied();
+                    *last = Some((key, i));
+                    i
+                }
+            }
+        });
+        if let Some(i) = found {
+            owners[p] = i as u32;
+        }
+    }
+    Mask::from_owners(w, h, owners, tiles.len())
+}
+
 pub(crate) fn dummy_tile() -> RenderTile {
     RenderTile { overscaled_z: 0, wrap: 0, canonical: crate::tile::TileId { z: 0, x: 0, y: 0 } }
 }
@@ -547,7 +804,8 @@ pub fn draw_circle(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileF
                     continue;
                 }
                 let w = to_world(*pt);
-                let c = ctx.transform.world_to_screen([w[0] + tr[0], w[1] + tr[1]]);
+                let Some(c) = ctx.transform.on_map(w) else { continue };
+                let c = if tr == [0.0; 2] { c } else { ctx.transform.world_to_screen([w[0] + tr[0], w[1] + tr[1]]) };
                 let q = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
                 let pos = q.map(|e| [c[0] + e[0] * size, c[1] + e[1] * size]);
                 let v = q.map(|e| [e[0] as f32, e[1] as f32]);
@@ -563,6 +821,21 @@ pub fn draw_circle(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileF
             }
         }
     }
+}
+
+/// Whether the projected segment `a`–`b` (tile units, drawn from `sa` to `sb`) strays from its chord by
+/// over a quarter of the chord's length at its midpoint: it passes a singularity of the projection,
+/// and its chord cuts across the map. Chords under `BENT_MIN` device pixels are not checked: they can
+/// only misdraw that much, and they are most edges.
+fn bent(to_screen: impl Fn([f64; 2]) -> [f64; 2], a: [f64; 2], b: [f64; 2], sa: [f64; 2], sb: [f64; 2]) -> bool {
+    const BENT_MIN: f64 = 32.0;
+    let len2 = (sb[0] - sa[0]).powi(2) + (sb[1] - sa[1]).powi(2);
+    if len2 < BENT_MIN * BENT_MIN {
+        return false;
+    }
+    let m = to_screen([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]);
+    let d = [(sa[0] + sb[0]) / 2.0 - m[0], (sa[1] + sb[1]) / 2.0 - m[1]];
+    16.0 * (d[0] * d[0] + d[1] * d[1]) > len2
 }
 
 fn signed_area(ring: &[[f64; 2]]) -> f64 {

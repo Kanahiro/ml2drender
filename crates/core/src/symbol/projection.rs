@@ -62,7 +62,7 @@ fn line_intersection(a1: P, a2: P, b1: P, b2: P) -> Option<P> {
 impl<'a> LineProjector<'a> {
     /// `translation` in tile units.
     pub fn new(ctx: &Ctx, bucket: &'a SymbolBucket, translation: P) -> Self {
-        LineProjector { bucket, origin: ctx.tile_origin(&bucket.tile), scale: ctx.tile_px(&bucket.tile) / EXTENT, transform: *ctx.transform, translation }
+        LineProjector { bucket, origin: ctx.tile_origin(&bucket.tile), scale: ctx.tile_px(&bucket.tile) / EXTENT, transform: ctx.transform.clone(), translation }
     }
 
     /// Tile units → label plane (CSS px).

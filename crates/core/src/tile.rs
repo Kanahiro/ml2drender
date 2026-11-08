@@ -32,11 +32,18 @@ pub fn mercator_y(lat: f64) -> f64 {
     (180.0 - (180.0 / PI) * (PI / 4.0 + lat * PI / 360.0).tan().ln()) / 360.0
 }
 
+/// Latitude (degrees) at Mercator y (world = 1), the inverse of `mercator_y`.
+pub fn mercator_lat(y: f64) -> f64 {
+    (PI * (1.0 - 2.0 * y)).sinh().atan().to_degrees()
+}
+
 pub const MAX_LAT: f64 = 85.051129;
+/// MapLibre's minimum zoom: views are clamped to it.
+pub const MIN_ZOOM: f64 = -2.0;
 
 /// Camera for a 2D Web Mercator map: world coordinates are in CSS pixels at `zoom`
 /// (world is `512 * 2^zoom` wide), screen coordinates in device pixels.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Transform {
     pub zoom: f64,
     pub world_size: f64,
@@ -50,6 +57,9 @@ pub struct Transform {
     viewport_size: [f64; 2],
     /// `sin_cos` of `bearing_rad` and of `-bearing_rad`, for per-point projections.
     rot: [(f64, f64); 2],
+    /// Set on the transform symbols are placed and drawn with in a projected view: world
+    /// positions then map to the projected output instead (see `crate::reproject`).
+    warp: Option<std::rc::Rc<crate::reproject::Warp>>,
 }
 
 impl Transform {
@@ -67,7 +77,7 @@ impl Transform {
         }
         let bearing_rad = -bearing_deg.to_radians();
         let rot = [bearing_rad.sin_cos(), (-bearing_rad).sin_cos()];
-        Transform { zoom, world_size, center: c, bearing_rad, width, height, pixel_ratio, viewport_size: [width, height], rot }
+        Transform { zoom, world_size, center: c, bearing_rad, width, height, pixel_ratio, viewport_size: [width, height], rot, warp: None }
     }
 
     /// Extend coverage without constraining the camera again or shifting its pixel grid.
@@ -77,8 +87,85 @@ impl Transform {
         self.height = self.viewport_size[1] + 2.0 * margin;
     }
 
+    /// This Mercator camera's world drawn into `warp`'s projected output, for the layers drawn
+    /// from vertices (background, fill, line, circle, heatmap, symbol).
+    pub fn reprojected(&self, warp: std::rc::Rc<crate::reproject::Warp>) -> Transform {
+        let [width, height] = warp.css_size;
+        Transform {
+            width,
+            height,
+            viewport_size: [width, height],
+            warp: Some(warp),
+            ..self.clone()
+        }
+    }
+
+    /// Whether world positions map to a projected output (`reprojected`), where straight
+    /// segments curve and pixel lengths need `local_frame`.
+    pub fn is_projected(&self) -> bool {
+        self.warp.is_some()
+    }
+
+    /// Mercator coordinates (world = 1) of each output pixel center of a projected output.
+    pub fn pixel_world(&self) -> Option<&[[f64; 2]]> {
+        self.warp.as_ref().map(|w| w.pixel_world())
+    }
+
+    /// See `Warp::pixel_origin`.
+    pub fn pixel_origin(&self) -> Option<[f64; 2]> {
+        self.warp.as_ref().map(|w| w.pixel_origin())
+    }
+
+    /// See `Warp::central_x`.
+    pub fn central_x(&self) -> Option<f64> {
+        self.warp.as_ref().and_then(|w| w.central_x())
+    }
+
+    /// Whether world point `p` is on a projected output's map (see `Warp::in_domain`); always for
+    /// Mercator.
+    pub fn in_domain(&self, p: [f64; 2]) -> bool {
+        self.warp
+            .as_ref()
+            .is_none_or(|w| w.in_domain([p[0] / self.world_size, p[1] / self.world_size]))
+    }
+
+    /// `world_to_screen` of world point `p` if it is `in_domain`, projecting it once.
+    pub fn on_map(&self, p: [f64; 2]) -> Option<[f64; 2]> {
+        match &self.warp {
+            Some(w) => w.on_map([p[0] / self.world_size, p[1] / self.world_size]),
+            None => Some(self.world_to_screen(p)),
+        }
+    }
+
+    /// Screen position of world point `p` and the rotation (sin, cos) from world to screen
+    /// directions there: in a projected output, the rotation nearest the projection's local
+    /// Jacobian, for offsets given in screen pixels (line widths) around projected points.
+    pub fn local_frame(&self, p: [f64; 2]) -> ([f64; 2], (f64, f64)) {
+        let s = self.world_to_screen(p);
+        if self.warp.is_none() {
+            return (s, self.rot[0]);
+        }
+        let (ex, ey) = (
+            self.world_to_screen([p[0] + 1.0, p[1]]),
+            self.world_to_screen([p[0], p[1] + 1.0]),
+        );
+        let (a, c, b, d) = (ex[0] - s[0], ex[1] - s[1], ey[0] - s[0], ey[1] - s[1]);
+        let angle = (c - b).atan2(a + d);
+        (
+            s,
+            if angle.is_finite() {
+                angle.sin_cos()
+            } else {
+                (0.0, 1.0)
+            },
+        )
+    }
+
     /// World pixel (CSS) → screen device pixel.
     pub fn world_to_screen(&self, p: [f64; 2]) -> [f64; 2] {
+        if let Some(w) = &self.warp {
+            return w.world_to_screen([p[0] / self.world_size, p[1] / self.world_size]);
+        }
         let dx = p[0] - self.center[0];
         let dy = p[1] - self.center[1];
         let (s, c) = self.rot[0];
@@ -181,7 +268,7 @@ mod tests {
         for ratio in [1.0, 1.25, 1.5, 2.0] {
             for bearing in [0.0, 30.0] {
                 let plain = Transform::new([10.0, 85.0], 3.5, bearing, 511.0, 257.0, ratio);
-                let mut padded = plain;
+                let mut padded = plain.clone();
                 padded.set_margin(31);
                 assert_eq!(plain.center, padded.center);
                 assert_eq!(plain.aligned_offset(), padded.aligned_offset());

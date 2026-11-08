@@ -13,11 +13,11 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 対象:
 - style-spec のパース(serde)と式(expression)評価
 - ソース: vector(MVT), raster, raster-dem, geojson, image
-- 投影: Web Mercator のみ。カメラは center / zoom / bearing(2D 回転)
+- 投影: 描画は Web Mercator。カメラは center / zoom / bearing(2D 回転)。投影座標系への再投影(`set_projected_view`: PROJJSON + bbox。PROJ 文字列は受け付けない(CRS の表現は PROJJSON に一本化)。経緯度 / 横メルカトル / メルカトル・Pseudo Mercator / ランベルト正角円錐 / 極ステレオ / laea / Equal Earth / geos、楕円体対応・測地系変換なし、座標は常に東・北の順)は、ベクタ(fill / line / circle / heatmap / symbol / background)は頂点を投影して出力側に直接描く(タイル空間で線分・三角形を細分化、線幅などのピクセル長は投影の局所回転で画面空間に押し出し、タイルのクリップは出力画素ごとの Mercator 位置から決める、投影の反子午線をまたぐタイルは世界コピーで描き分ける。`*-pattern` は投影後の画面ピクセル上に、CRS 座標に固定した原点から整数ズームの Mercator と同じ縮尺(パターン 1px = 1 CSS px、タイルごとのズームに依らない)で一様に敷く。破線と line-pattern は線に沿った投影後の距離で敷き、位相はタイル境界との交点で揃えて交点間を整数周期に伸縮する(タイルごとに切られた線の始点から数えると境界で途切れるため))。raster / DEM だけ Mercator で描いた「絵」をメッシュで warp する
 - レイヤ: background / fill / line / circle / raster / symbol / hillshade / color-relief / heatmap
 - sprite(fill-pattern, line-pattern, icon)、glyph(SDF PBF)
 
-非対象(手を出さない): fill-extrusion / 3D / pitch / terrain / globe・非mercator投影 / sky / light、実行時のスタイル・カメラ変更(setPaintProperty / setStyle / setFeatureState 等。render テストの `operations` は wait 系以外を含めば skip)、ネットワーク取得・キャッシュ・PMTiles 読み出し(ホストの責務)。
+非対象(手を出さない): fill-extrusion / 3D / pitch / terrain / globe・GPU 的な非mercator投影(maplibre の globe 等) / sky / light、実行時のスタイル・カメラ変更(setPaintProperty / setStyle / setFeatureState 等。render テストの `operations` は wait 系以外を含めば skip)、ネットワーク取得・キャッシュ・PMTiles 読み出し(ホストの責務)。
 
 ## 設計制約(厳守)
 
@@ -39,14 +39,14 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 - `crates/core/` — crate `ml2drender`。純粋ロジック(sans-IO)。
   - `expression/` — style-spec 式の移植(パース・型検査・評価)、`function.rs` は実行時の legacy function。
   - `style/` — レイヤ・プロパティのコンパイル、フィルタ。`spec.json` は v8.json の必要部分(`scripts/trim-spec.ts` で生成)。
-  - `mvt.rs`(MVT デコード、overzoom 分割)、`geojson.rs`(geojson-vt 移植)、`supercluster.rs`(GeoJSON クラスタ)、`tile.rs`(Transform・タイル被覆・URL)、`image.rs`(画像デコード・GL 風テクスチャ)、`sprite.rs`(sprite 読み込み)。
+  - `mvt.rs`(MVT デコード、overzoom 分割)、`geojson.rs`(geojson-vt 移植)、`supercluster.rs`(GeoJSON クラスタ)、`tile.rs`(Transform・タイル被覆・URL)、`projection.rs`(投影式と PROJJSON の解釈。内部では PROJJSON を PROJ 文字列相当のパラメータに落として読む)、`reproject.rs`(raster / DEM の warp。頂点から描くレイヤは `Transform::reprojected` 経由で出力座標へ)、`image.rs`(画像デコード・GL 風テクスチャ)、`sprite.rs`(sprite 読み込み)。
   - `render/` — `raster.rs` がソフトウェア GL(三角形・GL ライン・合成・マスク)、`mod.rs` / `line.rs` / `raster_layer.rs` / `pattern.rs` が各レイヤのバケット生成とシェーダ再現。
   - `symbol/` — `glyphs.rs`(PBF グリフ)、`shaping.rs`、`layout.rs`(バケット・quad・衝突ボックス)、`placement.rs`(衝突判定)、`projection.rs`(line ラベル)、`draw.rs`(SDF/アイコンのシェーダ)。
   - 方針: MapLibre の **バケット生成とシェーダの計算を移植**し(ジオメトリ・式・量子化)、GL と同じ規則でラスタライズする(tiny-skia は使わない)。GPU パイプラインの構造は真似せず、出力が変わらない範囲で独自に組み替えてよい(深度バッファの代わりに画素ごとの最上位不透明レイヤを記録、varying の平面補間、バケットの描画間再利用など)。pitch 依存の計算は pitch 0 に簡約する。上流の量子化・桁あふれ等の癖も再現する(例: extrude の Int8 桁あふれ、GL の top-left 規則を y-down バッファでは「左辺+下辺」に読み替え、`linesofar` の量子化、overzoom 分割 `zoomLevelsToOverscale`=4 と vt-pbf 再エンコードの切り捨て、衝突ボックスの Int16 切り捨て、layout 同一レイヤのバケット共有)。
 - `crates/cli/` — crate `ml2drender-cli`、バイナリ `ml2drender`。テストランナー兼ネイティブ検証用。
-- `crates/wasm/` — crate `ml2drender-wasm`。wasm-bindgen なしの素の C-ABI export(`renderer_new/set_view/needs/provide/render/free`, `encode_png/encode_webp`, `alloc/dealloc`, RGBA / PNG・エラー等の結果は `out_ptr/out_len` の共有バッファ)。
-- `packages/ml2drender/` — TypeScript の公開 API と型テスト。`src/index.ts` が WASM のロード・メモリ操作・リソース取得を隠す。`render()` は RGBA の `RenderedImage` を返し、`image.toPng()` / `toWebp()` で WASM 内エンコードする(形式が増えても `toXxx()` を足すだけ)。`init(..., { wasm })` でコンパイル済みモジュールを渡せる。
-- `examples/browser/` — pnpm パッケージ `demo-browser`(Vite + TypeScript、maplibre-gl は npm 依存)。左に MapLibre GL JS(参照)、右に WASM 出力。`needs`→fetch→`provide` ループのホスト実装例を兼ねる。JS API は `ml2drender` を `workspace:*` で参照。WASM は `pnpm build:wasm` で `packages/ml2drender/wasm/` にコピーし、API 内で `?url` import。社内標準のフロントエンド既定は SvelteKit だが、1画面の検証用ツールなので素の Vite にしている。
+- `crates/wasm/` — crate `ml2drender-wasm`。wasm-bindgen なしの素の C-ABI export(`renderer_new/set_view/set_projected_view/needs/provide/render/free`, `projection_new/forward/inverse/free`(結果は `xy_ptr`), `encode_png/encode_webp`, `alloc/dealloc`, RGBA / PNG・エラー等の結果は `out_ptr/out_len` の共有バッファ)。
+- `packages/ml2drender/` — TypeScript の公開 API と型テスト。`src/index.ts` が WASM のロード・メモリ操作・リソース取得を隠す。描画は Mercator 前提の `renderView`(center / zoom / bearing)・`renderZxy`(XYZ タイル)・`renderLngLat`(経緯度 bbox と長辺の画素数。縦横比とズームは bbox から決める)と、`renderProjected`(PROJJSON + bbox)に分け、どれも RGBA の `RenderedImage` を返し、`image.toPng()` / `toWebp()` で WASM 内エンコードする(形式が増えても `toXxx()` を足すだけ)。`loadProjection(crs)` は描画と同じ Rust の投影式(forward / inverse)を返す(タイル範囲の計算や GL JS の `addProjection` 用)。`init(..., { wasm })` でコンパイル済みモジュールを渡せる。
+- `examples/browser/` — pnpm パッケージ `demo-browser`(Vite + TypeScript、maplibre-gl は npm 依存)。ml2drender の出力だけを GL JS のラスタタイルとして表示する(GL JS 自身のベクタ描画は使わない)。左の Style JSON・PROJJSON・GeoJSON の入力が正(UI は英語)。各欄は見出しで開閉し、閉じているときはプルダウン(`src/styles.ts`、`src/projjson-presets.json`、GeoJSON は `main.ts` 内)だけ、開くと直接編集できる。入力は 500ms のデバウンスで自動反映し、Style / PROJJSON が変わったときだけタイルを描き直す(反映は直列化)。PROJJSON が空なら Web Mercator を再投影なしで描く。PROJJSON は `loadProjection` の投影式と、bbox(適用範囲)を投影した正方形のタイル格子で GL JS の `addProjection` に登録し(`src/projections.ts`)、各タイルを `renderProjected`(空なら `renderZxy`)で描く。投影の整合確認に GeoJSON 欄(既定は Natural Earth の都市)だけは GL JS 自身が描く(点は円、線・面も描く。ホバーで属性表示。変更は `setData` のみ)。GL JS は GeoJSON を Worker でタイル化するため、`src/gl-projection-handler.ts` を `importScriptInWorkers` で読み込み、`setProjectionHandler` に `loadProjectionFactory` の同期版を渡す(URL 末尾の `#.mjs` は GL JS にモジュールとして直接 import させるため、`vite.config.ts` の `worker.format: 'es'` は top-level await のため)。位置は URL ハッシュに残る。`needs`→fetch→`provide` ループのホスト実装例を兼ねる。JS API は `ml2drender` を `workspace:*` で参照。WASM は `pnpm build:wasm` で `packages/ml2drender/wasm/` にコピーし、API 内で `?url` import。社内標準のフロントエンド既定は SvelteKit だが、1画面の検証用ツールなので素の Vite にしている。
 - `crates/cli/tests/exclusions.json` — 対象外 render テストの除外ルール(理由付き)。pitch/roll/非mercator/operations はランナー内にハードコード。
 - `fixtures/` — 上流テスト(gitignore)。`scripts/fetch-fixtures.sh` が固定コミットから取得し LICENSE を同梱する。
 

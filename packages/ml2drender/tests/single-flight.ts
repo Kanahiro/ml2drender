@@ -27,7 +27,7 @@ const renderer = await MapRenderer.init(style, {
 // Views around the z3 tile corners (1..3, 4): adjacent views share 2 of their 4 tiles, 8 tiles total.
 await Promise.all([1, 2, 3, 2, 1, 3].map(async (x, i) => {
   await sleep(i * 4);
-  await renderer.render({ center: [x * 45 - 180, 0], zoom: 3, width: 200, height: 200 });
+  await renderer.renderView({ center: [x * 45 - 180, 0], zoom: 3, width: 200, height: 200 });
 }));
 
 assert.ok(calls.size <= 8, `${calls.size} tiles exceed the WASM tile cache`);

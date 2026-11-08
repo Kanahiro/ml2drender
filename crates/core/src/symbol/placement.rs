@@ -238,7 +238,15 @@ pub struct TileProjection {
 
 impl TileProjection {
     pub fn new(ctx: &Ctx, tile: &crate::tile::RenderTile) -> TileProjection {
-        TileProjection { origin: ctx.tile_origin(tile), scale: ctx.tile_px(tile) / EXTENT, transform: *ctx.transform }
+        TileProjection { origin: ctx.tile_origin(tile), scale: ctx.tile_px(tile) / EXTENT, transform: ctx.transform.clone() }
+    }
+
+    /// Whether a tile point is on the map (see `Transform::in_domain`).
+    pub fn in_domain(&self, p: P) -> bool {
+        self.transform.in_domain([
+            self.origin[0] + p[0] * self.scale,
+            self.origin[1] + p[1] * self.scale,
+        ])
     }
 
     /// Tile units → CSS px of the collision grid.
@@ -393,6 +401,10 @@ fn place_bucket_part(
 
     let mut place_symbol = |i: usize, out: &mut InstancePlacement| {
         let inst = &bucket.instances[i];
+        // A world copy past a projection's antimeridian (also drawn on the map's other side).
+        if !proj.in_domain(inst.anchor) {
+            return;
+        }
         let mut placed_text: Option<([f64; 4], bool)> = None;
         let mut placed_vertical = false;
         let mut shift: Option<P> = None;

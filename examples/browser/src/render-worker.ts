@@ -1,10 +1,10 @@
 /// <reference lib="webworker" />
-import { MapRenderer, type View } from 'ml2drender';
+import { MapRenderer, type ProjectedView, type TileView } from 'ml2drender';
 import type { StyleSpecification } from 'maplibre-gl';
 
 export type WorkerRequest =
   | { kind: 'init'; generation: number; style: StyleSpecification }
-  | { kind: 'render'; generation: number; id: number; view: View };
+  | { kind: 'render'; generation: number; id: number; view: TileView | ProjectedView };
 
 export type WorkerResponse =
   | { kind: 'ready'; generation: number }
@@ -36,7 +36,8 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const active = renderer;
   if (request.generation !== generation || !active) return;
   const started = performance.now();
-  void active.render(request.view)
+  const view = request.view;
+  void ('projjson' in view ? active.renderProjected(view) : active.renderZxy(view))
     .then(async (image) => {
       // Includes resource loading and overlapping renders; this is elapsed time, not CPU time.
       const renderMs = performance.now() - started;

@@ -1,14 +1,21 @@
-import { addProtocol, Map as MapLibreMap, setWorkerUrl, type StyleSpecification } from 'maplibre-gl';
+import { addProtocol, type GeoJSONSource, type GeoJSONSourceSpecification, importScriptInWorkers, LngLat, Map as MapLibreMap, Popup, setWorkerUrl, type StyleSpecification } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
+import projectionHandlerUrl from './gl-projection-handler.ts?worker&url';
+import projjsonPresets from './projjson-presets.json';
+import { type Crs, registerProjJson, zoomOffset } from './projections';
+import { stylePresets } from './styles';
 import { TileWorker } from './worker-client';
-import initialStyle from './style.json?raw';
 
 const TILE_SIZE = 256;
 const MARGIN = 64;
-const form = document.getElementById('controls') as HTMLFormElement;
-const styleInput = form.elements.namedItem('style') as HTMLTextAreaElement;
-styleInput.value = initialStyle;
+const styleInput = document.getElementById('style') as HTMLTextAreaElement;
+const projInput = document.getElementById('projjson') as HTMLTextAreaElement;
+const stylePresetSelect = document.getElementById('style-preset') as HTMLSelectElement;
+const projPresetSelect = document.getElementById('projjson-preset') as HTMLSelectElement;
+const geojsonInput = document.getElementById('geojson') as HTMLTextAreaElement;
+const geojsonPresetSelect = document.getElementById('geojson-preset') as HTMLSelectElement;
+const crsNameEl = document.getElementById('crs-name')!;
 const logEl = document.getElementById('log')!;
 const statusEl = document.getElementById('status')!;
 const status = (message: string, error = false) => {
@@ -27,6 +34,15 @@ const tileWorker = new TileWorker();
 let styleGeneration = 0;
 let tileRevision = 0;
 let ready = false;
+/** The applied inputs: the renderer follows these. */
+let appliedStyle: string | undefined;
+let appliedProjJson: string | undefined;
+let appliedGeojson: string | undefined;
+const emptyCollection = { type: 'FeatureCollection', features: [] } as const;
+/** The overlay GL JS draws itself. */
+let checkData: GeoJSONSourceSpecification["data"] = emptyCollection;
+/** The applied projection; undefined renders Web Mercator without reprojection. */
+let projection: Crs | undefined;
 
 // Bound the sample window so long pan/zoom sessions do not grow memory indefinitely.
 const samples: { renderMs: number; roundTripMs: number }[] = [];
@@ -63,18 +79,18 @@ addProtocol('ml2drender', async (request, controller) => {
   checkActive();
   const [z, x, y] = url.pathname.slice(1).split('/').map(Number);
   const n = 2 ** z;
-  const lng = ((x + 0.5) / n) * 360 - 180;
-  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / n))) * 180 / Math.PI;
+  const options = { pixelRatio: devicePixelRatio, margin: MARGIN };
+  let view: Parameters<TileWorker['render']>[0];
+  if (projection) {
+    // A tile of the CRS's grid.
+    const s = projection.extent / n;
+    const [minX, maxY] = [projection.origin[0] + x * s, projection.origin[1] - y * s];
+    view = { projjson: projection.definition, bbox: [minX, maxY - s, minX + s, maxY], width: TILE_SIZE, height: TILE_SIZE, ...options };
+  } else {
+    view = { z, x, y, tileSize: TILE_SIZE, ...options };
+  }
   const started = performance.now();
-  const { bitmap, renderMs } = await tileWorker.render({
-    center: [lng, lat],
-    // A 256px XYZ tile is one zoom below MapLibre's 512px world convention.
-    zoom: z - 1,
-    width: TILE_SIZE,
-    height: TILE_SIZE,
-    pixelRatio: devicePixelRatio,
-    margin: MARGIN,
-  });
+  const { bitmap, renderMs } = await tileWorker.render(view);
   try {
     checkActive();
     samples.push({ renderMs, roundTripMs: performance.now() - started });
@@ -89,99 +105,214 @@ addProtocol('ml2drender', async (request, controller) => {
 });
 
 setWorkerUrl(workerUrl);
-const camera = {
-  center: [0, 0] as [number, number],
+// GL JS imports URLs ending in `.mjs` as modules as they are (others it re-imports from a blob,
+// which breaks the module's own imports); the fragment never reaches the server.
+await importScriptInWorkers(`${projectionHandlerUrl}#.mjs`);
+const emptyStyle = (): StyleSpecification => ({ version: 8, sources: {}, layers: [] });
+// The URL hash (`#zoom/lat/lng`) keeps the location across reloads and links. A CRS's zoom can be
+// below the Mercator one's at the same scale.
+const map = new MapLibreMap({
+  container: 'out',
+  style: emptyStyle(),
+  hash: true,
+  center: [0, 0],
   zoom: 1,
-  minZoom: 0,
+  minZoom: -2,
   maxZoom: 22,
   maxPitch: 0,
   dragRotate: false,
   pitchWithRotate: false,
-  attributionControl: false as const,
-};
-const emptyStyle = (): StyleSpecification => ({ version: 8, sources: {}, layers: [] });
-const map = new MapLibreMap({ ...camera, container: 'map', style: emptyStyle() });
-const rasterMap = new MapLibreMap({ ...camera, container: 'out', style: emptyStyle() });
-for (const view of [map, rasterMap]) {
-  view.touchZoomRotate.disableRotation();
-  view.keyboard.disableRotation();
-  view.on('error', (event) => {
-    if (!(event.error instanceof Error && event.error.name === 'AbortError')) fail(event.error);
-  });
-}
+  attributionControl: false,
+});
+map.touchZoomRotate.disableRotation();
+map.keyboard.disableRotation();
+map.on('error', (event) => {
+  if (!(event.error instanceof Error && event.error.name === 'AbortError')) fail(event.error);
+});
 
-// Both views use the same camera convention; the guard prevents move events echoing back.
-let syncing = false;
-for (const [source, destination] of [[map, rasterMap], [rasterMap, map]]) {
-  source.on('move', () => {
-    if (syncing) return;
-    syncing = true;
-    try {
-      destination.jumpTo({ center: source.getCenter(), zoom: source.getZoom(), bearing: source.getBearing() });
-    } finally {
-      syncing = false;
-    }
-  });
-}
+// Hovering a city of the check layer shows its attributes.
+const popup = new Popup({ closeButton: false, closeOnClick: false, maxWidth: '320px' });
+const checkLayers = ['check-fill', 'check-line', 'check'];
+map.on('mousemove', checkLayers, (event) => {
+  const feature = event.features?.[0];
+  if (!feature) return;
+  map.getCanvas().style.cursor = 'pointer';
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'margin:0;max-height:240px;overflow:auto;font-size:11px';
+  pre.textContent = Object.entries(feature.properties).map(([k, v]) => `${k}: ${v}`).join('\n');
+  popup.setLngLat(event.lngLat).setDOMContent(pre).addTo(map);
+});
+map.on('mouseleave', checkLayers, () => {
+  map.getCanvas().style.cursor = '';
+  popup.remove();
+});
 
+/** Shows the rendered tiles of the applied style and projection again. */
 function redraw() {
   if (!ready) return;
-  status('タイルを描画中…');
+  status('Rendering tiles…');
   // A new URL revision bypasses GL JS's tile cache on explicit redraw.
-  rasterMap.setStyle({
+  const crsParam = projection ? `&crs=${encodeURIComponent(projection.name)}` : '';
+  map.setStyle({
     version: 8,
+    projection: { type: projection?.name ?? 'mercator' },
     sources: {
       rendered: {
         type: 'raster',
-        tiles: [`ml2drender://${styleGeneration}/{z}/{x}/{y}?revision=${++tileRevision}`],
+        tiles: [`ml2drender://${styleGeneration}/{z}/{x}/{y}?revision=${++tileRevision}${crsParam}`],
         tileSize: TILE_SIZE,
         maxzoom: 23,
       },
+      // Drawn by GL JS itself, to check that its projection lines up with the rendered tiles.
+      check: { type: 'geojson', data: checkData },
     },
-    layers: [{ id: 'rendered', type: 'raster', source: 'rendered', paint: { 'raster-fade-duration': 0 } }],
+    layers: [
+      { id: 'rendered', type: 'raster', source: 'rendered', paint: { 'raster-fade-duration': 0 } },
+      { id: 'check-fill', type: 'fill', source: 'check', filter: ['in', ['geometry-type'], ['literal', ['Polygon', 'MultiPolygon']]], paint: { 'fill-color': '#1e6fd9', 'fill-opacity': 0.2 } },
+      { id: 'check-line', type: 'line', source: 'check', filter: ['!', ['in', ['geometry-type'], ['literal', ['Point', 'MultiPoint']]]], paint: { 'line-color': '#1e6fd9', 'line-width': 1.5 } },
+      { id: 'check', type: 'circle', source: 'check', filter: ['in', ['geometry-type'], ['literal', ['Point', 'MultiPoint']]], paint: { 'circle-radius': 3, 'circle-color': '#1e6fd9', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1 } },
+    ],
   }, { diff: false });
 }
 
-async function loadStyle() {
-  let style: StyleSpecification;
-  try {
-    style = JSON.parse(styleInput.value);
-    if (!style || style.version !== 8 || !style.sources || typeof style.sources !== 'object' || Array.isArray(style.sources) || !Array.isArray(style.layers)) {
-      throw new Error('Style JSONには version: 8、sourcesオブジェクト、layers配列が必要です。');
-    }
-  } catch (error) {
-    fail(error);
-    return;
+/** Loads the style input into the render workers, if it changed. */
+async function applyStyle(): Promise<boolean> {
+  const text = styleInput.value;
+  if (text === appliedStyle) return true;
+  const style: StyleSpecification = JSON.parse(text);
+  if (!style || style.version !== 8 || !style.sources || typeof style.sources !== 'object' || Array.isArray(style.sources) || !Array.isArray(style.layers)) {
+    throw new Error('Style JSON needs version: 8, a sources object and a layers array.');
   }
   const generation = ++styleGeneration;
   ready = false;
   initMs = undefined;
   resetStats();
-  rasterMap.setStyle(emptyStyle(), { diff: false });
-  logEl.textContent = '';
-  status('スタイルとWASMを初期化中…');
-  try {
-    map.setStyle(style, { diff: false });
-    const started = performance.now();
-    await tileWorker.init(style);
-    if (generation !== styleGeneration) return;
-    initMs = performance.now() - started;
-    updateStats();
-    ready = true;
-    redraw();
-  } catch (error) {
-    if (generation === styleGeneration) fail(error);
-  }
+  status('Initializing style and WASM…');
+  const started = performance.now();
+  await tileWorker.init(style);
+  if (generation !== styleGeneration) return false;
+  initMs = performance.now() - started;
+  updateStats();
+  appliedStyle = text;
+  ready = true;
+  return true;
 }
 
-form.onsubmit = (event) => {
-  event.preventDefault();
-  void loadStyle();
-};
-document.getElementById('redraw')!.onclick = redraw;
-rasterMap.on('idle', () => {
-  if (ready && rasterMap.getSource('rendered') && rasterMap.isSourceLoaded('rendered') && !statusEl.classList.contains('error')) {
-    status(`描画完了 · zoom ${map.getZoom().toFixed(2)}`);
+/** Registers the PROJJSON input (empty: Web Mercator), if it changed, keeping the view's place and scale. */
+async function applyProjection() {
+  const text = projInput.value.trim();
+  if (text === appliedProjJson) return;
+  const next = text ? await registerProjJson(text) : undefined;
+  let center = map.getCenter();
+  const zoom = map.getZoom() - (projection ? zoomOffset(projection, center) : 0);
+  // GL JS cannot migrate its camera to a CRS without a point for the center (e.g. the far side of a
+  // geostationary view): it throws midway through loading the style. Move to the grid's center first.
+  if (next && !next.converter.forward(center.toArray()).every(Number.isFinite)) {
+    const mid = next.converter.inverse([next.origin[0] + next.extent / 2, next.origin[1] - next.extent / 2]);
+    if (mid.every(Number.isFinite)) {
+      center = new LngLat(mid[0], mid[1]);
+      map.jumpTo({ center });
+    }
+  }
+  const nextZoom = zoom + (next ? zoomOffset(next, center) : 0);
+  projection = next;
+  appliedProjJson = text;
+  crsNameEl.textContent = projection ? String((projection.definition as { name?: string }).name ?? 'PROJJSON') : 'Web Mercator';
+  // The projection takes effect with the style; then the same place, at about the same scale.
+  map.once('style.load', () => map.jumpTo({ center, zoom: Number.isFinite(nextZoom) ? nextZoom : map.getZoom() }));
+}
+
+/** Puts the GeoJSON input (empty: nothing) on the overlay, if it changed. */
+function applyGeojson() {
+  const text = geojsonInput.value.trim();
+  if (text === appliedGeojson) return;
+  checkData = text ? JSON.parse(text) : emptyCollection;
+  appliedGeojson = text;
+  const setData = () => (map.getSource('check') as GeoJSONSource | undefined)?.setData(checkData);
+  // A style still loading has no sources yet.
+  if (!setData()) map.once('style.load', setData);
+}
+
+/** Applies the inputs; redraws the tiles if the style or projection changed. */
+async function apply() {
+  logEl.textContent = '';
+  // First, so that a redraw below carries the new overlay; its errors do not hold back the others.
+  try {
+    applyGeojson();
+  } catch (error) {
+    fail(error);
+  }
+  try {
+    const changed = styleInput.value !== appliedStyle || projInput.value.trim() !== appliedProjJson;
+    if (!await applyStyle()) return;
+    await applyProjection();
+    if (changed) redraw();
+  } catch (error) {
+    fail(error);
+  }
+}
+// One at a time, so that a slow style load cannot finish after a newer projection.
+let applying = Promise.resolve();
+const scheduleApply = () => { applying = applying.then(apply); };
+
+// Typing applies the inputs once it pauses.
+let debounce: ReturnType<typeof setTimeout> | undefined;
+for (const input of [styleInput, projInput, geojsonInput]) {
+  input.oninput = () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(scheduleApply, 500);
+  };
+}
+// The headings open and close their editors.
+for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-heading button')) {
+  button.onclick = () => {
+    const body = document.getElementById(button.getAttribute('aria-controls')!)!;
+    body.hidden = !body.hidden;
+    button.setAttribute('aria-expanded', String(!body.hidden));
+  };
+}
+map.on('idle', () => {
+  if (ready && map.getSource('rendered') && map.isSourceLoaded('rendered') && !statusEl.classList.contains('error')) {
+    status(`Done · zoom ${map.getZoom().toFixed(2)}`);
   }
 });
-void loadStyle();
+
+// Presets fill in an input and apply it.
+stylePresetSelect.append(...stylePresets.map((p, i) => new Option(p.label, String(i))));
+stylePresetSelect.onchange = async () => {
+  try {
+    styleInput.value = await stylePresets[Number(stylePresetSelect.value)].load();
+  } catch (error) {
+    fail(error);
+    return;
+  }
+  scheduleApply();
+};
+projPresetSelect.append(new Option('Web Mercator (no reprojection)', ''), ...projjsonPresets.map((p, i) => new Option(p.label, String(i))));
+projPresetSelect.onchange = () => {
+  const preset = projPresetSelect.value === '' ? undefined : projjsonPresets[Number(projPresetSelect.value)];
+  projInput.value = preset ? JSON.stringify(preset.projjson, null, 2) : '';
+  scheduleApply();
+};
+const geojsonPresets = [
+  // Natural Earth 1:50m populated places (~1,250 cities).
+  { label: 'Natural Earth populated places', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_populated_places_simple.geojson' },
+  { label: 'Natural Earth countries (polygons)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson' },
+  { label: 'Natural Earth rivers (lines)', url: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_rivers_lake_centerlines.geojson' },
+  { label: 'None', url: undefined },
+];
+geojsonPresetSelect.append(...geojsonPresets.map((p, i) => new Option(p.label, String(i))));
+geojsonPresetSelect.onchange = async () => {
+  const { url } = geojsonPresets[Number(geojsonPresetSelect.value)];
+  try {
+    geojsonInput.value = url ? await (await fetch(url)).text() : '';
+  } catch (error) {
+    fail(error);
+    return;
+  }
+  scheduleApply();
+};
+
+styleInput.value = await stylePresets[0].load();
+scheduleApply();
+void geojsonPresetSelect.onchange(new Event('change'));

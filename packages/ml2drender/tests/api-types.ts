@@ -1,16 +1,47 @@
 import type { FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
-import { MapRenderer, type FillExtrusionLayer, type InitOptions, type StyleLayer } from '../src/index';
+import { loadProjection, loadProjectionFactory, MapRenderer, type FillExtrusionLayer, type InitOptions, type Projection, type StyleLayer } from '../src/index';
 import wasm from 'ml2drender/renderer.wasm';
 
 async function pngResponse() {
   const style: StyleSpecification = await (await fetch('https://example.com/style.json')).json();
   const renderer = await MapRenderer.init(style, { wasm });
-  const png: Uint8Array<ArrayBuffer> = (await renderer.render({ center: [0, 0], zoom: 0, width: 256, height: 256 })).toPng();
+  const png: Uint8Array<ArrayBuffer> = (await renderer.renderView({ center: [0, 0], zoom: 0, width: 256, height: 256 })).toPng();
   return new Response(png, { headers: { 'Content-Type': 'image/png' } });
 }
 
+const utm = { type: 'ProjectedCRS', name: 'WGS 84 / UTM zone 54N' /* ... */ };
+
+async function projectedPng(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>> {
+  return (await renderer.renderProjected({ projjson: utm, bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 })).toPng();
+}
+
+async function mercatorPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>[]> {
+  const tile = await renderer.renderZxy({ z: 3, x: 7, y: 3 });
+  const tokyo = await renderer.renderLngLat({ bbox: [139.5, 35.5, 140, 36], size: 1024 });
+  return [tile.toPng(), tokyo.toPng()];
+}
+
+async function wrongPath(renderer: MapRenderer) {
+  // @ts-expect-error A CRS box renders with `renderProjected`.
+  await renderer.renderView({ projjson: utm, bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
+  // @ts-expect-error A Mercator camera renders with `renderView`.
+  await renderer.renderProjected({ center: [0, 0], zoom: 0, width: 256, height: 256 });
+  // @ts-expect-error `renderProjected` takes PROJJSON, not a PROJ string.
+  await renderer.renderProjected({ projjson: '+proj=utm +zone=54 +ellps=GRS80', bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
+}
+
+async function utmEasting(): Promise<number> {
+  const projection: Projection = await loadProjection(utm, { wasm });
+  const lngLat: number[] = projection.inverse(projection.forward([139.76, 35.68]));
+  // @ts-expect-error `loadProjection` takes PROJJSON, not a PROJ string.
+  await loadProjection('+proj=utm +zone=54 +ellps=GRS80');
+  const create: (projjson: object) => Projection = await loadProjectionFactory({ wasm });
+  create(utm).forward([139.76, 35.68]);
+  return lngLat ? lngLat[0] : NaN;
+}
+
 async function webpBytes(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>> {
-  return (await renderer.render({ center: [0, 0], zoom: 0, width: 256, height: 256 })).toWebp();
+  return (await renderer.renderView({ center: [0, 0], zoom: 0, width: 256, height: 256 })).toWebp();
 }
 
 const transform: NonNullable<InitOptions['transformFillExtrusion']> = (layer) => ({

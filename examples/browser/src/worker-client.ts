@@ -1,4 +1,4 @@
-import type { View } from 'ml2drender';
+import type { ProjectedView, TileView } from 'ml2drender';
 import type { StyleSpecification } from 'maplibre-gl';
 import type { WorkerRequest, WorkerResponse } from './render-worker';
 
@@ -83,7 +83,7 @@ export class TileWorker {
     return request;
   }
 
-  render(view: View): Promise<TileImage> {
+  render(view: TileView | ProjectedView): Promise<TileImage> {
     const id = ++this.nextId;
     const slot = this.slots.reduce((least, candidate) => candidate.load < least.load ? candidate : least);
     slot.load++;

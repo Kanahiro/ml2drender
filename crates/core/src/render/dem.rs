@@ -284,7 +284,7 @@ fn draw_quad(target: &mut Target, ctx: &Ctx, tile: &RenderTile, mask: Option<&Ma
 pub fn draw_hillshade_tile(target: &mut Target, ctx: &Ctx, tile: &RenderTile, tex: &Texture, params: &HillshadeParams, mask: Option<&Mask>) {
     // `u_latrange`: latitudes of the tile's top and bottom edges.
     let n = (1u64 << tile.canonical.z) as f64;
-    let lat = |y: f64| (std::f64::consts::PI * (1.0 - 2.0 * y / n)).sinh().atan().to_degrees();
+    let lat = |y: f64| crate::tile::mercator_lat(y / n);
     let (lat0, lat1) = (lat(tile.canonical.y as f64) as f32, lat(tile.canonical.y as f64 + 1.0) as f32);
     let (size_w, size_h) = tex.size();
     let (sw, sh) = (size_w as f32, size_h as f32);
