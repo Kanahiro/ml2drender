@@ -175,6 +175,9 @@ importers:
         specifier: workspace:*
         version: link:../../packages/ml2drender
     devDependencies:
+      '@types/geojson':
+        specifier: 7946.0.16
+        version: 7946.0.16
       typescript:
         specifier: 7.0.2
         version: 7.0.2

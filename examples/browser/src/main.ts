@@ -3,7 +3,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import projectionHandlerUrl from './gl-projection-handler.ts?worker&url';
 import projjsonPresets from './projjson-presets.json';
-import { type Crs, registerProjJson, zoomOffset } from './projections';
+import { clipToCrs, type Crs, registerProjJson, zoomOffset } from './projections';
 import { stylePresets } from './styles';
 import { TileWorker } from './worker-client';
 
@@ -38,9 +38,11 @@ let ready = false;
 let appliedStyle: string | undefined;
 let appliedProjJson: string | undefined;
 let appliedGeojson: string | undefined;
-const emptyCollection = { type: 'FeatureCollection', features: [] } as const;
+const emptyCollection: GeoJSONSourceSpecification['data'] = { type: 'FeatureCollection', features: [] };
 /** The overlay GL JS draws itself. */
 let checkData: GeoJSONSourceSpecification["data"] = emptyCollection;
+/** `checkData` cut to where the applied projection places it. */
+const overlay = () => projection ? clipToCrs(checkData, projection) : checkData;
 /** The applied projection; undefined renders Web Mercator without reprojection. */
 let projection: Crs | undefined;
 
@@ -164,7 +166,7 @@ function redraw() {
         maxzoom: 23,
       },
       // Drawn by GL JS itself, to check that its projection lines up with the rendered tiles.
-      check: { type: 'geojson', data: checkData },
+      check: { type: 'geojson', data: overlay() },
     },
     layers: [
       { id: 'rendered', type: 'raster', source: 'rendered', paint: { 'raster-fade-duration': 0 } },
@@ -228,7 +230,7 @@ function applyGeojson() {
   if (text === appliedGeojson) return;
   checkData = text ? JSON.parse(text) : emptyCollection;
   appliedGeojson = text;
-  const setData = () => (map.getSource('check') as GeoJSONSource | undefined)?.setData(checkData);
+  const setData = () => (map.getSource('check') as GeoJSONSource | undefined)?.setData(overlay());
   // A style still loading has no sources yet.
   if (!setData()) map.once('style.load', setData);
 }
