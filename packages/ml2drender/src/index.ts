@@ -100,9 +100,10 @@ interface WasmExports {
   renderer_new(stylePtr: number, styleLen: number, ...view: ViewArgs): number;
   renderer_set_view(handle: number, ...view: ViewArgs): void;
   renderer_set_projected_view(handle: number, projjsonPtr: number, projjsonLen: number, minX: number, minY: number, maxX: number, maxY: number, width: number, height: number, pixelRatio: number, margin: number): number;
+  renderer_set_ticket(handle: number, ticket: number): void;
   renderer_needs(handle: number): number;
   renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
-  renderer_render(handle: number): number;
+  renderer_render(handle: number, oldest: number): number;
   encode_png(ptr: number, len: number, width: number, height: number): number;
   encode_webp(ptr: number, len: number, width: number, height: number): number;
   renderer_free(handle: number): void;
@@ -344,8 +345,11 @@ export class MapRenderer {
   private core?: Core;
   /** A trap (Rust panic or out of memory) left the WASM instance in an unknown state. */
   private broken?: unknown;
-  /** Fetches in flight, shared by overlapping renders. */
-  private readonly pending = new Map<string, Promise<void>>();
+  /** Fetches in flight, shared by overlapping renders, with the newest ticket that awaits each. */
+  private readonly pending = new Map<string, { request: Promise<void>; ticket: number }>();
+  /** Tickets of the renders in progress: WASM keeps the tiles they need (`renderer_set_ticket`). */
+  private readonly tickets = new Set<number>();
+  private lastTicket = 0;
 
   private constructor(
     private readonly wasm: WasmExports,
@@ -408,21 +412,27 @@ export class MapRenderer {
   private async drawOnce(view: View | ProjectedView, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
     const w = this.wasm;
     const core = this.acquire(args);
+    const ticket = ++this.lastTicket;
+    this.tickets.add(ticket);
     let bytes: Uint8Array<ArrayBuffer>;
     try {
       // Other renders may move the camera while this one awaits resources.
       for (let round = 0; ; round++) {
         setView(core.handle);
+        w.renderer_set_ticket(core.handle, ticket);
         const count = w.renderer_needs(core.handle);
         if (count === 0) break;
         if (round >= 32) throw new Error('Resource requests did not settle');
         const urls = decoder.decode(this.output()).split('\n');
-        await Promise.all(urls.map((url) => this.fetch(core, url)));
+        await Promise.all(urls.map((url) => this.fetch(core, url, ticket)));
       }
-      if (!w.renderer_render(core.handle)) throw new Error(decoder.decode(this.output()));
+      // Tickets increase, so the first in the set is the oldest in progress.
+      const oldest = this.tickets.values().next().value!;
+      if (!w.renderer_render(core.handle, oldest)) throw new Error(decoder.decode(this.output()));
       // Own the bytes before another render can overwrite or grow WASM memory.
       bytes = this.output();
     } finally {
+      this.tickets.delete(ticket);
       this.release(core);
     }
     const width = Math.round(view.width * (view.pixelRatio ?? 1));
@@ -437,20 +447,28 @@ export class MapRenderer {
     return { width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp) };
   }
 
-  /** Fetch `url` once and provide it to `core`, which requested it, before it leaves `pending`. */
-  private fetch(core: Core, url: string): Promise<void> {
-    let request = this.pending.get(url);
-    if (!request) {
-      request = this.loadResource(url).then((bytes) => {
-        // A freed core was retired by the TTL; its successor fetches again.
-        if (core.retired && core.active === 0) return;
-        this.withBytes(encoder.encode(url), (urlPtr, urlLen) =>
-          this.withBytes(bytes ?? new Uint8Array(), (dataPtr, dataLen) =>
-            this.wasm.renderer_provide(core.handle, urlPtr, urlLen, dataPtr, dataLen, bytes === null ? 0 : 1)));
-      }).finally(() => this.pending.delete(url));
-      this.pending.set(url, request);
+  /**
+   * Fetch `url` once and provide it to `core`, which requested it, before it leaves `pending`. It is
+   * kept for the newest render awaiting it: while any of them is in progress, the oldest ticket in
+   * progress is at most that one.
+   */
+  private fetch(core: Core, url: string, ticket: number): Promise<void> {
+    const shared = this.pending.get(url);
+    if (shared) {
+      shared.ticket = Math.max(shared.ticket, ticket);
+      return shared.request;
     }
-    return request;
+    const entry = { ticket, request: Promise.resolve() };
+    entry.request = this.loadResource(url).then((bytes) => {
+      // A freed core was retired by the TTL; its successor fetches again.
+      if (core.retired && core.active === 0) return;
+      this.wasm.renderer_set_ticket(core.handle, entry.ticket);
+      this.withBytes(encoder.encode(url), (urlPtr, urlLen) =>
+        this.withBytes(bytes ?? new Uint8Array(), (dataPtr, dataLen) =>
+          this.wasm.renderer_provide(core.handle, urlPtr, urlLen, dataPtr, dataLen, bytes === null ? 0 : 1)));
+    }).finally(() => this.pending.delete(url));
+    this.pending.set(url, entry);
+    return entry.request;
   }
 
   /** The current WASM renderer, replaced once older than the cache TTL. */

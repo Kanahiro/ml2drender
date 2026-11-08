@@ -122,6 +122,16 @@ pub unsafe extern "C" fn renderer_set_projected_view(
     }
 }
 
+/// Tiles needed or provided from now on are kept for render `ticket` (see
+/// `Renderer::set_ticket`); a JS number, an integer below 2^53.
+///
+/// # Safety
+/// `r` must be a live handle from `renderer_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn renderer_set_ticket(r: *mut Renderer, ticket: f64) {
+    unsafe { &mut *r }.set_ticket(ticket as u64);
+}
+
 /// Writes the needed URLs, newline-separated, to the output buffer; returns their count.
 ///
 /// # Safety
@@ -151,13 +161,14 @@ pub unsafe extern "C" fn renderer_provide(
     unsafe { &mut *r }.provide(&url, data);
 }
 
-/// Returns 1 with RGBA in the output buffer, or 0 with an error message.
+/// Returns 1 with RGBA in the output buffer, or 0 with an error message. Keeps the tiles of
+/// tickets `oldest` and later (see `renderer_set_ticket`).
 ///
 /// # Safety
 /// `r` must be a live handle from `renderer_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn renderer_render(r: *mut Renderer) -> u32 {
-    match unsafe { &mut *r }.render() {
+pub unsafe extern "C" fn renderer_render(r: *mut Renderer, oldest: f64) -> u32 {
+    match unsafe { &mut *r }.render_retaining(oldest as u64) {
         Ok(rgba) => {
             set_out(rgba);
             1

@@ -125,11 +125,15 @@ struct Source {
     vector_layers: std::cell::RefCell<HashMap<(TileId, TileId), Rc<Vec<mvt::Layer>>>>,
     /// Layer buckets by (data tile, canonical tile, overscaled zoom), kept across views.
     buckets: std::cell::RefCell<HashMap<(TileId, TileId, u8), Rc<render::TileBuckets>>>,
-    /// When each data tile (GeoJSON: canonical tile) was last needed, in `Renderer::clock` ticks.
+    /// The latest `Renderer::clock` each data tile (GeoJSON: canonical tile) was needed or
+    /// provided at.
     last_used: std::cell::RefCell<HashMap<TileId, u64>>,
-    /// Tiles provided and not drawn since: kept from eviction, as an overlapping render that
-    /// requested them may not have drawn yet.
-    fresh: hash::HashSet<TileId>,
+}
+
+/// Records that `id` is needed at `clock`: the latest clock wins, whatever the call order.
+fn stamp(last_used: &mut HashMap<TileId, u64>, id: TileId, clock: u64) {
+    let t = last_used.entry(id).or_insert(clock);
+    *t = (*t).max(clock);
 }
 
 const ZOOM_LEVELS_TO_OVERSCALE: u8 = 4;
@@ -182,7 +186,7 @@ pub struct Renderer {
     /// Tile URLs returned by `needs()` and not yet provided, with the (source, tile) they fill.
     /// `provide` matches against these, so a view change in between does not lose them.
     requested: std::cell::RefCell<HashMap<String, Vec<(String, TileId)>>>,
-    /// Advances with every view change; orders tiles for eviction.
+    /// Advances with every view change, or set by `set_ticket`; orders tiles for eviction.
     clock: u64,
     view: View,
     /// MapLibre map option `maxZoom` (default 22).
@@ -338,7 +342,7 @@ impl Renderer {
                 }
                 _ => Data::Failed,
             };
-            sources.insert(id, Source { ty, json: src, data, tiles: HashMap::default(), vector_layers: Default::default(), buckets: Default::default(), last_used: Default::default(), fresh: Default::default() });
+            sources.insert(id, Source { ty, json: src, data, tiles: HashMap::default(), vector_layers: Default::default(), buckets: Default::default(), last_used: Default::default() });
         }
         let sprites = sprite::Sprites::new(&json["sprite"], view.pixel_ratio);
         let glyphs = symbol::glyphs::Glyphs::new(json["glyphs"].as_str());
@@ -389,6 +393,16 @@ impl Renderer {
         self.set_max_zoom(self.max_zoom);
     }
 
+    /// For hosts running overlapping renders on one renderer (each one's `set_view`, `needs`,
+    /// `provide` rounds interleaved with the others'): tiles needed or provided from now on are
+    /// kept for render `ticket`. Give each render an increasing ticket, set it before each of its
+    /// calls (after `set_view`, which advances the clock itself), and draw with
+    /// `render_retaining` the oldest ticket still in progress, so that no render drops tiles
+    /// another one still has to draw (which it would fetch again).
+    pub fn set_ticket(&mut self, ticket: u64) {
+        self.clock = ticket;
+    }
+
     /// Renders `view`, a box in a projected CRS, instead of a Mercator camera. Layers drawn from
     /// vertices (background, fill, line, circle, heatmap, symbol) are drawn in the projected output
     /// directly; rasters and DEMs are rendered in Mercator (like `set_view`) and the picture is
@@ -406,14 +420,12 @@ impl Renderer {
     }
 
     /// Drops the least recently needed tiles of each source beyond `MAX_CACHED_TILES`, with
-    /// everything built from them. Tiles of the current view, and fresh ones, stay.
-    fn evict(&mut self) {
+    /// everything built from them. Tiles needed at `keep_since` or later stay.
+    fn evict(&mut self, keep_since: u64) {
         for src in self.sources.values_mut() {
             let last_used = src.last_used.get_mut();
-            // Drawn now (needed at this clock tick): no longer fresh.
-            src.fresh.retain(|id| last_used.get(id) != Some(&self.clock));
             let Some(excess) = last_used.len().checked_sub(MAX_CACHED_TILES).filter(|&n| n > 0) else { continue };
-            let mut old: Vec<(u64, TileId)> = last_used.iter().filter(|&(id, &t)| t < self.clock && !src.fresh.contains(id)).map(|(&id, &t)| (t, id)).collect();
+            let mut old: Vec<(u64, TileId)> = last_used.iter().filter(|&(_, &t)| t < keep_since).map(|(&id, &t)| (t, id)).collect();
             old.sort_unstable();
             let evicted: hash::HashSet<TileId> = old.into_iter().take(excess).map(|(_, id)| id).collect();
             last_used.retain(|id, _| !evicted.contains(id));
@@ -498,7 +510,9 @@ impl Renderer {
         let Data::Tiled(tj) = &src.data else {
             let covering = self.covering(src);
             if matches!(src.data, Data::GeoJson(_)) {
-                last_used.extend(covering.iter().map(|t| (t.canonical, self.clock)));
+                for t in &covering {
+                    stamp(&mut last_used, t.canonical, self.clock);
+                }
             }
             return (covering.into_iter().map(|t| (t, t.canonical)).collect(), fetch);
         };
@@ -514,14 +528,14 @@ impl Renderer {
                         break;
                     }
                     Some(Some(_)) => {
-                        last_used.insert(id, self.clock);
+                        stamp(&mut last_used, id, self.clock);
                         let canonical = if id == Self::data_tile(tj, t.canonical) { t.canonical } else { id };
                         let overscaled_z = if canonical == t.canonical { t.overscaled_z } else { canonical.z };
                         draw.insert((RenderTile { overscaled_z, wrap: t.wrap, canonical }, id));
                         break;
                     }
                     Some(None) => {
-                        last_used.insert(id, self.clock);
+                        stamp(&mut last_used, id, self.clock);
                         if id.z <= min_z {
                             break;
                         }
@@ -709,8 +723,7 @@ impl Renderer {
                             }
                         };
                         src.tiles.insert(t, decoded);
-                        src.last_used.get_mut().insert(t, self.clock);
-                        src.fresh.insert(t);
+                        stamp(src.last_used.get_mut(), t, self.clock);
                     }
                 }
                 Data::Image { url: u, texture, .. } if u == url && texture.is_none() => {
@@ -728,6 +741,11 @@ impl Renderer {
 
     /// Non-premultiplied RGBA8, row-major.
     pub fn render(&mut self) -> Result<Vec<u8>, Error> {
+        self.render_retaining(self.clock)
+    }
+
+    /// `render`, keeping the cached tiles needed by tickets `oldest` and later (see `set_ticket`).
+    pub fn render_retaining(&mut self, oldest: u64) -> Result<Vec<u8>, Error> {
         if !self.needs().is_empty() {
             return Err(Error::NotReady);
         }
@@ -739,7 +757,7 @@ impl Renderer {
                     * 4
             ]);
         }
-        self.evict();
+        self.evict(oldest.min(self.clock));
         let t = &self.transform;
         let (w, h) = ((t.width * t.pixel_ratio).round() as usize, (t.height * t.pixel_ratio).round() as usize);
         let visible: Vec<bool> = self.style.layers.iter().map(|l| !l.is_hidden(t.zoom, &self.style.global_state)).collect();
@@ -1261,6 +1279,33 @@ mod tests {
         assert!(r.needs().is_empty());
         let px = r.render().unwrap();
         assert_eq!(&px[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn overlapping_renders_keep_each_others_tiles() {
+        // Render 1 is given its tiles, then renders 2.. draw many other tiles meanwhile: with
+        // ticket 1 still in progress, its tiles stay; without, they are evicted.
+        let style = r#"{"version":8,"sources":{"v":{"type":"vector","tiles":["t/{z}/{x}/{y}"]}},"layers":[{"id":"f","type":"fill","source":"v","source-layer":"l"}]}"#;
+        let provide_all = |r: &mut Renderer| {
+            for need in r.needs() {
+                r.provide(&need.url, None);
+            }
+        };
+        for retain in [true, false] {
+            let mut r = Renderer::new(style, View::tile(3, 0, 0, 512)).unwrap();
+            r.set_ticket(1);
+            provide_all(&mut r);
+            for ticket in 2..20 {
+                r.set_view(View::tile(3, ticket as u32 % 8, ticket as u32 / 8 + 2, 512));
+                r.set_ticket(ticket);
+                provide_all(&mut r);
+                let oldest = if retain { 1 } else { ticket };
+                r.render_retaining(oldest).unwrap();
+            }
+            r.set_view(View::tile(3, 0, 0, 512));
+            r.set_ticket(1);
+            assert_eq!(r.needs().is_empty(), retain, "retain {retain}");
+        }
     }
 
     #[test]
