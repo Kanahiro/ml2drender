@@ -72,16 +72,19 @@ export function zoomOffset(c: Crs, center: LngLat): number {
 type Position = number[];
 
 /**
- * `data` cut to where `c` places positions (forward is finite), for GL JS, which projects GeoJSON vertex by
- * vertex: a vertex it cannot place, like the far side of a geostationary view, breaks the whole ring. A cut
- * line ends where it leaves; a cut ring follows the edge of the placeable area (as seen from the grid's
- * center, the shorter way) from where it leaves to where it comes back.
+ * `data` cut to the outline of the map `c` draws, for GL JS, which projects GeoJSON vertex by vertex and joins
+ * them with straight lines: a vertex the projection cannot place (the far side of a geostationary view) breaks
+ * the whole ring, and an edge across the projection's seam (its antimeridian) spans the whole map. Lines end
+ * where they leave the map; rings follow its outline from where they leave to where they come back, the way
+ * that keeps the ring's inside on the same side.
  */
 export function clipToCrs(data: GeoJSON.GeoJSON | string, c: Crs): GeoJSON.GeoJSON | string {
   const forward = (p: Position) => c.converter.forward(p);
   const placed = (p: Position) => forward(p).every(Number.isFinite);
   const wrap = (d: number) => ((d % 360) + 540) % 360 - 180;
   const lerp = (a: Position, b: Position, t: number) => [a[0] + wrap(b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+  const distance = (a: Position, b: Position) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const tolerance = 1e-6 * c.extent;
   // The last placeable position on the way from the placeable `a` to `b`.
   const edge = (a: Position, b: Position) => {
     let [inside, outside] = [0, 1];
@@ -91,21 +94,63 @@ export function clipToCrs(data: GeoJSON.GeoJSON | string, c: Crs): GeoJSON.GeoJS
     }
     return lerp(a, b, inside);
   };
-  // Positions along the edge of the placeable area from `a` to `b`, both on it, by the angle around the center.
+  // Where the map loses the edge from `a` to `b`: the positions on either side of the gap, or none when the
+  // projected edge is continuous, found by halving toward the half that moves the most.
+  type Gap = { exit?: Position; entry?: Position };
+  const gap = (a: Position, b: Position): Gap | undefined => {
+    if (!placed(a)) return placed(b) ? { entry: edge(b, a) } : {};
+    if (!placed(b)) return { exit: edge(a, b) };
+    let [lo, hi, fLo, fHi] = [0, 1, forward(a), forward(b)];
+    for (let i = 0; i < 50 && distance(fLo, fHi) > tolerance; i++) {
+      const t = (lo + hi) / 2;
+      const p = lerp(a, b, t);
+      const f = forward(p);
+      if (!f.every(Number.isFinite)) return { exit: edge(a, p), entry: edge(b, p) };
+      if (distance(fLo, f) >= distance(f, fHi)) [hi, fHi] = [t, f]; else [lo, fLo] = [t, f];
+    }
+    return distance(fLo, fHi) > tolerance ? { exit: lerp(a, b, lo), entry: lerp(a, b, hi) } : undefined;
+  };
+  // The pieces of a line (or a closed ring, from a placed vertex back to it) that the map draws unbroken.
+  const pieces = (l: Position[], closed: boolean): { arcs: Position[][]; broken: boolean } => {
+    const start = closed ? l.findIndex(placed) : 0;
+    if (start < 0) return { arcs: [], broken: true };
+    const path = closed ? [...l.slice(start), ...l.slice(0, start), l[start]] : l;
+    const arcs: Position[][] = [];
+    let arc = placed(path[0]) ? [path[0]] : [];
+    let broken = false;
+    for (let i = 1; i < path.length; i++) {
+      const g = gap(path[i - 1], path[i]);
+      if (!g) {
+        arc.push(path[i]);
+        continue;
+      }
+      broken = true;
+      if (g.exit) {
+        arcs.push([...arc, g.exit]);
+        arc = [];
+      }
+      if (g.entry) arc = [g.entry, path[i]];
+    }
+    if (arc.length) arcs.push(arc);
+    // A ring's first piece goes on from its last.
+    if (closed && broken && arcs.length > 1 && placed(path[0])) arcs[0] = [...arcs.pop()!, ...arcs[0].slice(1)];
+    return { arcs: arcs.filter((a) => a.length >= 2), broken };
+  };
+  // Along the outline of the map, by the angle around the grid's center, from `a` to `b`, both on it.
   const mid = [c.origin[0] + c.extent / 2, c.origin[1] - c.extent / 2];
-  const center = c.converter.inverse(mid);
   const answered = (xy: Position) => {
     const p = c.converter.inverse(xy);
-    if (!p.every(Number.isFinite)) return undefined;
-    const back = forward(p);
-    return Math.hypot(back[0] - xy[0], back[1] - xy[1]) <= 1e-6 * c.extent ? p : undefined;
+    return p.every(Number.isFinite) && distance(forward(p), xy) <= tolerance ? p : undefined;
   };
-  const along = (a: Position, b: Position): Position[] => {
-    if (!center.every(Number.isFinite) || !answered(mid)) return [];
-    const [xa, xb] = [forward(a), forward(b)];
-    const angle = (xy: Position) => Math.atan2(xy[1] - mid[1], xy[0] - mid[0]);
-    const a0 = angle(xa);
-    const d = ((angle(xb) - a0) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI;
+  const angle = (p: Position) => {
+    const xy = forward(p);
+    return Math.atan2(xy[1] - mid[1], xy[0] - mid[0]);
+  };
+  const turn = (from: number, to: number, dir: number) => (((to - from) * dir) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+  // ponytail: assumes an outline every ray from the grid's center crosses once (not the gap of a conic projection).
+  const along = (a: Position, b: Position, dir: number): Position[] => {
+    if (!answered(mid)) return [];
+    const [a0, d] = [angle(a), turn(angle(a), angle(b), dir) * dir];
     const steps = Math.ceil(Math.abs(d) / (Math.PI / 36));
     const out: Position[] = [];
     for (let k = 1; k < steps; k++) {
@@ -120,60 +165,63 @@ export function clipToCrs(data: GeoJSON.GeoJSON | string, c: Crs): GeoJSON.GeoJS
     }
     return out;
   };
-  // ponytail: rings with no placeable vertex are dropped, even one around the whole placeable area (an ocean).
-  const ring = (r: Position[]): Position[] | undefined => {
-    const open = r.length > 1 && r[0][0] === r.at(-1)![0] && r[0][1] === r.at(-1)![1] ? r.slice(0, -1) : r;
-    const start = open.findIndex(placed);
-    if (start < 0) return undefined;
-    const out: Position[] = [];
-    let left: Position | undefined;
-    for (let i = 0; i <= open.length; i++) {
-      const [p, q] = [open[(start + i - 1 + open.length) % open.length], open[(start + i) % open.length]];
-      if (placed(q)) {
-        if (left) {
-          const back = edge(q, p);
-          out.push(...along(left, back), back);
-          left = undefined;
-        }
-        out.push(q);
-      } else if (!left) {
-        left = edge(p, q);
-        out.push(left);
-      }
+  // A ring as the rings the map draws: its pieces joined along the outline, keeping the inside on the side
+  // it is on in lng/lat (counterclockwise rings turn counterclockwise around the outline).
+  // ponytail: a ring with no placed vertex is dropped, even one around the whole map (an ocean).
+  const rings = (r: Position[]): Position[][] => {
+    const { arcs, broken } = pieces(r, true);
+    if (!broken) return arcs.length ? [r] : [];
+    let area = 0;
+    for (let i = 0; i < r.length; i++) {
+      const [p, q] = [r[i], r[(i + 1) % r.length]];
+      area += p[0] * q[1] - q[0] * p[1];
     }
-    return out.length >= 4 ? out : undefined;
-  };
-  const line = (l: Position[]): Position[][] => {
-    const parts: Position[][] = [];
-    let part: Position[] = [];
-    l.forEach((q, i) => {
-      if (placed(q)) {
-        if (i > 0 && !placed(l[i - 1])) part.push(edge(q, l[i - 1]));
-        part.push(q);
-      } else if (part.length) {
-        part.push(edge(l[i - 1], q));
-        parts.push(part);
-        part = [];
+    const dir = Math.sign(area) || 1;
+    const out: Position[][] = [];
+    const used = new Set<number>();
+    for (let first = 0; first < arcs.length; first++) {
+      if (used.has(first)) continue;
+      const ring: Position[] = [];
+      for (let i = first; !used.has(i);) {
+        used.add(i);
+        ring.push(...arcs[i]);
+        const end = angle(arcs[i].at(-1)!);
+        const next = arcs.reduce((best, a, j) => turn(end, angle(a[0]), dir) < turn(end, angle(arcs[best][0]), dir) ? j : best, i);
+        ring.push(...along(arcs[i].at(-1)!, arcs[next][0], dir));
+        i = next;
       }
-    });
-    if (part.length) parts.push(part);
-    return parts.filter((p) => p.length >= 2);
+      ring.push(ring[0]);
+      if (ring.length >= 4) out.push(ring);
+    }
+    return out;
   };
-  const polygon = (rings: Position[][]) => {
-    const outer = ring(rings[0]);
-    return outer && [outer, ...rings.slice(1).map(ring).filter((r) => r !== undefined)];
+  const inside = (p: Position, ring: Position[]) => {
+    const [x, y] = forward(p);
+    let odd = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [a, b] = [forward(ring[i]), forward(ring[j])];
+      if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) odd = !odd;
+    }
+    return odd;
   };
+  // ponytail: holes the map breaks are dropped; the others go to the outer ring around them.
+  const polygons = (p: Position[][]): Position[][][] => {
+    const outers = rings(p[0]).map((r) => [r]);
+    for (const hole of p.slice(1)) {
+      if (pieces(hole, true).broken) continue;
+      outers.find((o) => inside(hole[0], o[0]))?.push(hole);
+    }
+    return outers;
+  };
+  const line = (l: Position[]) => pieces(l, false).arcs;
   const geometry = (g: GeoJSON.Geometry | null): GeoJSON.Geometry | null => {
     switch (g?.type) {
       case 'Point': return placed(g.coordinates) ? g : null;
       case 'MultiPoint': return { ...g, coordinates: g.coordinates.filter(placed) };
       case 'LineString': return { type: 'MultiLineString', coordinates: line(g.coordinates) };
       case 'MultiLineString': return { ...g, coordinates: g.coordinates.flatMap(line) };
-      case 'Polygon': {
-        const p = polygon(g.coordinates);
-        return p ? { ...g, coordinates: p } : null;
-      }
-      case 'MultiPolygon': return { ...g, coordinates: g.coordinates.map(polygon).filter((p) => p !== undefined) };
+      case 'Polygon': return { type: 'MultiPolygon', coordinates: polygons(g.coordinates) };
+      case 'MultiPolygon': return { ...g, coordinates: g.coordinates.flatMap(polygons) };
       case 'GeometryCollection': return { ...g, geometries: g.geometries.map(geometry).filter((x) => x !== null) };
       default: return g;
     }
