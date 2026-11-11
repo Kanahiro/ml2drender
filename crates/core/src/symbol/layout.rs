@@ -240,7 +240,7 @@ pub fn overlap_mode(layer: &Layer, ctx: &Ctx, tile: &RenderTile, raw: &serde_jso
 }
 
 /// `resolveTokens`: `{name}` → the feature property (JS `String()`), or empty.
-fn resolve_tokens(props: &crate::expression::Object, s: &str) -> String {
+fn resolve_tokens(props: &crate::expression::Properties, s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(open) = rest.find('{') {

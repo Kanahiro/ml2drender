@@ -120,7 +120,7 @@ fn fixture_feature(f: &Value, canonical: &Value) -> (ex::Feature, Option<ex::Can
         ex::Value::Object(o) => o,
         _ => Default::default(),
     };
-    let mut feature = ex::Feature { id: f.get("id").map(ex::Value::from_json), properties, ..Default::default() };
+    let mut feature = ex::Feature { id: f.get("id").map(ex::Value::from_json), properties: ex::Properties::Object(properties), ..Default::default() };
     let geom = &f["geometry"];
     let name = |t: &str| -> &'static str {
         match t {

@@ -44,9 +44,66 @@ pub struct Feature {
     pub id: Option<Value>,
     /// "Point", "LineString", "Polygon", "Unknown" (or GeoJSON Multi* names in tests).
     pub geom_type: Option<&'static str>,
-    pub properties: Rc<Object>,
+    pub properties: Properties,
     /// Tile coordinates (extent 8192 in the expression tests, the tile extent when rendering).
     pub geometry: Option<Vec<Vec<[f64; 2]>>>,
+}
+
+/// A feature's properties: an object, or an MVT feature's tags (pairs of indices into its
+/// layer's key and value tables), which take 8 bytes per property instead of a map entry.
+#[derive(Debug, Clone)]
+pub enum Properties {
+    Object(Rc<Object>),
+    /// The feature's tags are `table.tags[start..end]`.
+    Tags(Rc<TagTable>, u32, u32),
+}
+
+/// An MVT layer's keys and values, and the tags of all its features.
+#[derive(Debug, Default)]
+pub struct TagTable {
+    pub keys: Vec<Rc<str>>,
+    pub values: Vec<Value>,
+    pub tags: Vec<u32>,
+}
+
+impl Default for Properties {
+    fn default() -> Self {
+        Properties::Object(Rc::default())
+    }
+}
+
+impl Properties {
+    /// The value of `key`, as in the object built by `to_object` (the last tag of a key wins;
+    /// tags with indices out of range are skipped).
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        match self {
+            Properties::Object(o) => o.get(key),
+            Properties::Tags(t, start, end) => t.tags[*start as usize..*end as usize]
+                .chunks_exact(2)
+                .rev()
+                .find_map(|kv| (t.keys.get(kv[0] as usize).is_some_and(|k| &**k == key)).then(|| t.values.get(kv[1] as usize)).flatten()),
+        }
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn to_object(&self) -> Rc<Object> {
+        match self {
+            Properties::Object(o) => o.clone(),
+            Properties::Tags(t, start, end) => {
+                let tags = &t.tags[*start as usize..*end as usize];
+                let mut o = Object::with_capacity_and_hasher(tags.len() / 2, Default::default());
+                for kv in tags.chunks_exact(2) {
+                    if let (Some(k), Some(v)) = (t.keys.get(kv[0] as usize), t.values.get(kv[1] as usize)) {
+                        o.insert(k.clone(), v.clone());
+                    }
+                }
+                Rc::new(o)
+            }
+        }
+    }
 }
 
 #[derive(Default)]

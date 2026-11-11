@@ -3,7 +3,7 @@
 //! what the expression tests exercise; rendering uses these semantics.
 
 use super::color::{Color, ColorSpace};
-use super::value::{js_number_to_string, Object, Value};
+use super::value::{js_number_to_string, Value};
 use super::Feature;
 use serde_json::Value as J;
 use crate::hash::HashMap;
@@ -204,7 +204,7 @@ impl LegacyFunction {
         if self.zoom_dependent {
             return self.inner(&Value::Number(zoom), feature);
         }
-        let props: Option<&Rc<Object>> = feature.map(|f| &f.properties);
+        let props = feature.map(|f| &f.properties);
         match self.property.as_ref().and_then(|p| props.and_then(|o| o.get(p.as_str()))) {
             None => self.fallback(),
             Some(v) => self.inner(v, feature),

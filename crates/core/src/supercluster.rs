@@ -197,7 +197,7 @@ pub struct ClusterIndex {
 }
 
 fn eval(e: &Expression, props: &Rc<Object>, accumulated: Option<Value>) -> Value {
-    let f = EvalFeature { properties: props.clone(), ..Default::default() };
+    let f = EvalFeature { properties: crate::expression::Properties::Object(props.clone()), ..Default::default() };
     let mut ctx = EvalCtx { globals: Globals { zoom: 0.0, accumulated, ..Default::default() }, feature: Some(&f), ..Default::default() };
     e.evaluate(&mut ctx)
 }
@@ -353,7 +353,7 @@ impl ClusterIndex {
                 (p.props.clone(), p.xy[0], p.xy[1], id)
             };
             let g = [js_round(extent * (px * z2 - x)) as i32, js_round(extent * (py * z2 - y)) as i32];
-            layer.features.push(Feature { id, ty: GeomType::Point, properties: props, geometry: vec![vec![g]] });
+            layer.features.push(Feature { id, ty: GeomType::Point, properties: crate::expression::Properties::Object(props), geometry: vec![vec![g]] });
         }
     }
 }
@@ -370,7 +370,7 @@ mod tests {
         let z0 = idx.tile(0, 0, 0);
         assert_eq!(z0.features.len(), 2);
         let c = z0.features.iter().find(|f| f.properties.contains_key("cluster")).unwrap();
-        assert_eq!(c.properties["point_count"].as_f64(), Some(2.0));
+        assert_eq!(c.properties.get("point_count").and_then(|v| v.as_f64()), Some(2.0));
         // Unclustered past maxZoom.
         assert_eq!(idx.tile(17, 65536, 65536).features.len(), 2);
     }

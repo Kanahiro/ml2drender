@@ -12,7 +12,7 @@ mod parse;
 pub mod types;
 pub mod value;
 
-pub use expr::{CanonicalTileId, EvalCtx, Feature, Globals, Interpolation, RuntimeError};
+pub use expr::{CanonicalTileId, EvalCtx, Feature, Globals, Interpolation, Properties, RuntimeError, TagTable};
 pub use parse::ParseError;
 pub use value::{Object, Value};
 

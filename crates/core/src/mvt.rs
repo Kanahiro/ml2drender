@@ -1,6 +1,6 @@
 //! Mapbox Vector Tile (protobuf) decoding.
 
-use crate::expression::Value;
+use crate::expression::{Properties, TagTable, Value};
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +28,7 @@ impl GeomType {
 pub struct Feature {
     pub id: Option<Value>,
     pub ty: GeomType,
-    pub properties: Rc<crate::expression::Object>,
+    pub properties: Properties,
     pub geometry: Vec<Vec<[i32; 2]>>,
 }
 
@@ -183,20 +183,19 @@ fn decode_layer(data: &[u8]) -> Option<Layer> {
     let mut r = Reader { buf: data, pos: 0 };
     let mut name = String::new();
     let mut extent = 4096;
-    let mut keys: Vec<Rc<str>> = Vec::new();
-    let mut values: Vec<Value> = Vec::new();
+    let mut table = TagTable::default();
     let mut raw_features: Vec<&[u8]> = Vec::new();
     while let Some((f, w)) = r.field() {
         match (f, w) {
             (1, 2) => name = String::from_utf8_lossy(r.bytes()?).into_owned(),
             (2, 2) => raw_features.push(r.bytes()?),
-            (3, 2) => keys.push(String::from_utf8_lossy(r.bytes()?).into()),
-            (4, 2) => values.push(decode_value(r.bytes()?)?),
+            (3, 2) => table.keys.push(String::from_utf8_lossy(r.bytes()?).into()),
+            (4, 2) => table.values.push(decode_value(r.bytes()?)?),
             (5, 0) => extent = r.varint()? as u32,
             _ => r.skip(w)?,
         }
     }
-    let mut features = Vec::with_capacity(raw_features.len());
+    let mut decoded = Vec::with_capacity(raw_features.len());
     let (mut tags, mut geom) = (Vec::new(), Vec::new());
     for fd in raw_features {
         let mut r = Reader { buf: fd, pos: 0 };
@@ -219,14 +218,16 @@ fn decode_layer(data: &[u8]) -> Option<Layer> {
                 _ => r.skip(w)?,
             }
         }
-        let mut properties = crate::expression::Object::with_capacity_and_hasher(tags.len() / 2, Default::default());
-        for kv in tags.chunks_exact(2) {
-            if let (Some(k), Some(v)) = (keys.get(kv[0] as usize), values.get(kv[1] as usize)) {
-                properties.insert(k.clone(), v.clone());
-            }
-        }
-        features.push(Feature { id, ty, properties: Rc::new(properties), geometry: decode_geometry(&geom) });
+        let start = table.tags.len() as u32;
+        table.tags.extend_from_slice(&tags[..tags.len() & !1]);
+        decoded.push((id, ty, start, table.tags.len() as u32, decode_geometry(&geom)));
     }
+    table.tags.shrink_to_fit();
+    let table = Rc::new(table);
+    let features = decoded
+        .into_iter()
+        .map(|(id, ty, start, end, geometry)| Feature { id, ty, properties: Properties::Tags(table.clone(), start, end), geometry })
+        .collect();
     Some(Layer { name, extent, features })
 }
 

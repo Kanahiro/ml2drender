@@ -82,8 +82,15 @@ fn filter_cmp(a: &Value, b: &Value, accept: fn(std::cmp::Ordering) -> bool) -> b
 }
 
 fn filter_prop(ctx: &EvalCtx, k: &Expr) -> Value {
-    let props = ctx.feature.map(|f| f.properties.clone()).unwrap_or_default();
-    get_prop(&props, &lit(k).to_js_string())
+    feature_prop(ctx, &lit(k).to_js_string())
+}
+
+fn feature_prop(ctx: &EvalCtx, key: &str) -> Value {
+    ctx.feature.and_then(|f| f.properties.get(key)).cloned().unwrap_or(Value::Null)
+}
+
+fn has_prop(ctx: &EvalCtx, key: &str) -> bool {
+    ctx.feature.is_some_and(|f| f.properties.contains_key(key))
 }
 
 fn feature_id(ctx: &EvalCtx) -> Value {
@@ -95,7 +102,7 @@ fn geometry_type(ctx: &EvalCtx) -> Value {
 }
 
 fn props(ctx: &EvalCtx) -> Rc<Object> {
-    ctx.feature.map(|f| f.properties.clone()).unwrap_or_default()
+    ctx.feature.map(|f| f.properties.to_object()).unwrap_or_default()
 }
 
 const NUMBER: Type = Type::Number;
@@ -125,7 +132,7 @@ pub fn definition(name: &str) -> Option<Definition> {
             overloads: vec![
                 (Sig::Fixed(vec![STRING]), |ctx, a, _| {
                     let k = s(ctx, &a[0])?;
-                    Ok(Value::Bool(props(ctx).contains_key(k.as_str())))
+                    Ok(Value::Bool(has_prop(ctx, &k)))
                 }),
                 (Sig::Fixed(vec![STRING, OBJECT]), |ctx, a, _| {
                     let k = s(ctx, &a[0])?;
@@ -138,7 +145,7 @@ pub fn definition(name: &str) -> Option<Definition> {
             overloads: vec![
                 (Sig::Fixed(vec![STRING]), |ctx, a, _| {
                     let k = s(ctx, &a[0])?;
-                    Ok(get_prop(&props(ctx), &k))
+                    Ok(feature_prop(ctx, &k))
                 }),
                 (Sig::Fixed(vec![STRING, OBJECT]), |ctx, a, _| {
                     let k = s(ctx, &a[0])?;
@@ -229,7 +236,7 @@ pub fn definition(name: &str) -> Option<Definition> {
         "filter-id-<=" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_le())))),
         "filter->=" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_ge())))),
         "filter-id->=" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_ge())))),
-        "filter-has" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(props(ctx).contains_key(lit(&a[0]).to_js_string().as_str())))),
+        "filter-has" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(has_prop(ctx, &lit(&a[0]).to_js_string())))),
         "filter-has-id" => one(BOOLEAN, vec![], |ctx, _, _| Ok(Value::Bool(!feature_id(ctx).is_null()))),
         "filter-type-in" => one(BOOLEAN, vec![Type::array(STRING, None)], |ctx, a, _| {
             let t = geometry_type(ctx);

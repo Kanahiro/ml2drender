@@ -1,7 +1,7 @@
 //! GeoJSON source tiling, ported from `@maplibre/geojson-vt` (convert, simplify, clip,
 //! wrap, tile, transform) with MapLibre's options (extent 8192, buffer/tolerance scaled by 16).
 
-use crate::expression::{Object, Value};
+use crate::expression::{Object, Properties, Value};
 use crate::mvt::{Feature, GeomType, Layer};
 use serde_json::Value as J;
 use std::rc::Rc;
@@ -232,7 +232,7 @@ impl GeoJsonIndex {
                         let mut props = (*f.props).clone();
                         props.insert(CLIP_START.into(), Value::Number(l.start / l.size));
                         props.insert(CLIP_END.into(), Value::Number(l.end / l.size));
-                        features.push(Feature { id: f.id.clone(), ty: GeomType::LineString, properties: Rc::new(props), geometry: g });
+                        features.push(Feature { id: f.id.clone(), ty: GeomType::LineString, properties: Properties::Object(Rc::new(props)), geometry: g });
                     }
                     continue;
                 }
@@ -256,7 +256,7 @@ impl GeoJsonIndex {
             if geometry.is_empty() {
                 continue;
             }
-            features.push(Feature { id: f.id.clone(), ty, properties: f.props.clone(), geometry });
+            features.push(Feature { id: f.id.clone(), ty, properties: Properties::Object(f.props.clone()), geometry });
         }
         Layer { name: String::new(), extent: EXTENT as u32, features }
     }

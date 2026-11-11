@@ -242,7 +242,11 @@ fn filter_geojson(data: &J, filter: &J) -> Option<J> {
             expression::Value::Object(o) => o,
             _ => Default::default(),
         };
-        let feature = expression::Feature { id: f.get("id").filter(|v| !v.is_null()).map(expression::Value::from_json), properties, ..Default::default() };
+        let feature = expression::Feature {
+            id: f.get("id").filter(|v| !v.is_null()).map(expression::Value::from_json),
+            properties: expression::Properties::Object(properties),
+            ..Default::default()
+        };
         let mut ctx = expression::EvalCtx { globals: expression::Globals { zoom: 0.0, ..Default::default() }, feature: Some(&feature), ..Default::default() };
         matches!(e.evaluate(&mut ctx), expression::Value::Bool(true))
     };
