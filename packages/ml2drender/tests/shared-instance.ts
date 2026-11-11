@@ -32,3 +32,25 @@ for (let i = 0; i < 20; i++) {
 }
 assert.equal(memory(first).buffer.byteLength, size, 'repeated renders reuse the freed memory');
 console.log(`ok: 21 renders in ${(size / 2 ** 20).toFixed(1)} MiB of WASM memory`);
+
+// Overlapping renders hold their decoded resources while they await fetches; exclusive ones
+// run one at a time, so they need no more memory than one render. Each case gets a fresh
+// instance (one per module).
+const fetched: StyleSpecification = { ...style, sources: { g: { type: 'geojson', data: 'data.json' } } };
+const data = new TextEncoder().encode(JSON.stringify({ type: 'FeatureCollection', features }));
+const peak = async (renders: number, exclusive: boolean) => {
+  const module = await WebAssembly.compile(readFileSync(new URL('../wasm/ml2drender_wasm.wasm', import.meta.url)));
+  const loadResource = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return data.slice();
+  };
+  const renderers = await Promise.all(Array.from({ length: renders }, () =>
+    MapRenderer.init(fetched, { wasm: module, loadResource, exclusive, cache: { ttlMs: 0 } })));
+  const images = await Promise.all(renderers.map((r) => r.renderView(view)));
+  for (const image of images) assert.deepEqual(image.data, expected);
+  return memory(renderers[0]).buffer.byteLength;
+};
+const one = await peak(1, true);
+assert.equal(await peak(8, true), one, '8 exclusive renders need as much memory as one');
+assert.ok(await peak(8, false) > one, '8 overlapping renders need more');
+console.log(`ok: 8 exclusive renders in ${(one / 2 ** 20).toFixed(1)} MiB of WASM memory`);

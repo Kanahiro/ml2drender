@@ -89,6 +89,15 @@ export interface InitOptions {
    * Fetched bytes are not cached: rely on the HTTP cache, or cache in `loadResource`.
    */
   cache?: { ttlMs?: number };
+  /**
+   * Run this renderer's renders one at a time with the other exclusive renders on the same WASM
+   * instance (renderers of one module share it), from the first fetch to the image. Overlapping
+   * renders otherwise each hold their decoded resources while they await fetches, so WASM memory
+   * grows with their number; exclusive renders need only as much as the largest one. Use it where
+   * memory is tight, e.g. on Cloudflare Workers (128 MB per isolate, serving concurrent requests).
+   * Default: false.
+   */
+  exclusive?: boolean;
   /** Replace each fill-extrusion layer. Defaults to a fill preserving its 2D appearance. */
   transformFillExtrusion?: (layer: FillExtrusionLayer) => StyleLayer;
 }
@@ -362,6 +371,9 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
   return encoder.encode(JSON.stringify({ ...style, layers }));
 }
 
+/** Per instance: the end of the last exclusive render queued (see `InitOptions.exclusive`). */
+const exclusiveRenders = new WeakMap<WasmExports, Promise<void>>();
+
 /** Frees the core of a collected renderer (an idle one: a render in progress holds its renderer). */
 const freeRenderer = new FinalizationRegistry<{ w: WasmExports; state: { core?: Core } }>(({ w, state }) => {
   if (state.core && state.core.active === 0 && !brokenInstances.has(w)) w.renderer_free(state.core.handle);
@@ -386,6 +398,7 @@ export class MapRenderer {
     private readonly style: Uint8Array,
     private readonly loadResource: NonNullable<InitOptions['loadResource']>,
     private readonly ttlMs: number,
+    private readonly exclusive: boolean,
   ) {
     freeRenderer.register(this, { w: wasm, state: this.state });
   }
@@ -397,7 +410,7 @@ export class MapRenderer {
     const loadResource = options.loadResource ?? fetchResource;
     const prepared = prepareStyle(style, options.transformFillExtrusion);
     const instance = sharedWasm(options.wasm);
-    return new MapRenderer(options.wasm, instance, await instance, prepared, loadResource, ttlMs);
+    return new MapRenderer(options.wasm, instance, await instance, prepared, loadResource, ttlMs, options.exclusive ?? false);
   }
 
   /** Fetch required resources and return a new RGBA image of a Web Mercator camera. */
@@ -434,6 +447,13 @@ export class MapRenderer {
 
   /** The fetch-and-render loop of Mercator and projected views; `setView` points a core at the view. */
   private async draw(view: View | ProjectedView, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
+    let done = () => {};
+    if (this.exclusive) {
+      const previous = exclusiveRenders.get(this.wasm);
+      const mine = new Promise<void>((resolve) => { done = resolve; });
+      exclusiveRenders.set(this.wasm, (previous ?? Promise.resolve()).then(() => mine));
+      await previous;
+    }
     try {
       return await this.drawOnce(view, args, setView);
     } catch (error) {
@@ -442,6 +462,8 @@ export class MapRenderer {
         discardInstance(this.module, this.instance, this.wasm);
       }
       throw error;
+    } finally {
+      done();
     }
   }
 
