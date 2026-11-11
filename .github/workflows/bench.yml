@@ -1,4 +1,4 @@
-# Compare the PR's renderer against its base on the same runner (scripts/bench.ts) and report the result
+# Compare the PR's WASM against its base on the same runner (scripts/bench.ts) and report the result
 # as a PR comment and job summary. Fails when a case is slower than the base by more than 10%.
 name: Benchmark
 
@@ -27,17 +27,21 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/cache@v4
         with:
           path: fixtures
           key: fixtures-${{ hashFiles('scripts/fetch-fixtures.sh') }}
       - run: test -d fixtures/render || pnpm fixtures
       - run: pnpm install --frozen-lockfile --filter ml2drender
-      # A base from before the TypeScript port renders with its WASM (rustup is preinstalled on the runner).
+      - run: pnpm build:wasm
+      # A base from the pure TypeScript era renders without WASM.
       - name: Prepare the base
         run: |
           if [ -f ../base/Cargo.toml ]; then
-            rustup target add wasm32-unknown-unknown
             cd ../base && cargo build -p ml2drender-wasm --target wasm32-unknown-unknown --profile wasm --target-dir "$GITHUB_WORKSPACE/target/base"
           else
             cd ../base && pnpm install --frozen-lockfile --filter ml2drender
