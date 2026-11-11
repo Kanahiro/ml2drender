@@ -81,11 +81,18 @@ export class Reader {
     }
 
     /** Next [field, wire type]; `undefined` at end. */
-    field(): [number, number] | undefined {
-        if (this.pos >= this.buf.length) return undefined;
-        if (this.varint() === undefined) return undefined;
+    /** Field number and wire type of the last key read by `next`. */
+    tag = 0;
+    wire = 0;
+
+    /** Reads the next field key into `tag` / `wire`; false at the end or on a malformed key. */
+    next(): boolean {
+        if (this.pos >= this.buf.length) return false;
+        if (this.varint() === undefined) return false;
         // k >> 3 on the u64 key.
-        return [this.hi * 536870912 + (this.lo >>> 3), this.lo & 7];
+        this.tag = this.hi * 536870912 + (this.lo >>> 3);
+        this.wire = this.lo & 7;
+        return true;
     }
 
     skip(wire: number): boolean {
@@ -131,8 +138,9 @@ function packed(data: Uint8Array, out: number[]): boolean {
 function decodeValue(data: Uint8Array): unknown {
     const r = new Reader(data, 0);
     let v: unknown = null;
-    for (let fw = r.field(); fw; fw = r.field()) {
-        const [f, w] = fw;
+    while (r.next()) {
+        const f = r.tag;
+        const w = r.wire;
         if (f === 1 && w === 2) {
             const b = r.bytes();
             if (!b) return undefined;
@@ -207,8 +215,9 @@ function decodeGeometry(cmds: number[]): [number, number][][] {
 /** The layer's name bytes; `undefined` when malformed. */
 function layerName(data: Uint8Array): Uint8Array | undefined {
     const r = new Reader(data, 0);
-    for (let fw = r.field(); fw; fw = r.field()) {
-        const [f, w] = fw;
+    while (r.next()) {
+        const f = r.tag;
+        const w = r.wire;
         if (f === 1 && w === 2) return r.bytes();
         if (!r.skip(w)) return undefined;
     }
@@ -222,8 +231,9 @@ function decodeLayer(data: Uint8Array): Layer | undefined {
     const keys: string[] = [];
     const values: unknown[] = [];
     const rawFeatures: Uint8Array[] = [];
-    for (let fw = r.field(); fw; fw = r.field()) {
-        const [f, w] = fw;
+    while (r.next()) {
+        const f = r.tag;
+        const w = r.wire;
         if (f === 1 && w === 2) {
             const b = r.bytes();
             if (!b) return undefined;
@@ -258,8 +268,9 @@ function decodeLayer(data: Uint8Array): Layer | undefined {
         let type: GeomType = 0;
         tags.length = 0;
         geom.length = 0;
-        for (let fw = r.field(); fw; fw = r.field()) {
-            const [f, w] = fw;
+        while (r.next()) {
+            const f = r.tag;
+            const w = r.wire;
             if (f === 1 && w === 0) {
                 const v = r.varint();
                 if (v === undefined) return undefined;
@@ -305,8 +316,9 @@ export function decode(data: Uint8Array, keep: (name: string) => boolean): Layer
     }
     const r = new Reader(data, 0);
     const layers: Layer[] = [];
-    for (let fw = r.field(); fw; fw = r.field()) {
-        const [f, w] = fw;
+    while (r.next()) {
+        const f = r.tag;
+        const w = r.wire;
         if (f === 3 && w === 2) {
             const bytes = r.bytes();
             if (!bytes) return undefined;
