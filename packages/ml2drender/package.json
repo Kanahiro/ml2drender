@@ -14,11 +14,19 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-transform-types tests/single-flight.ts"
   },
-  "peerDependencies": {
-    "@maplibre/maplibre-gl-style-spec": "^26.4.4"
-  },
   "devDependencies": {
-    "@maplibre/maplibre-gl-style-spec": "26.4.4",
+    "pixelmatch": "^8.0.0",
     "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@mapbox/vector-tile": "^3.0.0",
+    "@maplibre/geojson-vt": "^6.3.0",
+    "@maplibre/maplibre-gl-style-spec": "^26.4.4",
+    "@maplibre/vt-pbf": "^4.3.3",
+    "earcut": "^3.2.4",
+    "fast-png": "^8.0.0",
+    "fflate": "^0.8.3",
+    "jpeg-js": "^0.4.4",
+    "pbf": "^5.1.2"
   }
 }
