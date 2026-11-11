@@ -23,19 +23,6 @@ const MAX_TEXTURE_SIZE = 16384;
 
 type P = [number, number];
 
-interface Vertex {
-    pos: P;
-    /** Extrude vector and offset normal, quantized like the byte attributes (`quantize`). */
-    extrude: P;
-    offset: P;
-    round: boolean;
-    up: boolean;
-    linesofar: number;
-    /** Gradient texture coordinates: progress within the clip, and its row (1-based). */
-    uvX: number;
-    split: number;
-}
-
 const sub = (a: P, b: P): P => [a[0] - b[0], a[1] - b[1]];
 const add = (a: P, b: P): P => [a[0] + b[0], a[1] + b[1]];
 const mult = (a: P, k: number): P => [a[0] * k, a[1] * k];
@@ -63,8 +50,18 @@ function quantize(v: number): number {
 /** Rust `x as i64 as f64` (truncating, saturating; NaN → 0). */
 const truncI64 = (x: number) => (x !== x ? 0 : Math.trunc(x));
 
+/** Vertices are held field by field (dense tiles have millions): vertex `i` is at (`x[i]`, `y[i]`),
+ * with the extrude vector and offset normal `ext[4i .. 4i + 4]`, quantized like the byte attributes
+ * (`quantize`), `round` and `up` in `flags[i]` (bits 0, 1), `linesofar`, and the gradient texture
+ * coordinates: `uvX` (progress within the clip) and `split` (its row, 1-based). */
 class Builder {
-    vertices: Vertex[] = [];
+    x: number[] = [];
+    y: number[] = [];
+    ext: number[] = [];
+    flags: number[] = [];
+    linesofar: number[] = [];
+    uvX: number[] = [];
+    split: number[] = [];
     /** Index of each line's first vertex. */
     lineStarts: number[] = [];
     /** Triangles as vertex index triples, flattened. */
@@ -85,8 +82,14 @@ class Builder {
         const linesofar = truncI64(total * 0.5) * 2;
         const uvX = this.clip ? (this.scaledDistance - this.clip[0]) / (this.clip[1] - this.clip[0]) : 0;
         const split = this.clips.length;
-        this.vertices.push({pos: p, extrude: [quantize(ex), quantize(ey)], offset: [quantize(ox), quantize(oy)], round, up, linesofar, uvX, split});
-        const e = this.vertices.length - 1;
+        this.x.push(p[0]);
+        this.y.push(p[1]);
+        this.ext.push(quantize(ex), quantize(ey), quantize(ox), quantize(oy));
+        this.flags.push((round ? 1 : 0) | (up ? 2 : 0));
+        this.linesofar.push(linesofar);
+        this.uvX.push(uvX);
+        this.split.push(split);
+        const e = this.x.length - 1;
         if (this.e1 !== undefined && this.e2 !== undefined) this.triangles.push(this.e1, e, this.e2);
         if (up) this.e2 = e;
         else this.e1 = e;
@@ -120,7 +123,7 @@ class Builder {
     }
 
     addLine(vertices: P[], isPolygon: boolean, join: string, cap: string, miterLimit: number, roundLimit: number, overscaling: number): void {
-        this.lineStarts.push(this.vertices.length);
+        this.lineStarts.push(this.x.length);
         this.distance = 0;
         this.scaledDistance = 0;
         this.totalDistance = 0;
@@ -580,13 +583,14 @@ function drawFeature(
     const starts: number[] = [];
     const pointOf: number[] = [];
     let ls = 0;
-    const screen: P[] = b.vertices.map((v, i): P => {
-        const normalY = v.up ? 1 : -1;
-        const w = toWorld(v.pos);
-        const ex = v.extrude[0] / EXTRUDE_SCALE;
-        const ey = v.extrude[1] / EXTRUDE_SCALE;
-        const nx = v.offset[0] / EXTRUDE_SCALE;
-        const ny = v.offset[1] / EXTRUDE_SCALE;
+    const screen: P[] = b.x.map((_, i): P => {
+        const pos: P = [b.x[i], b.y[i]];
+        const normalY = b.flags[i] & 2 ? 1 : -1;
+        const w = toWorld(pos);
+        const ex = b.ext[4 * i] / EXTRUDE_SCALE;
+        const ey = b.ext[4 * i + 1] / EXTRUDE_SCALE;
+        const nx = b.ext[4 * i + 2] / EXTRUDE_SCALE;
+        const ny = b.ext[4 * i + 3] / EXTRUDE_SCALE;
         let ox = offset * nx * normalY + outset * ex;
         let oy = offset * ny * normalY + outset * ey;
         if (!rotations) return ctx.transform.worldToScreen([w[0] + ox + tr[0], w[1] + oy + tr[1]]);
@@ -599,10 +603,10 @@ function drawFeature(
             lineStart = true;
         }
         let fr: {pos: P; screen: P; rot: [number, number]};
-        if (frame && eq(frame.pos, v.pos) && !lineStart) {
+        if (frame && eq(frame.pos, pos) && !lineStart) {
             fr = frame;
         } else {
-            fr = {pos: v.pos, screen: ctx.transform.worldToScreen(w), rot: rotations.at(v.pos)};
+            fr = {pos, screen: ctx.transform.worldToScreen(w), rot: rotations.at(pos)};
             frame = fr;
             const last = points[points.length - 1];
             let d: number;
@@ -612,7 +616,7 @@ function drawFeature(
                 starts.push(points.length);
                 d = 0;
             }
-            points.push({pos: v.pos, screen: fr.screen, d});
+            points.push({pos, screen: fr.screen, d});
         }
         pointOf.push(points.length - 1);
         const [sin, cos] = fr.rot;
@@ -682,11 +686,10 @@ function drawFeature(
             const hi = Math.max(kk[0], kk[1], kk[2]);
             if (hi > lo && broken[lo]) continue;
         }
-        split = b.vertices[t[0]].split;
+        split = b.split[t[0]];
         const vary = t.map((i) => {
-            const v = b.vertices[i];
-            const x = along ? along[pointOf[i]] : v.linesofar * scaleX;
-            return [v.round ? 1 : 0, v.up ? 1 : -1, x, v.uvX];
+            const x = along ? along[pointOf[i]] : b.linesofar[i] * scaleX;
+            return [b.flags[i] & 1, b.flags[i] & 2 ? 1 : -1, x, b.uvX[i]];
         });
         const tri = [screen[t[0]], screen[t[1]], screen[t[2]]];
         if (plain) {
