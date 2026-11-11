@@ -189,7 +189,7 @@ async function applyStyle(): Promise<boolean> {
   ready = false;
   initMs = undefined;
   resetStats();
-  status('Initializing style and WASM…');
+  status('Initializing style…');
   const started = performance.now();
   await tileWorker.init(style);
   if (generation !== styleGeneration) return false;
