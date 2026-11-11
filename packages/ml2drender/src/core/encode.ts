@@ -38,28 +38,47 @@ export function encodePng(rgba: Uint8Array, width: number, height: number): Uint
     // sum of absolute (signed) residuals.
     const raw = new Uint8Array((stride + 1) * height);
     const cand = Array.from({length: 5}, () => new Uint8Array(stride));
+    const [c0, c1, c2, c3, c4] = cand;
+    const sums = [0, 0, 0, 0, 0];
+    // |v| as a signed byte.
+    const mag = (v: number) => (v < 128 ? v : 256 - v);
     for (let y = 0; y < height; y++) {
         const r = y * stride;
         const p = r - stride;
-        let best = 0;
-        let bestSum = Infinity;
-        for (let f = 0; f < 5; f++) {
-            const out = cand[f];
-            let sum = 0;
-            for (let i = 0; i < stride; i++) {
-                const x = rgba[r + i];
-                const a = i >= 4 ? rgba[r + i - 4] : 0;
-                const b = y > 0 ? rgba[p + i] : 0;
-                const c = y > 0 && i >= 4 ? rgba[p + i - 4] : 0;
-                const v = (x - (f === 0 ? 0 : f === 1 ? a : f === 2 ? b : f === 3 ? (a + b) >> 1 : paeth(a, b, c))) & 0xff;
-                out[i] = v;
-                sum += v < 128 ? v : 256 - v;
-            }
-            if (sum < bestSum) {
-                bestSum = sum;
-                best = f;
-            }
+        let s0 = 0;
+        let s1 = 0;
+        let s2 = 0;
+        let s3 = 0;
+        let s4 = 0;
+        // All five filters in one pass.
+        for (let i = 0; i < stride; i++) {
+            const x = rgba[r + i];
+            const a = i >= 4 ? rgba[r + i - 4] : 0;
+            const b = y > 0 ? rgba[p + i] : 0;
+            const c = y > 0 && i >= 4 ? rgba[p + i - 4] : 0;
+            const v1 = (x - a) & 0xff;
+            const v2 = (x - b) & 0xff;
+            const v3 = (x - ((a + b) >> 1)) & 0xff;
+            const v4 = (x - paeth(a, b, c)) & 0xff;
+            c0[i] = x;
+            c1[i] = v1;
+            c2[i] = v2;
+            c3[i] = v3;
+            c4[i] = v4;
+            s0 += mag(x);
+            s1 += mag(v1);
+            s2 += mag(v2);
+            s3 += mag(v3);
+            s4 += mag(v4);
         }
+        sums[0] = s0;
+        sums[1] = s1;
+        sums[2] = s2;
+        sums[3] = s3;
+        sums[4] = s4;
+        // The first filter with the smallest sum.
+        let best = 0;
+        for (let f = 1; f < 5; f++) if (sums[f] < sums[best]) best = f;
         raw[y * (stride + 1)] = best;
         raw.set(cand[best], y * (stride + 1) + 1);
     }
