@@ -1,5 +1,5 @@
 import type { FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
-import { loadProjection, loadProjectionFactory, MapRenderer, type FillExtrusionLayer, type InitOptions, type Projection, type StyleLayer } from '../src/index';
+import { loadProjection, loadProjectionFactory, MapRenderer, projectedStyle, type FillExtrusionLayer, type InitOptions, type Projection, type StyleLayer } from '../src/index';
 import wasm from 'ml2drender/renderer.wasm';
 
 async function pngResponse() {
@@ -18,10 +18,15 @@ async function projectedPng(renderer: MapRenderer): Promise<Uint8Array<ArrayBuff
 async function projectedMvt(renderer: MapRenderer): Promise<Response> {
   // A tile of the grid registered with GL JS's `addProjection({ tileMatrixSet })`.
   const tileMatrixSet = { origin: [-2000000, 6000000] as [number, number], extentAtZoom0: 4000000 };
-  const mvt = await renderer.renderProjectedMvt({ projjson: utm, tileMatrixSet, z: 3, x: 4, y: 2, source: 'openmaptiles' });
-  // @ts-expect-error A vector tile is addressed by its tile index, not a box.
-  await renderer.renderProjectedMvt({ projjson: utm, bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512, source: 'openmaptiles' });
+  const mvt = await renderer.renderProjectedSource({ projjson: utm, tileMatrixSet, z: 3, x: 4, y: 2, source: 'openmaptiles' });
+  // @ts-expect-error A source's tile is addressed by its tile index, not a box.
+  await renderer.renderProjectedSource({ projjson: utm, bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512, source: 'openmaptiles' });
   return new Response(mvt, { headers: { 'Content-Type': 'application/vnd.mapbox-vector-tile' } });
+}
+
+function glStyle(style: StyleSpecification): StyleSpecification {
+  // The style for GL JS, from tiles a Worker serves with `renderProjectedSource`.
+  return projectedStyle(style, { projection: 'EPSG:32654', tiles: (source) => `https://example.com/${source}/{z}/{x}/{y}` });
 }
 
 async function mercatorPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>[]> {

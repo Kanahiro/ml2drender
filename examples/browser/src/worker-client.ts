@@ -3,7 +3,7 @@ import type { StyleSpecification } from 'maplibre-gl';
 import type { WorkerRequest, WorkerResponse } from './render-worker';
 
 type TileImage = Pick<Extract<WorkerResponse, { kind: 'image' }>, 'bitmap' | 'renderMs'>;
-type TileMvt = Pick<Extract<WorkerResponse, { kind: 'mvt' }>, 'data' | 'renderMs'>;
+type SourceTile = Pick<Extract<WorkerResponse, { kind: 'source' }>, 'data' | 'renderMs'>;
 
 // Leave a core for the main thread and MapLibre's own workers.
 const WORKER_COUNT = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
@@ -23,7 +23,7 @@ export class TileWorker {
   }));
   private generation = 0;
   private nextId = 0;
-  private readonly pending = new Map<number, { slot: Slot; resolve: (tile: TileImage | TileMvt) => void; reject: (error: Error) => void }>();
+  private readonly pending = new Map<number, { slot: Slot; resolve: (tile: TileImage | SourceTile) => void; reject: (error: Error) => void }>();
 
   constructor() {
     for (const slot of this.slots) {
@@ -40,7 +40,7 @@ export class TileWorker {
           const request = this.settle(response.id);
           if (request) request.resolve({ bitmap: response.bitmap, renderMs: response.renderMs });
           else response.bitmap.close();
-        } else if (response.kind === 'mvt') {
+        } else if (response.kind === 'source') {
           this.settle(response.id)?.resolve({ data: response.data, renderMs: response.renderMs });
         } else if (response.id === undefined) {
           slot.initializing?.reject(new Error(response.message));
@@ -90,13 +90,13 @@ export class TileWorker {
     return this.request({ kind: 'render', view }) as Promise<TileImage>;
   }
 
-  /** A vector tile of a source of the style (see `MapRenderer.renderProjectedMvt`). */
-  renderMvt(tile: ProjectedTile): Promise<TileMvt> {
-    return this.request({ kind: 'mvt', tile }) as Promise<TileMvt>;
+  /** A tile of a source of the style, reprojected (see `MapRenderer.renderProjectedSource`). */
+  renderSource(tile: ProjectedTile): Promise<SourceTile> {
+    return this.request({ kind: 'source', tile }) as Promise<SourceTile>;
   }
 
   /** Posts to the least loaded worker. */
-  private request(body: { kind: 'render'; view: TileView | ProjectedView } | { kind: 'mvt'; tile: ProjectedTile }): Promise<TileImage | TileMvt> {
+  private request(body: { kind: 'render'; view: TileView | ProjectedView } | { kind: 'source'; tile: ProjectedTile }): Promise<TileImage | SourceTile> {
     const id = ++this.nextId;
     const slot = this.slots.reduce((least, candidate) => candidate.load < least.load ? candidate : least);
     slot.load++;

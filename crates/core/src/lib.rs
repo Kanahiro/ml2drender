@@ -202,7 +202,7 @@ pub struct Renderer {
     projected: Option<(reproject::ProjectedView, Rc<reproject::Warp>)>,
     /// Whether fill and line buckets are kept for later renders (see `set_keep_buckets`).
     keep_buckets: bool,
-    /// Set by `set_export_source`: the source `needs` and `export_mvt` are about.
+    /// Set by `set_export_source`: the source `needs` and `export_tile` are about.
     export: Option<String>,
 }
 
@@ -461,13 +461,13 @@ impl Renderer {
         Ok(())
     }
 
-    /// With a source, `needs()` asks for the tiles (only) that `export_mvt` takes from it; with
-    /// `None`, for what `render` draws. The source's tiles keep all their layers from then on.
+    /// With a source, `needs()` asks for the data (only) that `export_tile` takes from it; with
+    /// `None`, for what `render` draws. A vector source's tiles keep all their layers from then on.
     pub fn set_export_source(&mut self, source: Option<&str>) -> Result<(), Error> {
         if let Some(id) = source {
-            let src = self.sources.get_mut(id).filter(|s| matches!(s.ty.as_str(), "vector" | "geojson"));
-            let src = src.ok_or_else(|| Error::Unsupported(format!("no vector or geojson source {id:?}")))?;
-            if !src.all_layers {
+            let src = self.sources.get_mut(id).filter(|s| matches!(s.ty.as_str(), "vector" | "geojson" | "raster" | "raster-dem" | "image"));
+            let src = src.ok_or_else(|| Error::Unsupported(format!("no source {id:?} to export")))?;
+            if src.ty == "vector" && !src.all_layers {
                 // Decoded with the style's layers only.
                 src.all_layers = true;
                 src.tiles.clear();
@@ -479,22 +479,86 @@ impl Renderer {
         Ok(())
     }
 
-    /// The export source (`set_export_source`) in the projected view as a vector tile (MVT) of the
-    /// output box, extent 4096: its layers as they are (a GeoJSON source's named after it),
-    /// projected. Keeps the cached tiles of tickets `oldest` and later, like `render_retaining`.
-    pub fn export_mvt(&mut self, oldest: u64) -> Result<Vec<u8>, Error> {
-        const EXTENT: f64 = 4096.0;
-        const BUFFER: f64 = 128.0;
+    /// The export source (`set_export_source`) in the projected view, as the source type of the same
+    /// data on the output's grid takes it:
+    /// - vector / GeoJSON: a vector tile (MVT, extent 4096) of its layers as they are (a GeoJSON
+    ///   source's named after it), projected;
+    /// - raster / image: a PNG of the output's size, the source drawn by a raster layer with default
+    ///   paint;
+    /// - raster-dem: a PNG of the output's size, its elevations (interpolated bilinearly) in the
+    ///   `terrarium` encoding.
+    ///
+    /// Keeps the cached tiles of tickets `oldest` and later, like `render_retaining`.
+    pub fn export_tile(&mut self, oldest: u64) -> Result<Vec<u8>, Error> {
         let Some(id) = self.export.clone() else { return Err(Error::Unsupported("no export source set".into())) };
-        let Some((_, warp)) = self.projected.clone() else { return Err(Error::Unsupported("MVT export needs a projected view".into())) };
+        let Some((_, warp)) = self.projected.clone() else { return Err(Error::Unsupported("export needs a projected view".into())) };
         if !self.needs().is_empty() {
             return Err(Error::NotReady);
         }
-        if warp.is_empty() {
-            return Ok(vec![]);
-        }
         self.evict(oldest.min(self.clock));
         let src = &self.sources[&id];
+        let (w, h) = (warp.size[0] - 2 * warp.margin, warp.size[1] - 2 * warp.margin);
+        match src.ty.as_str() {
+            "vector" | "geojson" if warp.is_empty() => Ok(vec![]),
+            "vector" | "geojson" => Ok(self.export_vector(&id, src, &warp)),
+            _ if warp.is_empty() => encode_png(&vec![0; w * h * 4], w as u32, h as u32),
+            "raster-dem" => {
+                let rgba = crop(self.export_dem(src, &warp), warp.size[0], warp.margin);
+                encode_png(&rgba, w as u32, h as u32)
+            }
+            _ => {
+                // The Mercator picture of the source, warped.
+                let layer = style::Style::parse(serde_json::json!({"layers": [{"id": id, "type": "raster", "source": id}]})).layers.remove(0);
+                let t = &self.transform;
+                let (mw, mh) = ((t.width * t.pixel_ratio).round() as usize, (t.height * t.pixel_ratio).round() as usize);
+                let mut picture = render::raster::Target::new(mw, mh);
+                self.draw_raster(&mut picture, &layer, &self.ctx(), src, mw, mh);
+                let mut out = render::raster::Target::new(warp.size[0], warp.size[1]);
+                warp.composite(&mut picture, t, &mut out);
+                encode_png(&crop(out.into_unpremultiplied(), warp.size[0], warp.margin), w as u32, h as u32)
+            }
+        }
+    }
+
+    /// Terrarium-encoded RGBA of the raster-dem source `src` at each pixel of `warp` (margins
+    /// included); elevation 0 off the map.
+    fn export_dem(&self, src: &Source, warp: &reproject::Warp) -> Vec<u8> {
+        let resolved = self.resolve(src).0;
+        let dems = self.backfilled_dems(src, &resolved);
+        // Highest zoom first, for the fallback parents of missing tiles.
+        let mut order: Vec<usize> = (0..resolved.len()).filter(|&i| dems[i].is_some()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(resolved[i].0.canonical.z));
+        let mut rgba = Vec::with_capacity(warp.size[0] * warp.size[1] * 4);
+        let mut last = 0;
+        for m in warp.pixel_world() {
+            let mut elevation = 0.0;
+            if m[0].is_finite() {
+                // Usually the tile of the previous pixel.
+                let found = std::iter::once(last).chain(0..order.len()).filter(|&k| k < order.len()).find_map(|k| {
+                    let t = resolved[order[k]].0;
+                    let n = (1u64 << t.canonical.z) as f64;
+                    let (x, y) = ((m[0] * n - t.wrap as f64 * n - t.canonical.x as f64), (m[1] * n - t.canonical.y as f64));
+                    ((0.0..1.0).contains(&x) && (0.0..1.0).contains(&y)).then_some((k, x, y))
+                });
+                if let Some((k, x, y)) = found {
+                    last = k;
+                    let dem = dems[order[k]].as_ref().unwrap();
+                    let d = dem.dim() as f64;
+                    elevation = dem.elevation_at(x * d, y * d);
+                }
+            }
+            // Terrarium: (r * 256 + g + b / 256) - 32768.
+            let v = (elevation + 32768.0).clamp(0.0, 65535.0 + 255.0 / 256.0);
+            rgba.extend_from_slice(&[(v / 256.0).floor() as u8, (v % 256.0).floor() as u8, ((v.fract()) * 256.0).floor() as u8, 255]);
+        }
+        rgba
+    }
+
+    /// The vector tile of a vector or GeoJSON source `src` (see `export_tile`).
+    fn export_vector(&self, id: &str, src: &Source, warp: &reproject::Warp) -> Vec<u8> {
+        const EXTENT: f64 = 4096.0;
+        const BUFFER: f64 = 128.0;
+        let id = id.to_string();
         let mut layers: Vec<mvt::Layer> = Vec::new();
         // The pieces of polygons the source tiles cut, by layer and properties (ids need not be the
         // same in each tile), with the longest segment of their tiles and their id if they share it.
@@ -564,7 +628,7 @@ impl Renderer {
                 }
             }
         }
-        Ok(mvt::encode(&layers))
+        mvt::encode(&layers)
     }
 
     /// Drops the least recently needed tiles of each source beyond `MAX_CACHED_TILES`, with
@@ -1202,19 +1266,21 @@ impl Renderer {
 
     /// Hillshade / color-relief: each drawn DEM tile takes its 2px border from the drawn tiles
     /// around it (MapLibre's `backfillDEM` over the renderable tiles), then is drawn.
-    fn draw_dem_layer(&self, target: &mut render::raster::Target, layer: &style::Layer, ctx: &render::Ctx, src: &Source, w: usize, h: usize) {
-        let hillshade = (layer.ty == "hillshade").then(|| render::dem::HillshadeParams::new(layer, ctx));
-        let ramp = (layer.ty == "color-relief").then(|| render::dem::ColorRamp::new(layer, ctx));
-        let resolved = self.resolve(src).0;
+    /// The DEMs of the `resolved` tiles of `src`, with their borders filled from their neighbors
+    /// (`backfillDEM`).
+    fn backfilled_dems(&self, src: &Source, resolved: &[(RenderTile, TileId)]) -> Vec<Option<render::dem::Dem>> {
         let tiles: Vec<RenderTile> = resolved.iter().map(|r| r.0).collect();
-        // The resolved tiles of a source are fixed for one render, so the source id keys them.
-        let dems = ctx.dem_tiles(layer.source.as_deref().unwrap_or_default(), || {
-            let raw: Vec<Option<&Rc<render::dem::Dem>>> =
-                resolved.iter().map(|(_, id)| match src.tiles.get(id) {
-                    Some(Some(TileData::Dem(d))) => Some(d),
-                    _ => None,
-                }).collect();
-            tiles.iter().enumerate().map(|(i, t)| {
+        let raw: Vec<Option<&Rc<render::dem::Dem>>> = resolved
+            .iter()
+            .map(|(_, id)| match src.tiles.get(id) {
+                Some(Some(TileData::Dem(d))) => Some(d),
+                _ => None,
+            })
+            .collect();
+        tiles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
                 let mut dem = (**raw[i]?).clone();
                 let n = 1i64 << t.canonical.z;
                 let world_x = |t: &RenderTile| t.wrap as i64 * n + t.canonical.x as i64;
@@ -1225,8 +1291,19 @@ impl Renderer {
                         dem.backfill(b, dx as isize, dy as isize);
                     }
                 }
-                Some(render::dem::DemTile::new(dem))
-            }).collect()
+                Some(dem)
+            })
+            .collect()
+    }
+
+    fn draw_dem_layer(&self, target: &mut render::raster::Target, layer: &style::Layer, ctx: &render::Ctx, src: &Source, w: usize, h: usize) {
+        let hillshade = (layer.ty == "hillshade").then(|| render::dem::HillshadeParams::new(layer, ctx));
+        let ramp = (layer.ty == "color-relief").then(|| render::dem::ColorRamp::new(layer, ctx));
+        let resolved = self.resolve(src).0;
+        let tiles: Vec<RenderTile> = resolved.iter().map(|r| r.0).collect();
+        // The resolved tiles of a source are fixed for one render, so the source id keys them.
+        let dems = ctx.dem_tiles(layer.source.as_deref().unwrap_or_default(), || {
+            self.backfilled_dems(src, &resolved).into_iter().map(|d| d.map(render::dem::DemTile::new)).collect()
         });
         let mixed = tiles.iter().any(|t| t.canonical.z != tiles[0].canonical.z);
         let masks = if mixed { Some(ctx.masks(&tiles, w, h)) } else { None };
@@ -1632,7 +1709,7 @@ mod tests {
 
         r.set_export_source(Some("g")).unwrap();
         assert!(r.needs().is_empty());
-        let layers = mvt::decode(&r.export_mvt(0).unwrap(), |_| true).unwrap();
+        let layers = mvt::decode(&r.export_tile(0).unwrap(), |_| true).unwrap();
         assert_eq!(layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["g"]);
         let f = &layers[0].features[0];
         assert!(matches!(f.properties.get("k"), Some(Value::String(s)) if &**s == "square"));
@@ -1667,7 +1744,7 @@ mod tests {
             r.provide(&n.url, Some(&tile));
         }
         assert!(r.needs().is_empty());
-        let layers = mvt::decode(&r.export_mvt(0).unwrap(), |_| true).unwrap();
+        let layers = mvt::decode(&r.export_tile(0).unwrap(), |_| true).unwrap();
         let get = |name: &str| layers.iter().find(|l| l.name == name).unwrap();
         assert!(get("other").features.iter().flat_map(|f| f.geometry.iter().flatten()).all(|&p| near(p, 5.0, 5.0)));
         // Cut at the source's tile seams; together the line still runs from 1° to 9°.
@@ -1692,6 +1769,61 @@ mod tests {
     }
 
     #[test]
+    fn exports_rasters_images_and_dems_on_the_output_grid() {
+        // Longlat 0°–10° on 100 px: pixel x is at longitude (x + 0.5) / 10.
+        let view = reproject::ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], width: 100, height: 100, pixel_ratio: 1.0, margin: 0 };
+        let style = r#"{"version":8,"sources":{
+            "r":{"type":"raster","tiles":["r/{z}/{x}/{y}"],"tileSize":256},
+            "i":{"type":"image","url":"image.png","coordinates":[[2,8],[8,8],[8,2],[2,2]]},
+            "d":{"type":"raster-dem","tiles":["d/{z}/{x}/{y}"],"tileSize":256}},"layers":[]}"#;
+        let mut r = Renderer::new(style, View::tile(0, 0, 0, 512)).unwrap();
+        r.set_projected_view(&view).unwrap();
+        let red = encode_png(&[255, 0, 0, 255].repeat(256 * 256), 256, 256).unwrap();
+        let mut export = |source: &str| {
+            r.set_export_source(Some(source)).unwrap();
+            for n in r.needs() {
+                let tile = if n.url.starts_with("d/") {
+                    // Mapbox-encoded DEM, 100 m per degree of longitude (≥ 0 here).
+                    let zxy: Vec<f64> = n.url[2..].split('/').map(|v| v.parse().unwrap()).collect();
+                    let mut px = Vec::with_capacity(256 * 256 * 4);
+                    for _ in 0..256 {
+                        for x in 0..256 {
+                            let lng = (zxy[1] + (x as f64 + 0.5) / 256.0) / 2f64.powf(zxy[0]) * 360.0 - 180.0;
+                            let v = ((lng * 100.0 + 10000.0) * 10.0).round() as u32;
+                            px.extend_from_slice(&[(v >> 16) as u8, (v >> 8) as u8, v as u8, 255]);
+                        }
+                    }
+                    encode_png(&px, 256, 256).unwrap()
+                } else {
+                    red.clone()
+                };
+                r.provide(&n.url, Some(&tile));
+            }
+            assert!(r.needs().is_empty());
+            let img = image::Image::decode(&r.export_tile(0).unwrap()).unwrap();
+            assert_eq!((img.w, img.h), (100, 100));
+            img.data
+        };
+        let at = |data: &[u8], x: usize, y: usize| -> [u8; 4] { data[(y * 100 + x) * 4..][..4].try_into().unwrap() };
+        let raster = export("r");
+        assert!(raster.chunks(4).all(|p| p == [255, 0, 0, 255]));
+        // The image covers 2°–8°.
+        let image = export("i");
+        assert_eq!(at(&image, 50, 50), [255, 0, 0, 255]);
+        assert_eq!(at(&image, 15, 50)[3], 0);
+        assert_eq!(at(&image, 25, 50), [255, 0, 0, 255]);
+        assert_eq!(at(&image, 50, 90)[3], 0);
+        // Terrarium elevations of each pixel's longitude.
+        let dem = export("d");
+        for (x, y) in [(5, 5), (37, 60), (94, 98)] {
+            let p = at(&dem, x, y);
+            let elevation = p[0] as f64 * 256.0 + p[1] as f64 + p[2] as f64 / 256.0 - 32768.0;
+            let lng = (x as f64 + 0.5) / 10.0;
+            assert!((elevation - lng * 100.0).abs() < 1.0, "({x}, {y}): {elevation} vs {}", lng * 100.0);
+        }
+    }
+
+    #[test]
     fn exports_follow_the_edge_of_a_geostationary_view() {
         let polygon = |w: f64, s: f64, e: f64, n: f64| format!(r#"{{"type":"geojson","data":{{"type":"Polygon","coordinates":[[[{w},{s}],[{e},{s}],[{e},{n}],[{w},{n}],[{w},{s}]]]}}}}"#);
         let style = format!(
@@ -1706,7 +1838,7 @@ mod tests {
         let mut export = |source: &str| {
             renderer.set_export_source(Some(source)).unwrap();
             assert!(renderer.needs().is_empty());
-            let layers = mvt::decode(&renderer.export_mvt(0).unwrap(), |_| true).unwrap();
+            let layers = mvt::decode(&renderer.export_tile(0).unwrap(), |_| true).unwrap();
             layers.into_iter().flat_map(|l| l.features).flat_map(|f| f.geometry).collect::<Vec<_>>()
         };
         let dist = |p: [i32; 2]| ((p[0] as f64 - 2048.0).powi(2) + (p[1] as f64 - 2048.0).powi(2)).sqrt();

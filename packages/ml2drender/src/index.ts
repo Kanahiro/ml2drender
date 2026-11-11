@@ -1,4 +1,4 @@
-import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification, SourceSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 
 /** A Web Mercator camera. */
 export interface View {
@@ -69,7 +69,7 @@ export interface TileMatrixSet {
   extentAtZoom0: number;
 }
 
-/** A tile of a projected CRS's grid to export as a vector tile (see `renderProjectedMvt`). */
+/** A tile of a projected CRS's grid to render a source of the style in (see `renderProjectedSource`). */
 export interface ProjectedTile {
   /** PROJJSON, as in `ProjectedView`. */
   projjson: object;
@@ -77,7 +77,7 @@ export interface ProjectedTile {
   z: number;
   x: number;
   y: number;
-  /** A vector or GeoJSON source of the style. */
+  /** A vector, GeoJSON, raster, raster-dem or image source of the style. */
   source: string;
 }
 
@@ -140,7 +140,7 @@ interface WasmExports {
   renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
   renderer_render(handle: number, oldest: number): number;
   renderer_set_export_source(handle: number, ptr: number, len: number): number;
-  renderer_export_mvt(handle: number, oldest: number): number;
+  renderer_export_tile(handle: number, oldest: number): number;
   encode_png(ptr: number, len: number, width: number, height: number): number;
   encode_webp(ptr: number, len: number, width: number, height: number): number;
   renderer_free(handle: number): void;
@@ -397,6 +397,29 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
   return encoder.encode(JSON.stringify({ ...style, layers }));
 }
 
+/**
+ * `style` for MapLibre GL JS to draw in the CRS registered as `projection` (`addProjection`) from tiles of
+ * `renderProjectedSource`, whose URL templates (`{z}/{x}/{y}` of the CRS's tile matrix set) `tiles` gives for each
+ * source: vector and GeoJSON sources become vector sources (layers of a GeoJSON source read the layer named after
+ * it), raster and image sources raster sources, raster-dem sources terrarium ones, all of 512 px tiles. Layers of
+ * other sources (video) are left out.
+ */
+export function projectedStyle(style: StyleSpecification, { projection, tiles }: { projection: string; tiles: (source: string) => string }): StyleSpecification {
+  const sources: Record<string, SourceSpecification> = {};
+  for (const [id, source] of Object.entries(style.sources)) {
+    const common = { tiles: [tiles(id)], ...('attribution' in source && source.attribution ? { attribution: source.attribution } : {}) };
+    if (source.type === 'vector' || source.type === 'geojson') sources[id] = { type: 'vector', ...common };
+    else if (source.type === 'raster' || source.type === 'image') sources[id] = { type: 'raster', tileSize: 512, ...common };
+    else if (source.type === 'raster-dem') sources[id] = { type: 'raster-dem', tileSize: 512, encoding: 'terrarium', ...common };
+  }
+  const layers = style.layers.flatMap((layer): LayerSpecification[] => {
+    if (!('source' in layer) || typeof layer.source !== 'string') return [layer];
+    if (!sources[layer.source]) return [];
+    return [style.sources[layer.source].type === 'geojson' ? { ...layer, 'source-layer': layer.source } as LayerSpecification : layer];
+  });
+  return { ...style, projection: { type: projection }, sources, layers };
+}
+
 /** Per instance: the end of the last exclusive render queued (see `InitOptions.exclusive`). */
 const exclusiveRenders = new WeakMap<WasmExports, Promise<void>>();
 
@@ -454,13 +477,16 @@ export class MapRenderer {
   }
 
   /**
-   * Fetch the tiles of `tile.source` and return them as tile `z/x/y` of `tile.tileMatrixSet` in the CRS
-   * `tile.projjson`: a vector tile (MVT, extent 4096), for MapLibre GL JS to draw in that CRS (`addProjection`).
-   * Layers, features and properties are kept as they are (a GeoJSON source's layer is named after the source);
-   * geometry is clipped to each source tile, then projected. Source tiles are those of the tile drawn at 512 CSS
-   * pixels, the size of GL JS's vector tiles.
+   * Fetch the data of `tile.source` and return it reprojected as tile `z/x/y` of `tile.tileMatrixSet` in the CRS
+   * `tile.projjson`, for MapLibre GL JS to draw the style in that CRS (`addProjection`, see `projectedStyle`):
+   * - vector / GeoJSON: a vector tile (MVT, extent 4096). Layers, features and properties are kept as they are (a
+   *   GeoJSON source's layer is named after the source).
+   * - raster / image: a 512 px PNG of the source as a raster layer with default paint draws it.
+   * - raster-dem: a 512 px PNG of its elevations in the `terrarium` encoding.
+   *
+   * Source data is fetched at the zoom of the tile drawn at 512 CSS pixels.
    */
-  async renderProjectedMvt(tile: ProjectedTile): Promise<Uint8Array<ArrayBuffer>> {
+  async renderProjectedSource(tile: ProjectedTile): Promise<Uint8Array<ArrayBuffer>> {
     if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
     const { z, x, y, tileMatrixSet: { origin, extentAtZoom0 } } = tile;
     const n = 2 ** z;
@@ -472,7 +498,7 @@ export class MapRenderer {
     const s = extentAtZoom0 / n;
     const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
     const view = { projjson: tile.projjson, bbox: [minX, maxY - s, minX + s, maxY] as ProjectedView['bbox'], width: 512, height: 512 };
-    return this.run(...this.projected(view), encoder.encode(tile.source), this.wasm.renderer_export_mvt);
+    return this.run(...this.projected(view), encoder.encode(tile.source), this.wasm.renderer_export_tile);
   }
 
   /** The core arguments and `setView` of a projected view. */

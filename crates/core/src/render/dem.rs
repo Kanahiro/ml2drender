@@ -77,6 +77,29 @@ impl Dem {
         }
     }
 
+    /// Side in texels, without the border.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Elevation (meters) at a position in texels from the tile's top-left corner, interpolated
+    /// bilinearly between texel centers, across the border near the edges.
+    pub fn elevation_at(&self, x: f64, y: f64) -> f64 {
+        let u = self.unpack;
+        let at = |x: isize, y: isize| {
+            let p = self.data[self.idx(x, y)];
+            p[0] as f64 * u[0] as f64 + p[1] as f64 * u[1] as f64 + p[2] as f64 * u[2] as f64 - u[3] as f64
+        };
+        let max = self.dim as f64 + 1.0 - 1e-9;
+        let (tx, ty) = ((x - 0.5).clamp(-2.0, max - 1.0), (y - 0.5).clamp(-2.0, max - 1.0));
+        let (x0, y0) = (tx.floor(), ty.floor());
+        let (fx, fy) = (tx - x0, ty - y0);
+        let (x0, y0) = (x0 as isize, y0 as isize);
+        let top = at(x0, y0) * (1.0 - fx) + at(x0 + 1, y0) * fx;
+        let bottom = at(x0, y0 + 1) * (1.0 - fx) + at(x0 + 1, y0 + 1) * fx;
+        top * (1.0 - fy) + bottom * fy
+    }
+
     /// The `hillshadePrepare` pass: slopes as `(dx, dy)` unorm8, `(dim+2)²` texels.
     pub fn prepare(&self, zoom: f64) -> Texture {
         let size = self.dim + 2;

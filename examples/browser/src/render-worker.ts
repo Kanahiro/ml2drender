@@ -5,12 +5,12 @@ import type { StyleSpecification } from 'maplibre-gl';
 export type WorkerRequest =
   | { kind: 'init'; generation: number; style: StyleSpecification }
   | { kind: 'render'; generation: number; id: number; view: TileView | ProjectedView }
-  | { kind: 'mvt'; generation: number; id: number; tile: ProjectedTile };
+  | { kind: 'source'; generation: number; id: number; tile: ProjectedTile };
 
 export type WorkerResponse =
   | { kind: 'ready'; generation: number }
   | { kind: 'image'; generation: number; id: number; bitmap: ImageBitmap; renderMs: number }
-  | { kind: 'mvt'; generation: number; id: number; data: ArrayBuffer; renderMs: number }
+  | { kind: 'source'; generation: number; id: number; data: ArrayBuffer; renderMs: number }
   | { kind: 'error'; generation: number; id?: number; message: string };
 
 let generation = 0;
@@ -43,12 +43,12 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
       worker.postMessage({ kind: 'error', generation, id: request.id, message: String(error) } satisfies WorkerResponse);
     }
   };
-  if (request.kind === 'mvt') {
-    void active.renderProjectedMvt(request.tile)
-      .then((mvt) => {
+  if (request.kind === 'source') {
+    void active.renderProjectedSource(request.tile)
+      .then((tile) => {
         if (request.generation !== generation) return;
-        const data = mvt.slice().buffer;
-        worker.postMessage({ kind: 'mvt', generation, id: request.id, data, renderMs: performance.now() - started } satisfies WorkerResponse, [data]);
+        const data = tile.slice().buffer;
+        worker.postMessage({ kind: 'source', generation, id: request.id, data, renderMs: performance.now() - started } satisfies WorkerResponse, [data]);
       })
       .catch(failed);
     return;

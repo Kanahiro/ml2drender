@@ -84,7 +84,7 @@
     <pre id="log" role="alert"></pre>
   </aside>
   <div class="workspace">
-    <section class="card map-pane" aria-label="ml2drender output"><div class="section-heading"><h2>ml2drender</h2><div class="pane-controls"><select id="mode" aria-label="Tile type" title="Raster: ml2drender draws the map. Vector: ml2drender reprojects the style's vector and GeoJSON sources to vector tiles, and GL JS draws them with the style (other layers are left out); hover a feature for its properties."><option value="raster">Raster tiles</option><option value="vector">Vector tiles (MVT)</option></select><span id="crs-name">Web Mercator</span></div></div><div id="out"></div></section>
+    <section class="card map-pane" aria-label="ml2drender output"><div class="section-heading"><h2>ml2drender</h2><div class="pane-controls"><select id="mode" aria-label="Tile type" title="ml2drender: ml2drender draws the map. GL JS: ml2drender reprojects each source of the style (vector tiles, rasters, DEMs) onto the map's grid, and GL JS draws the style from them; hover a feature for its properties."><option value="raster">Drawn by ml2drender</option><option value="gl">Drawn by GL JS (reprojected sources)</option></select><span id="crs-name">Web Mercator</span></div></div><div id="out"></div></section>
     <section class="card stats" aria-labelledby="stats-heading">
       <div class="section-heading"><h2 id="stats-heading">Rendering stats</h2><button type="button" id="reset-stats">Reset stats</button></div>
       <dl>

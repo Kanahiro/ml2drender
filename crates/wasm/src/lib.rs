@@ -206,16 +206,16 @@ pub unsafe extern "C" fn renderer_set_export_source(r: *mut Renderer, ptr: *cons
     }
 }
 
-/// Returns 1 with a vector tile in the output buffer (see `Renderer::export_mvt`), or 0 with an
-/// error message.
+/// Returns 1 with the export source's tile in the output buffer (see `Renderer::export_tile`), or 0
+/// with an error message.
 ///
 /// # Safety
 /// `r` must be a live handle from `renderer_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn renderer_export_mvt(r: *mut Renderer, oldest: f64) -> u32 {
-    match unsafe { &mut *r }.export_mvt(oldest as u64) {
-        Ok(mvt) => {
-            set_out(mvt);
+pub unsafe extern "C" fn renderer_export_tile(r: *mut Renderer, oldest: f64) -> u32 {
+    match unsafe { &mut *r }.export_tile(oldest as u64) {
+        Ok(tile) => {
+            set_out(tile);
             1
         }
         Err(e) => {

@@ -1,9 +1,10 @@
-import { addProtocol, type GeoJSONSource, type GeoJSONSourceSpecification, importScriptInWorkers, type LayerSpecification, LngLat, Map as MapLibreMap, Popup, setWorkerUrl, type SourceSpecification, type StyleSpecification } from 'maplibre-gl';
+import { addProtocol, type GeoJSONSource, type GeoJSONSourceSpecification, importScriptInWorkers, LngLat, Map as MapLibreMap, Popup, setWorkerUrl, type StyleSpecification } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import projectionHandlerUrl from './gl-projection-handler.ts?worker&url';
 import projjsonPresets from './projjson-presets.json';
 import { clipToCrs, type Crs, registerProjJson, zoomOffset } from './projections';
+import { projectedStyle } from 'ml2drender';
 import { stylePresets } from './styles';
 import { TileWorker } from './worker-client';
 
@@ -78,7 +79,7 @@ function resetStats() {
 }
 document.getElementById('reset-stats')!.onclick = resetStats;
 
-/** A tile request of the current style and revision: `ml2drender[-mvt]://<generation>/z/x/y?revision=…`. */
+/** A tile request of the current style and revision: `ml2drender[-source]://<generation>/z/x/y?revision=…`. */
 function tileRequest(requestUrl: string, signal: AbortSignal) {
   const url = new URL(requestUrl);
   const generation = Number(url.hostname);
@@ -124,12 +125,12 @@ addProtocol('ml2drender', async (request, controller) => {
   }
 });
 
-// Vector mode: a source of the style as vector tiles on the map's grid, drawn by GL JS.
-addProtocol('ml2drender-mvt', async (request, controller) => {
+// GL JS mode: a source of the style reprojected onto the map's grid (see `projectedStyle`).
+addProtocol('ml2drender-source', async (request, controller) => {
   const { url, z, x, y, checkActive } = tileRequest(request.url, controller.signal);
   const crs = projection ?? WEB_MERCATOR;
   const started = performance.now();
-  const { data, renderMs } = await tileWorker.renderMvt({
+  const { data, renderMs } = await tileWorker.renderSource({
     projjson: crs.definition,
     tileMatrixSet: { origin: crs.origin, extentAtZoom0: crs.extent },
     z, x, y,
@@ -189,40 +190,26 @@ map.on('mousemove', (event) => {
 });
 map.getCanvas().addEventListener('mouseleave', hideHover);
 
-/** The applied style for GL JS to draw from ml2drender's vector tiles, without the layers of other sources. */
-function vectorStyle(style: StyleSpecification, revision: string): Pick<StyleSpecification, 'sources' | 'layers' | 'glyphs' | 'sprite'> {
-  const sources: Record<string, SourceSpecification> = {};
-  for (const [id, source] of Object.entries(style.sources)) {
-    if (source.type !== 'vector' && source.type !== 'geojson') continue;
-    const tiles = [`ml2drender-mvt://${styleGeneration}/{z}/{x}/{y}?source=${encodeURIComponent(id)}&${revision}`];
-    sources[id] = { type: 'vector', tiles, maxzoom: 22, attribution: source.attribution };
-  }
-  const layers = style.layers.flatMap((layer): LayerSpecification[] => {
-    if (layer.type === 'background') return [layer];
-    const source = 'source' in layer && typeof layer.source === 'string' ? layer.source : undefined;
-    if (!source || !sources[source]) return [];
-    // A GeoJSON source's tile has one layer, named after the source.
-    return [style.sources[source].type === 'geojson' ? { ...layer, 'source-layer': source } as LayerSpecification : layer];
-  });
-  return { sources, layers, ...(style.glyphs && { glyphs: style.glyphs }), ...(style.sprite && { sprite: style.sprite }) };
-}
-
 /** Shows the rendered tiles of the applied style and projection again. */
 function redraw() {
   if (!ready) return;
   status('Rendering tiles…');
   // A new URL revision bypasses GL JS's tile cache on explicit redraw.
   const revision = `revision=${++tileRevision}${projection ? `&crs=${encodeURIComponent(projection.name)}` : ''}`;
-  const tiles: Pick<StyleSpecification, 'sources' | 'layers' | 'glyphs' | 'sprite'> = modeSelect.value === 'vector'
-    ? vectorStyle(appliedStyleSpec!, revision)
+  const crs = projection?.name ?? 'mercator';
+  const tiles: StyleSpecification = modeSelect.value === 'gl'
+    ? projectedStyle(appliedStyleSpec!, {
+      projection: crs,
+      tiles: (source) => `ml2drender-source://${styleGeneration}/{z}/{x}/{y}?source=${encodeURIComponent(source)}&${revision}`,
+    })
     : {
+      version: 8,
+      projection: { type: crs },
       sources: { rendered: { type: 'raster', tiles: [`ml2drender://${styleGeneration}/{z}/{x}/{y}?${revision}`], tileSize: TILE_SIZE, maxzoom: 23 } },
       layers: [{ id: 'rendered', type: 'raster', source: 'rendered', paint: { 'raster-fade-duration': 0 } }],
     };
   hoverLayers = [...checkLayers, ...tiles.layers.filter((l) => l.type !== 'background' && l.id !== 'rendered').map((l) => l.id)];
   map.setStyle({
-    version: 8,
-    projection: { type: projection?.name ?? 'mercator' },
     ...tiles,
     sources: {
       ...tiles.sources,
