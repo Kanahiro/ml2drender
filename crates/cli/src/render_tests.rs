@@ -40,8 +40,8 @@ pub fn run(root: &Path, filter: Option<&str>) {
         let layer_types: BTreeSet<&str> =
             style["layers"].as_array().into_iter().flatten().filter_map(|l| l["type"].as_str()).collect();
 
-        let outcome = match exclusion(&exclusions, &style) {
-            Some(reason) => Outcome::Skip(reason),
+        let (outcome, hash) = match exclusion(&exclusions, &style) {
+            Some(reason) => (Outcome::Skip(reason), None),
             None => run_one(dir, &style, &assets, &out_dir.join(&id)),
         };
         let (status, detail) = match &outcome {
@@ -49,7 +49,7 @@ pub fn run(root: &Path, filter: Option<&str>) {
             Outcome::Fail(e) => ("fail", json!(e)),
             Outcome::Skip(r) => ("skip", json!(r)),
         };
-        results.push(json!({"id": id, "status": status, "detail": detail, "layers": layer_types}));
+        results.push(json!({"id": id, "status": status, "detail": detail, "layers": layer_types, "hash": hash}));
         match &outcome {
             Outcome::Skip(r) => *skip_reasons.entry(r.clone()).or_default() += 1,
             Outcome::Fail(e) => {
@@ -82,7 +82,14 @@ pub fn run(root: &Path, filter: Option<&str>) {
     eprintln!("report: {}", out_dir.display());
 }
 
-fn run_one(dir: &Path, style: &Value, assets: &Path, out_dir: &Path) -> Outcome {
+/// The outcome, and a hash of the compared RGBA (to check that an optimization keeps the output
+/// bit for bit: compare `hash` in results.json before and after).
+fn run_one(dir: &Path, style: &Value, assets: &Path, out_dir: &Path) -> (Outcome, Option<String>) {
+    let mut hash = None;
+    (compare_one(dir, style, assets, out_dir, &mut hash), hash)
+}
+
+fn compare_one(dir: &Path, style: &Value, assets: &Path, out_dir: &Path, hash: &mut Option<String>) -> Outcome {
     let t = &style["metadata"]["test"];
     let width = t["width"].as_u64().unwrap_or(512) as u32;
     let height = t["height"].as_u64().unwrap_or(512) as u32;
@@ -117,6 +124,14 @@ fn run_one(dir: &Path, style: &Value, assets: &Path, out_dir: &Path) -> Outcome 
     let w = t["reportWidth"].as_u64().map_or(cw, |v| v as usize).min(cw);
     let h = t["reportHeight"].as_u64().map_or(ch, |v| v as usize).min(ch);
     let rgba: Vec<u8> = (ch - h..ch).flat_map(|y| rgba[(y * cw) * 4..(y * cw + w) * 4].to_vec()).collect();
+    *hash = Some({
+        use std::hash::{Hash, Hasher};
+        // SipHash with fixed keys: stable across runs and builds of the same toolchain.
+        #[allow(deprecated)]
+        let mut h = std::hash::SipHasher::new();
+        rgba.hash(&mut h);
+        format!("{:016x}", h.finish())
+    });
 
     // Like upstream: compare against every expected*.png, keep the closest.
     let mut best: Option<(f64, Vec<u8>, Vec<u8>)> = None;
