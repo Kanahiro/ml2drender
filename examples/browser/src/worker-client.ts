@@ -1,4 +1,4 @@
-import type { Crs, SourceTile, TileView } from 'ml2drender';
+import type { Crs, SourceTile, Tile } from 'ml2drender';
 import type { StyleSpecification } from 'maplibre-gl';
 import type { WorkerRequest, WorkerResponse } from './render-worker';
 
@@ -87,7 +87,7 @@ export class TileWorker {
   }
 
   /** A tile of the Web Mercator grid, or with `crs` of that CRS's grid. */
-  render(tile: TileView, crs?: Crs): Promise<TileImage> {
+  render(tile: Tile, crs?: Crs): Promise<TileImage> {
     return this.request({ kind: 'render', tile, crs }) as Promise<TileImage>;
   }
 
@@ -97,7 +97,7 @@ export class TileWorker {
   }
 
   /** Posts to the least loaded worker. */
-  private request(body: { kind: 'render'; tile: TileView; crs?: Crs } | { kind: 'source'; tile: SourceTile; crs: Crs }): Promise<TileImage | SourceData> {
+  private request(body: { kind: 'render'; tile: Tile; crs?: Crs } | { kind: 'source'; tile: SourceTile; crs: Crs }): Promise<TileImage | SourceData> {
     const id = ++this.nextId;
     const slot = this.slots.reduce((least, candidate) => candidate.load < least.load ? candidate : least);
     slot.load++;

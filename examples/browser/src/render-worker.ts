@@ -1,11 +1,11 @@
 /// <reference lib="webworker" />
-import { type Crs, MapRenderer, type SourceTile, type TileView } from 'ml2drender';
+import { type Crs, MapRenderer, type SourceTile, type Tile } from 'ml2drender';
 import type { StyleSpecification } from 'maplibre-gl';
 
 export type WorkerRequest =
   | { kind: 'init'; generation: number; style: StyleSpecification }
   /** A tile of the Web Mercator grid, or with `crs` of that CRS's grid. */
-  | { kind: 'render'; generation: number; id: number; tile: TileView; crs?: Crs }
+  | { kind: 'render'; generation: number; id: number; tile: Tile; crs?: Crs }
   | { kind: 'source'; generation: number; id: number; tile: SourceTile; crs: Crs };
 
 export type WorkerResponse =
