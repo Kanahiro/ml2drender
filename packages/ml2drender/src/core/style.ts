@@ -3,6 +3,7 @@
 import {
     Formatted,
     Interpolate,
+    Step,
     derefLayers,
     featureFilter,
     isExpression,
@@ -61,14 +62,17 @@ export class PropValue {
     readonly interpolation: Interpolation | undefined;
     /** Top-level `step` (MapLibre's "step interpolant"). */
     readonly isStep: boolean;
+    /** Stop inputs of a top-level `interpolate` expression (e.g. the elevations of `color-relief-color`). */
+    readonly interpolateLabels: number[] | undefined;
     private readonly fn: (globals: any, feature: object | null, canonical: CanonicalTileId | null) => Value;
 
-    private constructor(kind: Kind, fn: PropValue['fn'], zoomStops: number[] = [], interpolation?: Interpolation, isStep = false) {
+    private constructor(kind: Kind, fn: PropValue['fn'], zoomStops: number[] = [], interpolation?: Interpolation, top?: unknown) {
         this.kind = kind;
         this.fn = fn;
         this.zoomStops = zoomStops;
         this.interpolation = interpolation;
-        this.isStep = isStep;
+        this.isStep = top instanceof Step;
+        this.interpolateLabels = top instanceof Interpolate ? (top as any).labels : undefined;
     }
 
     static constant(v: Value): PropValue {
@@ -104,9 +108,7 @@ export class PropValue {
                     return fallback;
                 }
             };
-            const isStep = se.expression?.constructor?.name === 'Step';
-            const stops = n.zoomStops ?? [];
-            return new PropValue(n.kind, fn, stops, n.interpolationType, isStep);
+            return new PropValue(n.kind, fn, n.zoomStops ?? [], n.interpolationType, se.expression);
         }
         // Legacy function (StylePropertyFunction).
         const fallback = n._defaultValue;

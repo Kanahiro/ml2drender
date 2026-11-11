@@ -308,19 +308,11 @@ export class ColorRamp {
         const prop = paintProp(layer, 'color-relief-color');
         const elevations: number[] = [];
         const colors: [number, number, number, number][] = [];
-        // The compiled property does not expose its expression: the labels of a top-level
-        // `interpolate` are read from the layer JSON (an expression that failed to compile has
-        // only transparent stops either way).
-        const raw = layer.json?.paint?.['color-relief-color'];
-        const zoomConstant = prop.kind === 'constant' || prop.kind === 'source';
-        if (zoomConstant && Array.isArray(raw) && (raw[0] === 'interpolate' || raw[0] === 'interpolate-hcl' || raw[0] === 'interpolate-lab')) {
-            for (let k = 3; k < raw.length; k += 2) {
-                const l = raw[k];
-                if (typeof l !== 'number') continue;
-                const v = prop.evalGlobals({zoom: ctx.transform.zoom, elevation: l});
-                elevations.push(l);
-                colors.push(rampTexel(v instanceof Color ? v : Color.transparent));
-            }
+        const labels = prop.kind === 'constant' || prop.kind === 'source' ? prop.interpolateLabels : undefined;
+        for (const l of labels ?? []) {
+            const v = prop.evalGlobals({zoom: ctx.transform.zoom, elevation: l});
+            elevations.push(l);
+            colors.push(rampTexel(v instanceof Color ? v : Color.transparent));
         }
         if (elevations.length === 0) {
             elevations.push(0);
