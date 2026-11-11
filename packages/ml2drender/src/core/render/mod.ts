@@ -227,7 +227,17 @@ export class Ctx {
         const sorted = sortProp !== undefined && !sortProp.isConstant();
         const out: BucketFeature[] = [];
         tf.layer.features.forEach((f, index) => {
-            const scaleGeometry = (): P[][] => f.geometry.map((l) => l.map((p): P => [roundAway(p[0] * scale), roundAway(p[1] * scale)]));
+            const scaleGeometry = (): P[][] => {
+                const {xy, ends} = f.geometry;
+                const out: P[][] = [];
+                let i = 0;
+                for (const end of ends) {
+                    const line: P[] = [];
+                    for (; i < end; i++) line.push([roundAway(xy[2 * i] * scale), roundAway(xy[2 * i + 1] * scale)]);
+                    out.push(line);
+                }
+                return out;
+            };
             // Most filters only inspect properties. Avoid allocating and transforming
             // geometry for rejected features; geometry expressions still see EXTENT units.
             const geometry = layer.needsGeometry ? scaleGeometry() : undefined;

@@ -21,7 +21,44 @@ export interface Feature {
     id?: unknown;
     type: GeomType;
     properties: Record<string, unknown>;
-    geometry: [number, number][][];
+    geometry: Geometry;
+}
+
+/** Points, lines or rings, flat (no array per point: dense tiles hold millions of points). Line `k`
+ * is the points `ends[k - 1] .. ends[k]` (from 0 for the first) of `xy`, which holds x, y pairs. */
+export interface Geometry {
+    xy: Int32Array;
+    ends: number[];
+}
+
+/** `g` as an array of point arrays per line. */
+export function lines(g: Geometry): [number, number][][] {
+    const out: [number, number][][] = [];
+    let i = 0;
+    for (const end of g.ends) {
+        const line: [number, number][] = [];
+        for (; i < end; i++) line.push([g.xy[2 * i], g.xy[2 * i + 1]]);
+        out.push(line);
+    }
+    return out;
+}
+
+/** The flat form of `lines` (whose coordinates are integers). */
+export function flat(lines: ArrayLike<ArrayLike<ArrayLike<number>>>): Geometry {
+    let n = 0;
+    for (let k = 0; k < lines.length; k++) n += lines[k].length;
+    const xy = new Int32Array(2 * n);
+    const ends: number[] = [];
+    let i = 0;
+    for (let k = 0; k < lines.length; k++) {
+        const line = lines[k];
+        for (let j = 0; j < line.length; j++, i++) {
+            xy[2 * i] = line[j][0];
+            xy[2 * i + 1] = line[j][1];
+        }
+        ends.push(i);
+    }
+    return {xy, ends};
 }
 
 export interface Layer {
@@ -179,37 +216,57 @@ function decodeValue(data: Uint8Array): unknown {
     return v;
 }
 
-function decodeGeometry(cmds: number[]): [number, number][][] {
-    const lines: [number, number][][] = [];
-    let line: [number, number][] | undefined;
+/** Scratch coordinates of the geometry being decoded. */
+let scratch = new Int32Array(1024);
+
+function decodeGeometry(cmds: number[]): Geometry {
+    // At most one point per two command integers, plus one per ClosePath.
+    if (scratch.length < 2 * cmds.length) scratch = new Int32Array(2 * cmds.length);
+    const xy = scratch;
+    const ends: number[] = [];
+    let n = 0;
+    // Start of the current line, -1 before the first MoveTo.
+    let start = -1;
     let x = 0;
     let y = 0;
     let i = 0;
     const zz = (v: number) => ((v >>> 1) ^ -(v & 1)) | 0;
+    // A truncated or unknown command drops the line in progress.
+    const done = (complete: boolean) => {
+        if (complete && start >= 0) ends.push(n);
+        return {xy: xy.slice(0, 2 * (ends.length > 0 ? ends[ends.length - 1] : 0)), ends};
+    };
     while (i < cmds.length) {
         const cmd = cmds[i] & 7;
         const count = cmds[i] >>> 3;
         i++;
         if (cmd === 1 || cmd === 2) {
             for (let c = 0; c < count; c++) {
-                if (i + 1 >= cmds.length) return lines;
+                if (i + 1 >= cmds.length) return done(false);
                 x = (x + zz(cmds[i])) | 0;
                 y = (y + zz(cmds[i + 1])) | 0;
                 i += 2;
                 if (cmd === 1) {
-                    if (line) lines.push(line);
-                    line = [];
+                    if (start >= 0) ends.push(n);
+                    start = n;
+                } else if (start < 0) {
+                    start = 0;
                 }
-                (line ??= []).push([x, y]);
+                xy[2 * n] = x;
+                xy[2 * n + 1] = y;
+                n++;
             }
         } else if (cmd === 7) {
-            if (line && line.length > 0) line.push(line[0]);
+            if (start >= 0 && n > start) {
+                xy[2 * n] = xy[2 * start];
+                xy[2 * n + 1] = xy[2 * start + 1];
+                n++;
+            }
         } else {
-            return lines;
+            return done(false);
         }
     }
-    if (line) lines.push(line);
-    return lines;
+    return done(true);
 }
 
 /** The layer's name bytes; `undefined` when malformed. */
@@ -351,7 +408,7 @@ export function sliceLayer(layer: Layer, parent: TileId, target: TileId): Layer 
     const hi = extent + buffer;
     const features: Feature[] = [];
     for (const f of layer.features) {
-        const geom = f.geometry.map(r => r.map(p => [p[0] * scale - ox, p[1] * scale - oy] as [number, number]));
+        const geom = lines(f.geometry).map(r => r.map(p => [p[0] * scale - ox, p[1] * scale - oy] as [number, number]));
         const clipped = clipAxis(clipAxis(geom, f.type, lo, hi, 0), f.type, lo, hi, 1);
         if (clipped.length === 0) continue;
         const feature: Feature = {type: f.type, properties: f.properties, geometry: reencode(clipped, f.type)};
@@ -365,7 +422,7 @@ export function sliceLayer(layer: Layer, parent: TileId, target: TileId): Layer 
  * vt-pbf `writeGeometry` + decode: each delta is truncated (`zigzag` uses int32 ops)
  * while the encoder's cursor tracks the exact float position.
  */
-function reencode(geom: [number, number][][], type: GeomType): [number, number][][] {
+function reencode(geom: [number, number][][], type: GeomType): Geometry {
     let fx = 0;
     let fy = 0;
     let ix = 0;
@@ -392,7 +449,7 @@ function reencode(geom: [number, number][][], type: GeomType): [number, number][
             out.push(r);
         }
     }
-    return out;
+    return flat(out);
 }
 
 /** `clipGeometryOnAxis` (symbol/clip_line.ts). */

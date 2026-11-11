@@ -4,7 +4,7 @@
 
 import {GEOJSONVT_CLIP_END, GEOJSONVT_CLIP_START, type GeoJSONVTFeature, GeoJSONVT} from '@maplibre/geojson-vt';
 import {type StyleExpression, createExpression} from '@maplibre/maplibre-gl-style-spec';
-import type {Feature, GeomType, Layer} from './mvt.ts';
+import {type Feature, type GeomType, type Layer, flat} from './mvt.ts';
 import {asU8, clamp} from './util.ts';
 
 export const EXTENT = 8192;
@@ -101,7 +101,7 @@ export class GeoJsonIndex {
             const feature: Feature = {
                 type: f.type as GeomType,
                 properties: (f.tags as Props | null) ?? {},
-                geometry: f.type === 1 ? f.geometry.map(p => [p]) : f.geometry,
+                geometry: flat(f.type === 1 ? f.geometry.map(p => [p]) : f.geometry),
             };
             if (f.id != null) feature.id = f.id;
             features.push(feature);
