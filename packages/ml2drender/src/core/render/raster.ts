@@ -91,6 +91,43 @@ export class Target {
         return Object.assign(one_, {run});
     }
 
+    /** `blend` of one color, where visible, for a pixel or (`run`) pixels `i0..i1`. With the color
+     * fixed, `blend` maps each destination byte through a per-channel table. */
+    blender(c: ArrayLike<number>): Coverer {
+        const key = `${c[0]},${c[1]},${c[2]},${c[3]}`;
+        let lut = this.luts.get(key);
+        if (!lut) {
+            lut = new Uint8Array(1024);
+            const one = new Target(1, 1);
+            for (let k = 0; k < 4; k++) {
+                for (let d = 0; d < 256; d++) {
+                    one.px[k] = d;
+                    one.blend(0, c);
+                    lut[k * 256 + d] = one.px[k];
+                }
+            }
+            // ponytail: one table per distinct color for the target's lifetime; bound it if styles
+            // with per-feature colors grow it too much.
+            this.luts.set(key, lut);
+        }
+        const t = lut;
+        const {px, occ, layer, cull} = this;
+        const run = (i0: number, i1: number) => {
+            for (let i = i0; i < i1; i++) {
+                if (cull && !(occ[i] <= layer)) continue;
+                const o = i * 4;
+                px[o] = t[px[o]];
+                px[o + 1] = t[256 + px[o + 1]];
+                px[o + 2] = t[512 + px[o + 2]];
+                px[o + 3] = t[768 + px[o + 3]];
+            }
+        };
+        const one_ = (i: number) => run(i, i + 1);
+        return Object.assign(one_, {run});
+    }
+
+    private luts = new Map<string, Uint8Array>();
+
     markOpaque(i: number): void {
         if (i < this.opaque.length) this.opaque[i] = 1;
     }

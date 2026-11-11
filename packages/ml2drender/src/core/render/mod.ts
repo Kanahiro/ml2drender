@@ -582,6 +582,7 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
             const opacity = num(ctx.paint(layer, 'fill-opacity', f, tf.tile));
             const fillColor = color(ctx.paint(layer, 'fill-color', f, tf.tile), opacity);
             let coverFill: raster.Coverer | undefined;
+            let blendFill: raster.Coverer | undefined;
             let paint: FillPaint;
             if (hasPattern) {
                 // Cross-faded "to" image: the integer zoom, or the tile zoom when data-driven.
@@ -636,6 +637,21 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                                         cover(y * w + x);
                                     }
                                 }
+                            });
+                            continue;
+                        }
+                        if (paint.kind === 'Color') {
+                            // `triangle` with `shadeFill`, which returns the color whatever the varyings.
+                            const w = target.w;
+                            const fill = (blendFill ??= target.blender(paint.c));
+                            const mask = tf.mask;
+                            const rect = mask.coverage.kind === 'Rectangle' ? mask.coverage : undefined;
+                            raster.forEachRun(w, target.h, p, (y, x0, x1) => {
+                                if (rect) {
+                                    if (y >= rect.y[0] && y < rect.y[1]) fill.run(y * w + Math.max(x0, rect.x[0]), y * w + Math.min(x1, rect.x[1]));
+                                    return;
+                                }
+                                for (let x = x0; x < x1; x++) if (mask.get(x, y)) fill(y * w + x);
                             });
                             continue;
                         }
