@@ -592,18 +592,30 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
     let outline_hidden = constant_opaque && antialias && !has_outline_color;
     let mut covered = vec![false; if outline_hidden && pass == Pass::All { target.w * target.h } else { 0 }];
     let pattern_prop = layer.paint("fill-pattern");
+    // Per tile: its bucket and the features to outline (index into `polygons`, outline paint,
+    // and the fill pattern's size if any). The edges are computed again in the outline pass:
+    // holding them meanwhile took more memory than the buckets.
     let mut prepared = Vec::new();
-    for tf in tiles {
-        let bucket = tf.bucket(layer, ctx, || FillBucket::new(layer, ctx, tf));
+    let screen_of = |tf: &TileFeatures| {
         let to_world = ctx.tile_to_world(&tf.tile);
         let tr = ctx.translate(layer, "fill", &tf.tile);
-        let to_screen = |p: [f64; 2]| {
+        move |p: [f64; 2]| {
             let w = to_world(p);
             ctx.transform.world_to_screen([w[0] + tr[0], w[1] + tr[1]])
-        };
+        }
+    };
+    let vary_of = |tp: &pattern::TilePattern, size: Option<[f32; 2]>, points: &[[f64; 2]], screen: &[[f64; 2]]| -> Vec<[f32; 2]> {
+        match size {
+            Some(size) => points.iter().zip(screen).map(|(p, s)| tp.pos(size, *p, *s)).collect(),
+            None => vec![[0.0; 2]; screen.len()],
+        }
+    };
+    for tf in tiles {
+        let bucket = tf.bucket(layer, ctx, || FillBucket::new(layer, ctx, tf));
+        let to_screen = screen_of(tf);
         let tp = pattern::TilePattern::new(ctx, &tf.tile);
         let mut outlines = Vec::new();
-        for (i, polygons) in &bucket.polygons {
+        for (j, (i, polygons)) in bucket.polygons.iter().enumerate() {
             let f = &bucket.features[*i];
             let opacity = num(&ctx.paint(layer, "fill-opacity", Some(f), &tf.tile));
             let fill_color = color(&ctx.paint(layer, "fill-color", Some(f), &tf.tile), opacity);
@@ -631,59 +643,47 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
                     FillPaint::Pattern { img, tint, opacity } => FillPaint::Pattern { img, tint: *tint, opacity: *opacity },
                 }
             };
+            // Only patterns read the varying (outlines too: theirs is a color or this pattern).
+            let pattern_size = matches!(paint, FillPaint::Pattern { .. }).then_some(size);
+            if antialias && opacity >= 0.01 {
+                outlines.push((j, outline_paint, pattern_size));
+            }
+            if opacity < 0.01 || pass == Pass::Translucent {
+                continue;
+            }
             for polygon in polygons {
                 let screen: Vec<[f64; 2]> = polygon.points.iter().map(|p| to_screen(*p)).collect();
-                // Only patterns read the varying (outlines too: theirs is a color or this pattern).
-                let vary: Vec<[f32; 2]> = match paint {
-                    FillPaint::Pattern { .. } => polygon.points.iter().zip(&screen).map(|(p, s)| tp.pos(size, *p, *s)).collect(),
-                    FillPaint::Color(_) => vec![[0.0; 2]; screen.len()],
-                };
-                if opacity >= 0.01 && pass != Pass::Translucent {
-                    for t in polygon.triangles.chunks_exact(3) {
-                        let p = [screen[t[0]], screen[t[1]], screen[t[2]]];
-                        // Projections keep orientation and bend edges gently, except across a
-                        // singularity (e.g. near the antipode of an azimuthal projection, which spreads
-                        // a triangle's corners around the rim): its chord triangle would cover the map.
-                        let tri = [polygon.points[t[0]], polygon.points[t[1]], polygon.points[t[2]]];
-                        if ctx.transform.is_projected()
-                            && (0..3).any(|i| bent(to_screen, tri[i], tri[(i + 1) % 3], p[i], p[(i + 1) % 3]))
-                        {
-                            continue;
-                        }
-                        if constant_opaque {
-                            let w = target.w;
-                            raster::for_each_pixel(target.w, target.h, p, |x, y, _| {
-                                if tf.mask.get(x, y) {
-                                    if let Some(c) = covered.get_mut(y * w + x) {
-                                        *c = true;
-                                    }
-                                    target.cover(y * w + x, fill_color);
+                let vary = vary_of(&tp, pattern_size, &polygon.points, &screen);
+                for t in polygon.triangles.chunks_exact(3) {
+                    let p = [screen[t[0]], screen[t[1]], screen[t[2]]];
+                    // Projections keep orientation and bend edges gently, except across a
+                    // singularity (e.g. near the antipode of an azimuthal projection, which spreads
+                    // a triangle's corners around the rim): its chord triangle would cover the map.
+                    let tri = [polygon.points[t[0]], polygon.points[t[1]], polygon.points[t[2]]];
+                    if ctx.transform.is_projected()
+                        && (0..3).any(|i| bent(&to_screen, tri[i], tri[(i + 1) % 3], p[i], p[(i + 1) % 3]))
+                    {
+                        continue;
+                    }
+                    if constant_opaque {
+                        let w = target.w;
+                        raster::for_each_pixel(target.w, target.h, p, |x, y, _| {
+                            if tf.mask.get(x, y) {
+                                if let Some(c) = covered.get_mut(y * w + x) {
+                                    *c = true;
                                 }
-                            });
-                            continue;
-                        }
-                        let v = [vary[t[0]], vary[t[1]], vary[t[2]]];
-                        let g = raster::varying_gradients(p, v);
-                        raster::triangle(target, Some(tf.mask), p, v, &mut |v: &[f32; 2]| Some(paint.shade(*v, &g)));
-                    }
-                }
-                if antialias && opacity >= 0.01 {
-                    let mut start = 0;
-                    for &len in &polygon.ring_lens {
-                        for i in 1..len {
-                            let (a, b) = (start + i - 1, start + i);
-                            let (pa, pb) = (polygon.points[a], polygon.points[b]);
-                            if ctx.transform.is_projected() && bent(to_screen, pa, pb, screen[a], screen[b]) {
-                                continue;
+                                target.cover(y * w + x, fill_color);
                             }
-                            outlines.push((screen[a], screen[b], vary[a], vary[b], clone_paint(&outline_paint)));
-                        }
-                        start += len;
+                        });
+                        continue;
                     }
+                    let v = [vary[t[0]], vary[t[1]], vary[t[2]]];
+                    let g = raster::varying_gradients(p, v);
+                    raster::triangle(target, Some(tf.mask), p, v, &mut |v: &[f32; 2]| Some(paint.shade(*v, &g)));
                 }
             }
         }
-        prepared.push((tf, outlines));
+        prepared.push((tf, bucket, outlines));
     }
     // Outlines are drawn after all fills (MapLibre's separate outline pass). Reading `occ`
     // while drawing needs it out of the target, so its culling is applied here instead.
@@ -696,15 +696,32 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
         (true, _) => occ[i] < layer_index || !cull && occ[i] != layer_index,
         _ => true,
     };
-    for (tf, outlines) in prepared {
-        for (a, b, va, vb, paint) in outlines {
-            let none = [[0.0; 2]; 2];
-            raster::line(target, &|x, y| tf.mask.get(x, y) && visible(y * w + x), a, b, &mut |dist, t| {
-                let alpha = 1.0 - raster::smoothstep(0.0, 1.0, dist as f32);
-                let t = t as f32;
-                let v = [va[0] + (vb[0] - va[0]) * t, va[1] + (vb[1] - va[1]) * t];
-                Some(paint.shade(v, &none).map(|c| c * alpha))
-            });
+    for (tf, bucket, outlines) in prepared {
+        let to_screen = screen_of(tf);
+        let tp = pattern::TilePattern::new(ctx, &tf.tile);
+        for (j, paint, pattern_size) in outlines {
+            for polygon in &bucket.polygons[j].1 {
+                let screen: Vec<[f64; 2]> = polygon.points.iter().map(|p| to_screen(*p)).collect();
+                let vary = vary_of(&tp, pattern_size, &polygon.points, &screen);
+                let mut start = 0;
+                for &len in &polygon.ring_lens {
+                    for i in 1..len {
+                        let (a, b) = (start + i - 1, start + i);
+                        if ctx.transform.is_projected() && bent(&to_screen, polygon.points[a], polygon.points[b], screen[a], screen[b]) {
+                            continue;
+                        }
+                        let (va, vb) = (vary[a], vary[b]);
+                        let none = [[0.0; 2]; 2];
+                        raster::line(target, &|x, y| tf.mask.get(x, y) && visible(y * w + x), screen[a], screen[b], &mut |dist, t| {
+                            let alpha = 1.0 - raster::smoothstep(0.0, 1.0, dist as f32);
+                            let t = t as f32;
+                            let v = [va[0] + (vb[0] - va[0]) * t, va[1] + (vb[1] - va[1]) * t];
+                            Some(paint.shade(v, &none).map(|c| c * alpha))
+                        });
+                    }
+                    start += len;
+                }
+            }
         }
     }
     if !occ.is_empty() {
@@ -712,13 +729,6 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
     }
     target.cull = cull;
     pass == Pass::Opaque
-}
-
-fn clone_paint<'a>(p: &FillPaint<'a>) -> FillPaint<'a> {
-    match p {
-        FillPaint::Color(c) => FillPaint::Color(*c),
-        FillPaint::Pattern { img, tint, opacity } => FillPaint::Pattern { img, tint: *tint, opacity: *opacity },
-    }
 }
 
 /// Tile masks of a projected output: each pixel belongs to the highest-zoom tile containing its
