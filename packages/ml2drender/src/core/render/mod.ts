@@ -3,7 +3,7 @@
 import {Color} from '@maplibre/maplibre-gl-style-spec';
 import earcut from 'earcut';
 import {type CanonicalTileId, type Feature, type Layer, type Properties, type PropValue, type Value, layout as layoutProp, paint as paintProp} from '../style.ts';
-import {type GeomType, type Layer as MvtLayer, geomTypeName} from '../mvt.ts';
+import {type Feature as MvtFeature, type GeomType, type Layer as MvtLayer, geomTypeName} from '../mvt.ts';
 import {type RenderTile, TileId, type Transform, renderTileKey} from '../tile.ts';
 import type {StyleImage} from '../sprite.ts';
 import {roundAway} from '../util.ts';
@@ -110,6 +110,8 @@ export class Ctx {
     private demCache = new Map<string, (DemTile | undefined)[]>();
     /** `rotations` by tile. */
     private rotationCache = new Map<string, RotationGrid>();
+    /** The expression feature (without geometry) of each source feature, shared by the layers. */
+    private features = new Map<MvtFeature, Feature>();
 
     constructor(transform: Transform, globalState: Properties, images: Map<string, StyleImage>) {
         this.transform = transform;
@@ -235,9 +237,14 @@ export class Ctx {
             // Most filters only inspect properties. Avoid allocating and transforming
             // geometry for rejected features; geometry expressions still see EXTENT units.
             const geometry = layer.needsGeometry ? scaleGeometry() : undefined;
-            const feature: Feature = {id: f.id, geomType: geomTypeName(f.type), properties: f.properties, geometry};
+            // Without geometry, the layers of a tile share one feature (and its converted form).
+            let feature = geometry ? undefined : this.features.get(f);
+            if (!feature) {
+                feature = {id: f.id, geomType: geomTypeName(f.type), properties: f.properties, geometry};
+                if (!geometry) this.features.set(f, feature);
+            }
             if (layer.filter && !layer.filter(zoom, feature, canonical)) return;
-            const g = withGeometry ? (geometry ?? scaleGeometry()) : [];
+            const g = withGeometry ? (geometry ?? scaleGeometry()) : NO_GEOMETRY;
             const sortKey = sorted ? num(sortProp!.eval(zoom, feature, canonical)) : 0;
             out.push({feature, ty: f.type, geometry: g, sortKey, index});
         });
@@ -379,9 +386,12 @@ function newFillBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): FillBucket {
         polygons.push([i, polys]);
     });
     // Only the triangulated polygons are drawn.
-    for (const f of features) f.geometry = [];
+    for (const f of features) f.geometry = NO_GEOMETRY;
     return {features, polygons};
 }
+
+/** `BucketFeature.geometry` once a bucket no longer needs it. Never modified. */
+export const NO_GEOMETRY = Object.freeze([]) as unknown as P[][];
 
 /** A feature ready for bucket building: geometry in EXTENT (8192) units. */
 export interface BucketFeature {

@@ -8,7 +8,7 @@ import {asU8, roundAway, wrapI8} from '../util.ts';
 import * as raster from './raster.ts';
 import type {Rgba, Target} from './raster.ts';
 import * as pattern from './pattern.ts';
-import {type BucketFeature, Ctx, EXTENT, type TileFeatures, bent, color, drawnGeometry, num} from './mod.ts';
+import {type BucketFeature, Ctx, EXTENT, NO_GEOMETRY, type TileFeatures, bent, color, drawnGeometry, num} from './mod.ts';
 
 const EXTRUDE_SCALE = 63;
 const COS_HALF_SHARP_CORNER = 0.7933533402912352; // cos(75° / 2)
@@ -49,6 +49,19 @@ function quantize(v: number): number {
 
 /** Rust `x as i64 as f64` (truncating, saturating; NaN → 0). */
 const truncI64 = (x: number) => (x !== x ? 0 : Math.trunc(x));
+
+/** A built line feature (`Builder.compact`): the `Builder` fields it draws from. */
+interface LineGeometry {
+    x: ArrayLike<number>;
+    y: ArrayLike<number>;
+    ext: Int8Array;
+    flags: Uint8Array;
+    linesofar: Float64Array;
+    uvX: Float64Array;
+    split: Uint32Array;
+    lineStarts: number[];
+    triangles: Uint32Array;
+}
 
 /** Vertices are held field by field (dense tiles have millions): vertex `i` is at (`x[i]`, `y[i]`),
  * with the extrude vector and offset normal `ext[4i .. 4i + 4]`, quantized like the byte attributes
@@ -111,6 +124,25 @@ class Builder {
             this.updateScaledDistance();
             this.addCurrentVertex(p, normal, endLeft, endRight, round, offsetNormal, fallback);
         }
+    }
+
+    /** The built vertices in exact-size typed arrays. */
+    compact(): LineGeometry {
+        // Int32 when that keeps every value (-0 included).
+        const int32 = (v: number) => (v | 0) === v && !Object.is(v, -0);
+        const integral = this.x.every(int32) && this.y.every(int32);
+        const pos = integral ? Int32Array : Float64Array;
+        return {
+            x: pos.from(this.x),
+            y: pos.from(this.y),
+            ext: Int8Array.from(this.ext),
+            flags: Uint8Array.from(this.flags),
+            linesofar: Float64Array.from(this.linesofar),
+            uvX: Float64Array.from(this.uvX),
+            split: Uint32Array.from(this.split),
+            lineStarts: this.lineStarts,
+            triangles: Uint32Array.from(this.triangles),
+        };
     }
 
     updateScaledDistance(): void {
@@ -435,7 +467,7 @@ function sampleGradient(g: Gradient, u: number, split: number): Rgba {
 interface LineBucket {
     features: BucketFeature[];
     /** Built lines, by index into `features`. */
-    lines: [number, Builder][];
+    lines: [number, LineGeometry][];
     /** `lineMetrics` clips of all lines; the gradient texture covers the whole tile bucket. */
     clips: [number, number][];
     maxLineLength: number;
@@ -446,7 +478,7 @@ function newLineBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): LineBucket {
     const overscaling = 2 ** (tf.tile.overscaledZ - tf.tile.canonical.z);
     let clips: [number, number][] = [];
     let maxLineLength = 0;
-    const lines: [number, Builder][] = [];
+    const lines: [number, LineGeometry][] = [];
     features.forEach((f, i) => {
         if (f.ty !== 2 && f.ty !== 3) return;
         const l = (name: string) => ctx.layout(layer, name, f, tf.tile);
@@ -471,9 +503,9 @@ function newLineBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): LineBucket {
         }
         clips = b.clips;
         maxLineLength = Math.max(maxLineLength, b.maxLineLength);
-        lines.push([i, b]);
+        lines.push([i, b.compact()]);
     });
-    for (const f of features) f.geometry = [];
+    for (const f of features) f.geometry = NO_GEOMETRY;
     return {features, lines, clips, maxLineLength};
 }
 
@@ -523,7 +555,7 @@ function drawFeature(
     ctx: Ctx,
     tf: TileFeatures,
     f: BucketFeature,
-    b: Builder,
+    b: LineGeometry,
     toWorld: (p: P) => P,
     tr: P,
     dpr: number,
@@ -583,7 +615,7 @@ function drawFeature(
     const starts: number[] = [];
     const pointOf: number[] = [];
     let ls = 0;
-    const screen: P[] = b.x.map((_, i): P => {
+    const screen: P[] = Array.from({length: b.x.length}, (_, i): P => {
         const pos: P = [b.x[i], b.y[i]];
         const normalY = b.flags[i] & 2 ? 1 : -1;
         const w = toWorld(pos);

@@ -275,6 +275,10 @@ export class Renderer {
     maxZoom = 22;
     /** MapLibre map option `crossSourceCollisions` (default true). */
     crossSourceCollisions = true;
+    /** Whether fill, line, circle and heatmap buckets stay cached after a render, for later views
+     * (`setView`). A host that renders once per renderer turns this off: each bucket is then dropped
+     * as soon as the last layer using it is drawn, so a render holds few at a time. */
+    keepBuckets = true;
     /** Set by `setProjectedView`: `view` is then the Mercator render of its rasters and DEMs,
      * warped into it. */
     projected: [ProjectedView, Warp] | undefined;
@@ -726,6 +730,9 @@ export class Renderer {
         // Rasters and DEMs are drawn in Mercator into `target`, which is warped into
         // `out` before the next layer drawn directly, and at the end.
         let warpedPending = false;
+        // The last layer drawing each layout group's buckets, when they are not kept.
+        const lastUse = new Map<string, number>();
+        if (!this.keepBuckets) layers.forEach((l, i) => visible[i] && ['fill', 'line', 'circle', 'heatmap'].includes(l.type) && lastUse.set(l.layoutGroup, i));
         for (const [i, layer] of layers.entries()) {
             if (!visible[i]) continue;
             const raw = layer.json;
@@ -791,6 +798,12 @@ export class Renderer {
                     }
                 }
             });
+            if (lastUse.get(layer.layoutGroup) === i) {
+                for (const {buckets} of src.buckets.values()) {
+                    buckets.delete(layer.layoutGroup);
+                    buckets.delete(`${layer.layoutGroup}\0projected`);
+                }
+            }
             if (offscreen && layerOpacity !== undefined) {
                 const px = offscreen.px;
                 for (let p = 0; p < lw * lh; p++) {
