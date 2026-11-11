@@ -41,6 +41,22 @@ fn lit(e: &Expr) -> Value {
     if let Node::Literal(v) = &e.node { v.clone() } else { Value::Null }
 }
 
+/// `s` for a property name, borrowed when it is a literal string (most are: evaluated per feature).
+fn key<'a>(ctx: &EvalCtx, e: &'a Expr) -> Result<std::borrow::Cow<'a, str>, RuntimeError> {
+    match &e.node {
+        Node::Literal(Value::String(k)) => Ok(std::borrow::Cow::Borrowed(k)),
+        _ => Ok(std::borrow::Cow::Owned(s(ctx, e)?)),
+    }
+}
+
+/// `lit(e).to_js_string()`, borrowed for a literal string.
+fn lit_key(e: &Expr) -> std::borrow::Cow<'_, str> {
+    match &e.node {
+        Node::Literal(Value::String(k)) => std::borrow::Cow::Borrowed(k),
+        _ => std::borrow::Cow::Owned(lit(e).to_js_string()),
+    }
+}
+
 macro_rules! math1 {
     ($f:expr) => {
         |ctx: &EvalCtx, a: &[Expr], _: &str| -> EvalResult { Ok(Value::Number($f(n(ctx, &a[0])?))) }
@@ -82,7 +98,7 @@ fn filter_cmp(a: &Value, b: &Value, accept: fn(std::cmp::Ordering) -> bool) -> b
 }
 
 fn filter_prop(ctx: &EvalCtx, k: &Expr) -> Value {
-    feature_prop(ctx, &lit(k).to_js_string())
+    feature_prop(ctx, &lit_key(k))
 }
 
 fn feature_prop(ctx: &EvalCtx, key: &str) -> Value {
@@ -131,12 +147,12 @@ pub fn definition(name: &str) -> Option<Definition> {
             ty: BOOLEAN,
             overloads: vec![
                 (Sig::Fixed(vec![STRING]), |ctx, a, _| {
-                    let k = s(ctx, &a[0])?;
+                    let k = key(ctx, &a[0])?;
                     Ok(Value::Bool(has_prop(ctx, &k)))
                 }),
                 (Sig::Fixed(vec![STRING, OBJECT]), |ctx, a, _| {
-                    let k = s(ctx, &a[0])?;
-                    Ok(Value::Bool(matches!(a[1].evaluate(ctx)?, Value::Object(o) if o.contains_key(k.as_str()))))
+                    let k = key(ctx, &a[0])?;
+                    Ok(Value::Bool(matches!(a[1].evaluate(ctx)?, Value::Object(o) if o.contains_key(&*k))))
                 }),
             ],
         }),
@@ -144,11 +160,11 @@ pub fn definition(name: &str) -> Option<Definition> {
             ty: VALUE,
             overloads: vec![
                 (Sig::Fixed(vec![STRING]), |ctx, a, _| {
-                    let k = s(ctx, &a[0])?;
+                    let k = key(ctx, &a[0])?;
                     Ok(feature_prop(ctx, &k))
                 }),
                 (Sig::Fixed(vec![STRING, OBJECT]), |ctx, a, _| {
-                    let k = s(ctx, &a[0])?;
+                    let k = key(ctx, &a[0])?;
                     Ok(match a[1].evaluate(ctx)? {
                         Value::Object(o) => get_prop(&o, &k),
                         _ => Value::Null,
@@ -157,7 +173,7 @@ pub fn definition(name: &str) -> Option<Definition> {
             ],
         }),
         "feature-state" => one(VALUE, vec![STRING], |ctx, a, _| {
-            let k = s(ctx, &a[0])?;
+            let k = key(ctx, &a[0])?;
             Ok(ctx.feature_state.map_or(Value::Null, |st| get_prop(st, &k)))
         }),
         "properties" => one(OBJECT, vec![], |ctx, _, _| Ok(Value::Object(props(ctx)))),
@@ -236,7 +252,7 @@ pub fn definition(name: &str) -> Option<Definition> {
         "filter-id-<=" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_le())))),
         "filter->=" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_ge())))),
         "filter-id->=" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_ge())))),
-        "filter-has" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(has_prop(ctx, &lit(&a[0]).to_js_string())))),
+        "filter-has" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(has_prop(ctx, &lit_key(&a[0]))))),
         "filter-has-id" => one(BOOLEAN, vec![], |ctx, _, _| Ok(Value::Bool(!feature_id(ctx).is_null()))),
         "filter-type-in" => one(BOOLEAN, vec![Type::array(STRING, None)], |ctx, a, _| {
             let t = geometry_type(ctx);

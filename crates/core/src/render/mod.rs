@@ -214,27 +214,26 @@ impl FillBucket {
             .enumerate()
             .filter(|(_, f)| f.ty == GeomType::Polygon)
             .map(|(i, f)| {
-                let polygons = classify_rings(&drawn_geometry(ctx, &f.geometry), 500)
+                let rings = drawn_geometry(ctx, &f.geometry);
+                let polygons = classify_ring_indices(&rings, 500)
                     .into_iter()
                     .map(|polygon| {
-                        let mut flat = Vec::new();
-                        let mut holes = Vec::new();
+                        let polygon: Vec<&Vec<[f64; 2]>> = polygon.into_iter().map(|i| &rings[i]).collect();
+                        let len = polygon.iter().map(|r| r.len()).sum();
+                        let mut points: Vec<[f64; 2]> = Vec::with_capacity(len);
+                        let mut holes = Vec::with_capacity(polygon.len().saturating_sub(1));
                         for (i, ring) in polygon.iter().enumerate() {
                             if i > 0 {
-                                holes.push(flat.len() / 2);
+                                holes.push(points.len());
                             }
-                            for p in ring {
-                                flat.push(p[0]);
-                                flat.push(p[1]);
-                            }
+                            points.extend_from_slice(ring);
                         }
-                        let mut triangles = earcutr::earcut(&flat, &holes, 2).unwrap_or_default();
-                        let mut points = polygon.concat();
+                        let mut triangles = earcutr::earcut(points.as_flattened(), &holes, 2).unwrap_or_default();
                         // Long interior edges curve in a projected output too (after the rings' points).
                         if ctx.transform.is_projected() {
                             triangles = subdivide(&mut points, &triangles, PROJECTED_SEGMENT);
                         }
-                        FillPolygon { points, ring_lens: polygon.iter().map(Vec::len).collect(), triangles }
+                        FillPolygon { points, ring_lens: polygon.iter().map(|r| r.len()).collect(), triangles }
                     })
                     .collect();
                 (i, polygons)
@@ -861,21 +860,26 @@ fn signed_area(ring: &[[f64; 2]]) -> f64 {
 /// Group rings into polygons by winding (first ring's winding = outer), keeping at most
 /// `max_rings` rings per polygon (largest holes first), like MapLibre's `classifyRings`.
 pub fn classify_rings(rings: &[Vec<[f64; 2]>], max_rings: usize) -> Vec<Vec<Vec<[f64; 2]>>> {
+    classify_ring_indices(rings, max_rings).into_iter().map(|p| p.into_iter().map(|i| rings[i].clone()).collect()).collect()
+}
+
+/// `classify_rings` as indices into `rings`.
+pub fn classify_ring_indices(rings: &[Vec<[f64; 2]>], max_rings: usize) -> Vec<Vec<usize>> {
     if rings.len() <= 1 {
-        return vec![rings.to_vec()];
+        return vec![(0..rings.len()).collect()];
     }
-    let mut polygons: Vec<Vec<(f64, Vec<[f64; 2]>)>> = Vec::new();
+    let mut polygons: Vec<Vec<(f64, usize)>> = Vec::new();
     let mut ccw: Option<bool> = None;
-    for ring in rings {
+    for (i, ring) in rings.iter().enumerate() {
         let area = signed_area(ring);
         if area == 0.0 {
             continue;
         }
         let ccw = *ccw.get_or_insert(area < 0.0);
         if ccw == (area < 0.0) || polygons.is_empty() {
-            polygons.push(vec![(area.abs(), ring.clone())]);
+            polygons.push(vec![(area.abs(), i)]);
         } else {
-            polygons.last_mut().unwrap().push((area.abs(), ring.clone()));
+            polygons.last_mut().unwrap().push((area.abs(), i));
         }
     }
     polygons
