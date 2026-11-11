@@ -69,21 +69,26 @@ export class Target {
 
     /** `cover` for many pixels of one opaque color: `blend` with alpha 1 ignores what is below,
      * so the bytes are computed once. */
-    coverer(c: ArrayLike<number>): (i: number) => void {
+    coverer(c: ArrayLike<number>): Coverer {
         const one = new Target(1, 1);
         one.blend(0, c);
         const [r, g, b, a] = one.px;
-        const px = this.px;
-        return (i) => {
-            if (!this.visible(i)) return;
-            const o = i * 4;
-            px[o] = r;
-            px[o + 1] = g;
-            px[o + 2] = b;
-            px[o + 3] = a;
-            if (i < this.occ.length) this.occ[i] = this.layer;
-            this.markOpaque(i);
+        const {px, occ, opaque, layer, cull} = this;
+        // `cover` of pixels `i0..i1`.
+        const run = (i0: number, i1: number) => {
+            for (let i = i0; i < i1; i++) {
+                if (cull && !(occ[i] <= layer)) continue;
+                const o = i * 4;
+                px[o] = r;
+                px[o + 1] = g;
+                px[o + 2] = b;
+                px[o + 3] = a;
+                if (i < occ.length) occ[i] = layer;
+                if (i < opaque.length) opaque[i] = 1;
+            }
         };
+        const one_ = (i: number) => run(i, i + 1);
+        return Object.assign(one_, {run});
     }
 
     markOpaque(i: number): void {
@@ -104,6 +109,9 @@ export class Target {
         return p;
     }
 }
+
+/** `Target.cover` with one opaque color for a pixel, or (`run`) for pixels `i0..i1`. */
+export type Coverer = ((i: number) => void) & {run: (i0: number, i1: number) => void};
 
 /** `f32::round` (half away from zero). */
 export function round(x: number): number {

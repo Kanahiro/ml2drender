@@ -469,6 +469,10 @@ export function drawBackground(target: Target, layer: Layer, ctx: Ctx, raw: any,
         for (let y = 0; y < target.h; y++) {
             const sy = (y + 0.5) / t.pixelRatio - t.height / 2;
             const whole = inWorld(rowY(0, sy)) && inWorld(rowY(target.w - 1, sy));
+            if (whole && cover) {
+                cover.run(y * target.w, (y + 1) * target.w);
+                continue;
+            }
             for (let x = 0; x < target.w; x++) {
                 if (whole || inWorld(rowY(x, sy))) {
                     const i = y * target.w + x;
@@ -577,7 +581,7 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
             const f = bucket.features[i];
             const opacity = num(ctx.paint(layer, 'fill-opacity', f, tf.tile));
             const fillColor = color(ctx.paint(layer, 'fill-color', f, tf.tile), opacity);
-            let coverFill: ((i: number) => void) | undefined;
+            let coverFill: raster.Coverer | undefined;
             let paint: FillPaint;
             if (hasPattern) {
                 // Cross-faded "to" image: the integer zoom, or the tile zoom when data-driven.
@@ -619,7 +623,13 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                         if (constantOpaque) {
                             const w = target.w;
                             const cover = (coverFill ??= target.coverer(fillColor));
+                            const rect = tf.mask.coverage.kind === 'Rectangle' ? tf.mask.coverage : undefined;
                             raster.forEachRun(target.w, target.h, p, (y, x0, x1) => {
+                                // A rectangle mask clips the run (`mask.get` per pixel otherwise).
+                                if (rect && covered.length === 0) {
+                                    if (y >= rect.y[0] && y < rect.y[1]) cover.run(y * w + Math.max(x0, rect.x[0]), y * w + Math.min(x1, rect.x[1]));
+                                    return;
+                                }
                                 for (let x = x0; x < x1; x++) {
                                     if (tf.mask.get(x, y)) {
                                         if (covered.length > 0) covered[y * w + x] = 1;

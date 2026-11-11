@@ -1011,6 +1011,9 @@ function rotateQuad(corners: [P, P, P, P], radians: number): void {
     }
 }
 
+/** Shared by glyph quads, which never modify their offsets. */
+const ZERO: P = Object.freeze([0, 0]) as unknown as P;
+
 /** `getGlyphQuads`: vertical glyphs are pre-rotated -90° (the label is turned at render). */
 function glyphQuads(shapingIn: Shaping, textOffset: P, alongLine: boolean, textRotateDeg: number, allowVerticalPlacement: boolean): Quad[] {
     const rotate = (textRotateDeg * Math.PI) / 180.0;
@@ -1075,9 +1078,9 @@ function glyphQuads(shapingIn: Shaping, textOffset: P, alongLine: boolean, textR
                 corners,
                 tex: g.tex,
                 rect: [0, 0, rw, rh],
-                pixelOffsetTl: [0, 0],
-                pixelOffsetBr: [0, 0],
-                minFontScale: [0, 0],
+                pixelOffsetTl: ZERO,
+                pixelOffsetBr: ZERO,
+                minFontScale: ZERO,
                 glyphOffset,
                 section: g.section,
                 isSdf,
