@@ -8,6 +8,12 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 
 前提を忘れないこと: 正確さだけが目的なら MapLibre Native(ヘッドレス可)を使うほうが安い。本プロジェクトの価値は「GPU不要・軽量・WASM・サーバレス」。
 
+## TypeScript への移植(進行中)
+
+Rust 実装を捨てて純 TypeScript(WASM なし)に段階的に移す。各段階で TS 側の render / expression テストの合否を Rust 版と比べ、追いついた部分から Rust を消す。上流が npm で出している実装(`@maplibre/maplibre-gl-style-spec`, `earcut`, `geojson-vt`, `supercluster`, `pixelmatch` など)は移植せずそのまま使う(上流と一致させるのが目的なので、上流そのものが最も正確)。純 JS がなく Workers にネイティブ API もないもの(WebP)だけ自前で書く。
+
+- 済: 式評価は `@maplibre/maplibre-gl-style-spec` を使う。`pnpm test:expression` は `packages/ml2drender/tests/expression-tests.ts`(583/583)。`crates/core/src/expression/` は Rust 描画が残る間だけ使う。
+
 ## スコープ
 
 対象:
