@@ -579,7 +579,9 @@ function shadeFill(paint: FillPaint, v: ArrayLike<number>, g: ArrayLike<ArrayLik
     return mul4(c, opacity);
 }
 
-type Outline = [P, P, [number, number], [number, number], FillPaint];
+/** A polygon whose outline is drawn after the fills: its index in the tile's bucket, the fill
+ * paint (for the pattern position) and the outline's paint. */
+type Outline = [number, FillPaint, FillPaint];
 
 /** Returns whether anything was drawn in `'Opaque'`. */
 export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeatures[], raw: any, pass: Pass): boolean {
@@ -603,7 +605,9 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
     const outlineHidden = constantOpaque && antialias && !hasOutlineColor;
     const covered = new Uint8Array(outlineHidden && pass === 'All' ? target.w * target.h : 0);
     const patternProp = paintProp(layer, 'fill-pattern');
-    const prepared: [TileFeatures, Outline[]][] = [];
+    // Per tile: the edges of a polygon's rings (screen positions and pattern positions), and the outlines to draw.
+    type Segments = (pg: number, paint: FillPaint, f: (a: P, b: P, va: [number, number], vb: [number, number]) => void) => void;
+    const prepared: [TileFeatures, Segments, Outline[]][] = [];
     const projected = ctx.transform.isProjected();
     for (const tf of tiles) {
         const bucket = tf.bucket(layer, ctx, () => newFillBucket(layer, ctx, tf));
@@ -615,6 +619,18 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
         };
         const tp = new pattern.TilePattern(ctx, tf.tile);
         const outlines: Outline[] = [];
+        // Polygon `pg`'s points, their screen positions, and the varyings (only patterns read them).
+        const geometry = (pg: number, paint: FillPaint): [P[], P[], [number, number][]] => {
+            const points: P[] = [];
+            for (let k = bucket.pointStart[pg]; k < bucket.pointStart[pg + 1]; k++) points.push([bucket.xy[2 * k], bucket.xy[2 * k + 1]]);
+            const screen = points.map(toScreen);
+            const size: [number, number] = paint.kind === 'Pattern' ? pattern.displaySize(paint.img) : [1, 1];
+            const vary: [number, number][] =
+                paint.kind === 'Pattern'
+                    ? points.map((p, k) => tp.pos(size, p, screen[k]) as [number, number])
+                    : screen.map((): [number, number] => [0, 0]);
+            return [points, screen, vary];
+        };
         for (let e = 0; e < bucket.feature.length; e++) {
             const f = bucket.features[bucket.feature[e]];
             const opacity = num(ctx.paint(layer, 'fill-opacity', f, tf.tile));
@@ -634,20 +650,14 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
             } else {
                 paint = {kind: 'Color', c: fillColor};
             }
-            const size: [number, number] = paint.kind === 'Pattern' ? pattern.displaySize(paint.img) : [1, 1];
             const outlinePaint: FillPaint = hasOutlineColor
                 ? {kind: 'Color', c: color(ctx.paint(layer, 'fill-outline-color', f, tf.tile), opacity)}
                 : paint;
             for (let pg = bucket.first[e]; pg < bucket.first[e + 1]; pg++) {
-                const points: P[] = [];
-                for (let k = bucket.pointStart[pg]; k < bucket.pointStart[pg + 1]; k++) points.push([bucket.xy[2 * k], bucket.xy[2 * k + 1]]);
-                const screen = points.map(toScreen);
-                // Only patterns read the varying (outlines too: theirs is a color or this pattern).
-                const vary: [number, number][] =
-                    paint.kind === 'Pattern'
-                        ? points.map((p, k) => tp.pos(size, p, screen[k]) as [number, number])
-                        : screen.map((): [number, number] => [0, 0]);
+                // Outlines are drawn from their color or this pattern.
+                if (antialias && opacity >= 0.01) outlines.push([pg, paint, outlinePaint]);
                 if (opacity >= 0.01 && pass !== 'Translucent') {
+                    const [points, screen, vary] = geometry(pg, paint);
                     const tris = bucket.triangles.subarray(bucket.triStart[pg], bucket.triStart[pg + 1]);
                     for (let k = 0; k + 2 < tris.length; k += 3) {
                         const t0 = tris[k];
@@ -701,21 +711,23 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                         raster.triangle(target, tf.mask, p, v, (vv: ArrayLike<number>) => shadeFill(pt, vv, g));
                     }
                 }
-                if (antialias && opacity >= 0.01) {
-                    let start = 0;
-                    for (const len of bucket.ringLens.subarray(bucket.ringStart[pg], bucket.ringStart[pg + 1])) {
-                        for (let i = 1; i < len; i++) {
-                            const a = start + i - 1;
-                            const b = start + i;
-                            if (projected && bent(toScreen, points[a], points[b], screen[a], screen[b])) continue;
-                            outlines.push([screen[a], screen[b], vary[a], vary[b], outlinePaint]);
-                        }
-                        start += len;
-                    }
-                }
             }
         }
-        prepared.push([tf, outlines]);
+        // Outline segments: each ring's edges.
+        const segments = (pg: number, paint: FillPaint, f: (a: P, b: P, va: [number, number], vb: [number, number]) => void) => {
+            const [points, screen, vary] = geometry(pg, paint);
+            let start = 0;
+            for (const len of bucket.ringLens.subarray(bucket.ringStart[pg], bucket.ringStart[pg + 1])) {
+                for (let i = 1; i < len; i++) {
+                    const a = start + i - 1;
+                    const b = start + i;
+                    if (projected && bent(toScreen, points[a], points[b], screen[a], screen[b])) continue;
+                    f(screen[a], screen[b], vary[a], vary[b]);
+                }
+                start += len;
+            }
+        };
+        prepared.push([tf, segments, outlines]);
     }
     // Outlines are drawn after all fills (MapLibre's separate outline pass). The occlusion buffer
     // is read here instead of by the target, so the target's culling is off while drawing them.
@@ -731,12 +743,14 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
         return occ[i] < layerIndex || (!cull && occ[i] !== layerIndex);
     };
     const none = [[0, 0], [0, 0]];
-    for (const [tf, outlines] of prepared) {
-        for (const [a, b, va, vb, paint] of outlines) {
-            raster.line(target, (x: number, y: number) => tf.mask.get(x, y) && visible(y * w + x), a, b, (dist: number, t: number) => {
-                const alpha = 1 - raster.smoothstep(0, 1, dist);
-                const v = [va[0] + (vb[0] - va[0]) * t, va[1] + (vb[1] - va[1]) * t];
-                return mul4(shadeFill(paint, v, none), alpha);
+    for (const [tf, segments, outlines] of prepared) {
+        for (const [pg, fillPaint, paint] of outlines) {
+            segments(pg, fillPaint, (a, b, va, vb) => {
+                raster.line(target, (x: number, y: number) => tf.mask.get(x, y) && visible(y * w + x), a, b, (dist: number, t: number) => {
+                    const alpha = 1 - raster.smoothstep(0, 1, dist);
+                    const v = [va[0] + (vb[0] - va[0]) * t, va[1] + (vb[1] - va[1]) * t];
+                    return mul4(shadeFill(paint, v, none), alpha);
+                });
             });
         }
     }
