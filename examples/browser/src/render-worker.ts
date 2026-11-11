@@ -1,14 +1,16 @@
 /// <reference lib="webworker" />
-import { MapRenderer, type ProjectedView, type TileView } from 'ml2drender';
+import { MapRenderer, type ProjectedTile, type ProjectedView, type TileView } from 'ml2drender';
 import type { StyleSpecification } from 'maplibre-gl';
 
 export type WorkerRequest =
   | { kind: 'init'; generation: number; style: StyleSpecification }
-  | { kind: 'render'; generation: number; id: number; view: TileView | ProjectedView };
+  | { kind: 'render'; generation: number; id: number; view: TileView | ProjectedView }
+  | { kind: 'mvt'; generation: number; id: number; tile: ProjectedTile };
 
 export type WorkerResponse =
   | { kind: 'ready'; generation: number }
   | { kind: 'image'; generation: number; id: number; bitmap: ImageBitmap; renderMs: number }
+  | { kind: 'mvt'; generation: number; id: number; data: ArrayBuffer; renderMs: number }
   | { kind: 'error'; generation: number; id?: number; message: string };
 
 let generation = 0;
@@ -36,6 +38,21 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const active = renderer;
   if (request.generation !== generation || !active) return;
   const started = performance.now();
+  const failed = (error: unknown) => {
+    if (request.generation === generation) {
+      worker.postMessage({ kind: 'error', generation, id: request.id, message: String(error) } satisfies WorkerResponse);
+    }
+  };
+  if (request.kind === 'mvt') {
+    void active.renderProjectedMvt(request.tile)
+      .then((mvt) => {
+        if (request.generation !== generation) return;
+        const data = mvt.slice().buffer;
+        worker.postMessage({ kind: 'mvt', generation, id: request.id, data, renderMs: performance.now() - started } satisfies WorkerResponse, [data]);
+      })
+      .catch(failed);
+    return;
+  }
   const view = request.view;
   void ('projjson' in view ? active.renderProjected(view) : active.renderZxy(view))
     .then(async (image) => {
@@ -54,9 +71,5 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
         throw error;
       }
     })
-    .catch((error: unknown) => {
-      if (request.generation === generation) {
-        worker.postMessage({ kind: 'error', generation, id: request.id, message: String(error) } satisfies WorkerResponse);
-      }
-    });
+    .catch(failed);
 };

@@ -1,4 +1,4 @@
-import { addProtocol, type GeoJSONSource, type GeoJSONSourceSpecification, importScriptInWorkers, LngLat, Map as MapLibreMap, Popup, setWorkerUrl, type StyleSpecification } from 'maplibre-gl';
+import { addProtocol, type GeoJSONSource, type GeoJSONSourceSpecification, importScriptInWorkers, type LayerSpecification, LngLat, Map as MapLibreMap, Popup, setWorkerUrl, type SourceSpecification, type StyleSpecification } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import projectionHandlerUrl from './gl-projection-handler.ts?worker&url';
@@ -8,6 +8,15 @@ import { stylePresets } from './styles';
 import { TileWorker } from './worker-client';
 
 const TILE_SIZE = 256;
+/** GL JS's size for vector tiles. */
+const MVT_TILE_SIZE = 512;
+/** Vector tiles of a Mercator map: EPSG:3857 on GL JS's own tile grid. */
+const WEB_MERCATOR = {
+  definition: projjsonPresets.find((p) => p.projjson.conversion?.method?.name === 'Popular Visualisation Pseudo Mercator')!.projjson as object,
+  origin: [-20037508.342789244, 20037508.342789244] as [number, number],
+  extent: 40075016.68557849,
+};
+const modeSelect = document.getElementById('mode') as HTMLSelectElement;
 const MARGIN = 64;
 const styleInput = document.getElementById('style') as HTMLTextAreaElement;
 const projInput = document.getElementById('projjson') as HTMLTextAreaElement;
@@ -36,6 +45,7 @@ let tileRevision = 0;
 let ready = false;
 /** The applied inputs: the renderer follows these. */
 let appliedStyle: string | undefined;
+let appliedStyleSpec: StyleSpecification | undefined;
 let appliedProjJson: string | undefined;
 let appliedGeojson: string | undefined;
 const emptyCollection: GeoJSONSourceSpecification['data'] = { type: 'FeatureCollection', features: [] };
@@ -70,16 +80,29 @@ function resetStats() {
 }
 document.getElementById('reset-stats')!.onclick = resetStats;
 
-addProtocol('ml2drender', async (request, controller) => {
-  const url = new URL(request.url);
+/** A tile request of the current style and revision: `ml2drender[-mvt]://<generation>/z/x/y?revision=…`. */
+function tileRequest(requestUrl: string, signal: AbortSignal) {
+  const url = new URL(requestUrl);
   const generation = Number(url.hostname);
   const revision = Number(url.searchParams.get('revision'));
   const checkActive = () => {
-    controller.signal.throwIfAborted();
+    signal.throwIfAborted();
     if (!ready || generation !== styleGeneration || revision !== tileRevision) throw new DOMException('Style changed', 'AbortError');
   };
   checkActive();
   const [z, x, y] = url.pathname.slice(1).split('/').map(Number);
+  return { url, z, x, y, checkActive };
+}
+
+function recordTile(renderMs: number, started: number) {
+  samples.push({ renderMs, roundTripMs: performance.now() - started });
+  if (samples.length > 200) samples.shift();
+  completedTiles++;
+  updateStats();
+}
+
+addProtocol('ml2drender', async (request, controller) => {
+  const { z, x, y, checkActive } = tileRequest(request.url, controller.signal);
   const n = 2 ** z;
   const options = { pixelRatio: devicePixelRatio, margin: MARGIN };
   let view: Parameters<TileWorker['render']>[0];
@@ -95,15 +118,29 @@ addProtocol('ml2drender', async (request, controller) => {
   const { bitmap, renderMs } = await tileWorker.render(view);
   try {
     checkActive();
-    samples.push({ renderMs, roundTripMs: performance.now() - started });
-    if (samples.length > 200) samples.shift();
-    completedTiles++;
-    updateStats();
+    recordTile(renderMs, started);
     return { data: bitmap };
   } catch (error) {
     bitmap.close();
     throw error;
   }
+});
+
+// Vector mode: a source of the style as vector tiles on the map's grid, drawn by GL JS.
+addProtocol('ml2drender-mvt', async (request, controller) => {
+  const { url, z, x, y, checkActive } = tileRequest(request.url, controller.signal);
+  const crs = projection ?? WEB_MERCATOR;
+  const started = performance.now();
+  const { data, renderMs } = await tileWorker.renderMvt({
+    projjson: crs.definition,
+    tileMatrixSet: { origin: crs.origin, extentAtZoom0: crs.extent },
+    z, x, y,
+    tileSize: MVT_TILE_SIZE,
+    source: url.searchParams.get('source')!,
+  });
+  checkActive();
+  recordTile(renderMs, started);
+  return { data };
 });
 
 setWorkerUrl(workerUrl);
@@ -132,44 +169,71 @@ map.on('error', (event) => {
   if (!(event.error instanceof Error && event.error.name === 'AbortError')) fail(event.error);
 });
 
-// Hovering a city of the check layer shows its attributes.
+// Hovering a feature of the check overlay, or in vector mode of the style, shows its attributes.
 const popup = new Popup({ closeButton: false, closeOnClick: false, maxWidth: '320px' });
 const checkLayers = ['check-fill', 'check-line', 'check'];
-map.on('mousemove', checkLayers, (event) => {
-  const feature = event.features?.[0];
-  if (!feature) return;
+/** Layers whose features show on hover (set by `redraw`). */
+let hoverLayers = checkLayers;
+const hideHover = () => {
+  map.getCanvas().style.cursor = '';
+  popup.remove();
+};
+map.on('mousemove', (event) => {
+  const layers = hoverLayers.filter((id) => map.getLayer(id));
+  const feature = layers.length ? map.queryRenderedFeatures(event.point, { layers })[0] : undefined;
+  if (!feature) return hideHover();
   map.getCanvas().style.cursor = 'pointer';
   const pre = document.createElement('pre');
   pre.style.cssText = 'margin:0;max-height:240px;overflow:auto;font-size:11px';
-  pre.textContent = Object.entries(feature.properties).map(([k, v]) => `${k}: ${v}`).join('\n');
+  const title = `[${feature.layer.id}${feature.sourceLayer ? ` · ${feature.sourceLayer}` : ''}]`;
+  const id = feature.id === undefined ? [] : [`id: ${feature.id}`];
+  pre.textContent = [title, ...id, ...Object.entries(feature.properties).map(([k, v]) => `${k}: ${v}`)].join('\n');
   popup.setLngLat(event.lngLat).setDOMContent(pre).addTo(map);
 });
-map.on('mouseleave', checkLayers, () => {
-  map.getCanvas().style.cursor = '';
-  popup.remove();
-});
+map.getCanvas().addEventListener('mouseleave', hideHover);
+
+/** The applied style for GL JS to draw from ml2drender's vector tiles, without the layers of other sources. */
+function vectorStyle(style: StyleSpecification, revision: string): Pick<StyleSpecification, 'sources' | 'layers' | 'glyphs' | 'sprite'> {
+  const sources: Record<string, SourceSpecification> = {};
+  for (const [id, source] of Object.entries(style.sources)) {
+    if (source.type !== 'vector' && source.type !== 'geojson') continue;
+    const tiles = [`ml2drender-mvt://${styleGeneration}/{z}/{x}/{y}?source=${encodeURIComponent(id)}&${revision}`];
+    sources[id] = { type: 'vector', tiles, maxzoom: 22, attribution: source.attribution };
+  }
+  const layers = style.layers.flatMap((layer): LayerSpecification[] => {
+    if (layer.type === 'background') return [layer];
+    const source = 'source' in layer && typeof layer.source === 'string' ? layer.source : undefined;
+    if (!source || !sources[source]) return [];
+    // A GeoJSON source's tile has one layer, named after the source.
+    return [style.sources[source].type === 'geojson' ? { ...layer, 'source-layer': source } as LayerSpecification : layer];
+  });
+  return { sources, layers, ...(style.glyphs && { glyphs: style.glyphs }), ...(style.sprite && { sprite: style.sprite }) };
+}
 
 /** Shows the rendered tiles of the applied style and projection again. */
 function redraw() {
   if (!ready) return;
   status('Rendering tiles…');
   // A new URL revision bypasses GL JS's tile cache on explicit redraw.
-  const crsParam = projection ? `&crs=${encodeURIComponent(projection.name)}` : '';
+  const revision = `revision=${++tileRevision}${projection ? `&crs=${encodeURIComponent(projection.name)}` : ''}`;
+  const tiles: Pick<StyleSpecification, 'sources' | 'layers' | 'glyphs' | 'sprite'> = modeSelect.value === 'vector'
+    ? vectorStyle(appliedStyleSpec!, revision)
+    : {
+      sources: { rendered: { type: 'raster', tiles: [`ml2drender://${styleGeneration}/{z}/{x}/{y}?${revision}`], tileSize: TILE_SIZE, maxzoom: 23 } },
+      layers: [{ id: 'rendered', type: 'raster', source: 'rendered', paint: { 'raster-fade-duration': 0 } }],
+    };
+  hoverLayers = [...checkLayers, ...tiles.layers.filter((l) => l.type !== 'background' && l.id !== 'rendered').map((l) => l.id)];
   map.setStyle({
     version: 8,
     projection: { type: projection?.name ?? 'mercator' },
+    ...tiles,
     sources: {
-      rendered: {
-        type: 'raster',
-        tiles: [`ml2drender://${styleGeneration}/{z}/{x}/{y}?revision=${++tileRevision}${crsParam}`],
-        tileSize: TILE_SIZE,
-        maxzoom: 23,
-      },
+      ...tiles.sources,
       // Drawn by GL JS itself, to check that its projection lines up with the rendered tiles.
       check: { type: 'geojson', data: overlay() },
     },
     layers: [
-      { id: 'rendered', type: 'raster', source: 'rendered', paint: { 'raster-fade-duration': 0 } },
+      ...tiles.layers,
       { id: 'check-fill', type: 'fill', source: 'check', filter: ['in', ['geometry-type'], ['literal', ['Polygon', 'MultiPolygon']]], paint: { 'fill-color': '#1e6fd9', 'fill-opacity': 0.2 } },
       { id: 'check-line', type: 'line', source: 'check', filter: ['!', ['in', ['geometry-type'], ['literal', ['Point', 'MultiPoint']]]], paint: { 'line-color': '#1e6fd9', 'line-width': 1.5 } },
       { id: 'check', type: 'circle', source: 'check', filter: ['in', ['geometry-type'], ['literal', ['Point', 'MultiPoint']]], paint: { 'circle-radius': 3, 'circle-color': '#1e6fd9', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1 } },
@@ -196,6 +260,7 @@ async function applyStyle(): Promise<boolean> {
   initMs = performance.now() - started;
   updateStats();
   appliedStyle = text;
+  appliedStyleSpec = style;
   ready = true;
   return true;
 }
@@ -274,10 +339,15 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('.editor-headi
   };
 }
 map.on('idle', () => {
-  if (ready && map.getSource('rendered') && map.isSourceLoaded('rendered') && !statusEl.classList.contains('error')) {
+  if (ready && map.isStyleLoaded() && !statusEl.classList.contains('error')) {
     status(`Done · zoom ${map.getZoom().toFixed(2)}`);
   }
 });
+
+// Raster tiles or vector tiles: queued behind any apply, which may be loading a style.
+modeSelect.onchange = () => {
+  applying = applying.then(redraw);
+};
 
 // Presets fill in an input and apply it.
 stylePresetSelect.append(...stylePresets.map((p, i) => new Option(p.label, String(i))));
