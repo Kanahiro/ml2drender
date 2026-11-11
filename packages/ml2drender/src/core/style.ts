@@ -77,8 +77,13 @@ export class PropValue {
     }
 
     static constant(v: Value): PropValue {
-        return new PropValue('constant', () => v);
+        const p = new PropValue('constant', () => v);
+        p.literal = {v};
+        return p;
     }
+
+    /** Set for plain constants (not expressions), which every evaluation returns as is. */
+    private literal: {v: Value} | undefined;
 
     /** `normalizePropertyExpression`; `undefined` when the value does not compile. */
     static compile(value: unknown, spec: any, rootKey: string, globalState: Properties): PropValue | undefined {
@@ -137,6 +142,7 @@ export class PropValue {
     }
 
     eval(zoom: number, feature?: Feature, canonical?: CanonicalTileId): Value {
+        if (this.literal) return this.literal.v;
         return this.fn({zoom}, feature ? specFeature(feature) : null, canonical ?? null);
     }
 

@@ -207,8 +207,9 @@ export class Ctx {
         return masks;
     }
 
+    /** The tile's canonical ID (expressions only read `z`, `x`, `y`). */
     static canonical(tile: RenderTile): CanonicalTileId {
-        return {z: tile.canonical.z, x: tile.canonical.x, y: tile.canonical.y};
+        return tile.canonical;
     }
 
     /** Filter and prepare a tile layer's features (MapLibre `populate`): geometry scaled to
