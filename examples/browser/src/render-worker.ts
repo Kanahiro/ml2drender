@@ -45,7 +45,7 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
     }
   };
   if (request.kind === 'source') {
-    void active.projected(request.crs).renderSource(request.tile)
+    void active.projected(request.crs).getTile(request.tile)
       .then((tile) => {
         if (request.generation !== generation) return;
         const data = tile.slice().buffer;

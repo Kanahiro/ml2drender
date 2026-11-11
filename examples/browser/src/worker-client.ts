@@ -91,8 +91,8 @@ export class TileWorker {
     return this.request({ kind: 'render', tile, crs }) as Promise<TileImage>;
   }
 
-  /** A tile of a source of the style in `crs` (see `ProjectedRenderer.renderSource`). */
-  renderSource(tile: SourceTile, crs: Crs): Promise<SourceData> {
+  /** A tile of a source of the style in `crs` (see `ProjectedRenderer.getTile`). */
+  getTile(tile: SourceTile, crs: Crs): Promise<SourceData> {
     return this.request({ kind: 'source', tile, crs }) as Promise<SourceData>;
   }
 

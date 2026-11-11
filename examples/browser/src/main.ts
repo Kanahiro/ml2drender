@@ -125,7 +125,7 @@ addProtocol('ml2drender', async (request, controller) => {
 addProtocol('ml2drender-source', async (request, controller) => {
   const { url, z, x, y, checkActive } = tileRequest(request.url, controller.signal);
   const started = performance.now();
-  const { data, renderMs } = await tileWorker.renderSource({ source: url.searchParams.get('source')!, z, x, y }, rendererCrs() ?? WEB_MERCATOR);
+  const { data, renderMs } = await tileWorker.getTile({ source: url.searchParams.get('source')!, z, x, y }, rendererCrs() ?? WEB_MERCATOR);
   checkActive();
   recordTile(renderMs, started);
   return { data };

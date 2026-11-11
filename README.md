@@ -14,7 +14,7 @@ rustup target add wasm32-unknown-unknown
 pnpm demo
 ```
 
-`pnpm demo` は WASM をビルドして Vite のデモ画面を起動します。地図ペイン右上の切り替えで、本レンダラが生成した 256px ラスタータイルを MapLibre GL JS の raster ソースで表示するか、`renderer.projected(crs).renderSource` で再投影した各ソース（ベクトルタイル・ラスタ・DEM）から GL JS 自身にスタイルを描かせるか（`toStyle`）を選べます。GL JS で描くときは、地物にマウスを重ねるとレイヤ名・ソースレイヤ・ID・属性を表示します。左の Style JSON・PROJJSON・GeoJSON の入力欄が描画の設定で、入力が止まると（500ms のデバウンス）自動で反映します。各欄は見出しで開閉でき、閉じているときはプルダウンだけ、開くと直接入力できます。それぞれのプルダウンで入力欄をプリセット（スタイル: MapLibre デモタイル・経緯線付き・地理院タイル・OpenFreeMap Liberty、投影: 経緯度・Equal Earth・平面直角座標系・UTM・Lambert-93・LAEA Europe・極ステレオ・ひまわり Full Disk など）に書き換えて再描画します。PROJJSON が空欄なら Web Mercator を再投影なしで描きます。PROJJSON を指定すると、`loadProjection` の投影式と、PROJJSON の `bbox`（適用範囲、なければ全球）を投影した正方形のタイル格子で GL JS の `addProjection` に登録し、各タイルを `renderer.projected(crs).renderTile`（PROJJSON が空欄なら `renderZxy`）で描きます。整合確認用に GeoJSON 欄の内容（既定は Natural Earth の都市）を GL JS 自身が重ね、ホバーで属性を表示します。GL JS は GeoJSON を Worker でタイル化するので、`importScriptInWorkers` で `loadProjectionFactory` を使う `setProjectionHandler` を Worker に読み込みます。表示位置は URL ハッシュ（`#zoom/lat/lng`）に残り、投影を切り替えても同じ場所・ほぼ同じ縮尺を保ちます。リソース取得と WASM 描画は複数の Web Worker（最大4、CPUコア数−1）で並列に実行し、Worker 内で `ImageBitmap` に変換して所有権を移譲し、メインスレッドでタイルに表示します。デモではレンダラを無期限に再利用し（`ttlMs: Infinity`）、取得はブラウザの HTTP キャッシュに任せます。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
+`pnpm demo` は WASM をビルドして Vite のデモ画面を起動します。地図ペイン右上の切り替えで、本レンダラが生成した 256px ラスタータイルを MapLibre GL JS の raster ソースで表示するか、`renderer.projected(crs).getTile` で再投影した各ソース（ベクトルタイル・ラスタ・DEM）から GL JS 自身にスタイルを描かせるか（`toStyle`）を選べます。GL JS で描くときは、地物にマウスを重ねるとレイヤ名・ソースレイヤ・ID・属性を表示します。左の Style JSON・PROJJSON・GeoJSON の入力欄が描画の設定で、入力が止まると（500ms のデバウンス）自動で反映します。各欄は見出しで開閉でき、閉じているときはプルダウンだけ、開くと直接入力できます。それぞれのプルダウンで入力欄をプリセット（スタイル: MapLibre デモタイル・経緯線付き・地理院タイル・OpenFreeMap Liberty、投影: 経緯度・Equal Earth・平面直角座標系・UTM・Lambert-93・LAEA Europe・極ステレオ・ひまわり Full Disk など）に書き換えて再描画します。PROJJSON が空欄なら Web Mercator を再投影なしで描きます。PROJJSON を指定すると、`loadProjection` の投影式と、PROJJSON の `bbox`（適用範囲、なければ全球）を投影した正方形のタイル格子で GL JS の `addProjection` に登録し、各タイルを `renderer.projected(crs).renderTile`（PROJJSON が空欄なら `renderZxy`）で描きます。整合確認用に GeoJSON 欄の内容（既定は Natural Earth の都市）を GL JS 自身が重ね、ホバーで属性を表示します。GL JS は GeoJSON を Worker でタイル化するので、`importScriptInWorkers` で `loadProjectionFactory` を使う `setProjectionHandler` を Worker に読み込みます。表示位置は URL ハッシュ（`#zoom/lat/lng`）に残り、投影を切り替えても同じ場所・ほぼ同じ縮尺を保ちます。リソース取得と WASM 描画は複数の Web Worker（最大4、CPUコア数−1）で並列に実行し、Worker 内で `ImageBitmap` に変換して所有権を移譲し、メインスレッドでタイルに表示します。デモではレンダラを無期限に再利用し（`ttlMs: Infinity`）、取得はブラウザの HTTP キャッシュに任せます。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
 
 デモの統計欄には、完了タイル数と直近200タイルの生成時間（平均・p95・最大）、平均Worker往復時間、初期化時間を表示します。生成時間には素材取得を含み、往復時間には画像変換・通信・待ち時間も含みます。画面への表示時間やWASM単体のCPU時間ではありません。Style JSON が変わるとスタイルとレンダラ、統計を初期化し、PROJJSON だけの変更では Worker 内のレンダラ（デコード済みタイル）を維持します。
 
@@ -62,11 +62,11 @@ canvas.getContext('2d')!.putImageData(
 - `renderer.projected(crs)`: このレンダラで CRS `crs` に描く `ProjectedRenderer` を返します（[投影座標系](#投影座標系)）。`crs` は MapLibre GL JS の `addProjection` に登録する CRS と同じく `name`（GL JS での名前）・`tileMatrixSet` を持ち、CRS 自体は `projjson`（PROJJSON オブジェクト）で指定します。`tileMatrixSet` は `{ origin: [minX, maxY], extentAtZoom0 }` で、タイル 0/0/0 は左上が `origin`・一辺 `extentAtZoom0` の正方形、ズームごとに 4 分割し、x は東、y は南に増えます。非対応の CRS は描画時に例外になります。
   - `render(view)`: CRS の範囲の地図画像。`bbox: [minX, minY, maxX, maxY]`（CRS の単位、経緯度なら度）、`width`、`height` は必須です。bbox は出力の幅・高さにそのまま割り当てるので、縦横比を揃えてください。回転には対応していません。
   - `renderTile(tile)`: CRS の格子のタイル `z`/`x`/`y` の地図画像。`tileSize`（CSS ピクセル、既定 256）は省略できます。
-  - `renderSource(tile)`: 地図画像ではなく、スタイルの 1 ソース `source` のデータを格子のタイル `z`/`x`/`y` に再投影して `Promise<Uint8Array>` で返します。GL JS がそのソースのタイルとして読み、スタイルを当てて描くための材料です（`toStyle`）。元ソースのズームは、そのタイルを 512 CSS ピクセルで描く場合のものです。
+  - `getTile(tile)`: 地図画像ではなく、スタイルの 1 ソース `source` のデータを格子のタイル `z`/`x`/`y` に再投影して `Promise<Uint8Array>` で返します。GL JS がそのソースのタイルとして読み、スタイルを当てて描くための材料です（`toStyle`）。元ソースのズームは、そのタイルを 512 CSS ピクセルで描く場合のものです。
     - vector / GeoJSON: ベクトルタイル（MVT、extent 4096、外側 128 単位まで）。スタイルのレイヤやフィルタに関係なく、ソースのレイヤ・地物・属性をそのまま出力します（GeoJSON ソースはソース ID のレイヤ名、null の属性は省き、配列・オブジェクトは JSON 文字列）。元タイルの境界で切られたポリゴンは、属性が同じ断片どうしを結合してから投影するので、境界で割れません（つながった部分ごとに 1 地物で、ID は断片の ID がそろうときだけ残します。接する同じ属性のポリゴンは一つになります）。線は元タイルの境界で分かれます。投影の定義域（静止衛星の見えない側など）から外れる部分は除き、線は定義域の縁で終わり、ポリゴンは縁に沿って閉じます。
     - raster / image: 512px の PNG。既定の paint の raster レイヤでそのソースを描いたものです（image ソースもタイルになります）。
     - raster-dem: 512px の PNG。各画素の位置の標高（元 DEM から双線形補間）を `terrarium` で符号化したものです。
-  - `toStyle({ tiles })`: `init` に渡したスタイルを、GL JS が CRS `crs.name` の上で `renderSource` のタイルから描くスタイルに書き換えて返します。`tiles(sourceId)` は各ソースのタイル URL テンプレート（その CRS の格子の `{z}/{x}/{y}`）を返す関数です。vector / GeoJSON ソースは vector に（GeoJSON ソースのレイヤには `source-layer` を補います）、raster / image は raster に、raster-dem は `terrarium` の raster-dem に、いずれも 512px タイルで置き換えます。それ以外（video）のソースのレイヤは除きます。fill-extrusion レイヤはそのまま残ります。GL JS は投影格子上の自分のズームでスタイルを評価し、hillshade の傾斜もタイルのズームから求めるので、本レンダラの描画とはズーム依存の見え方が少し違います。
+  - `toStyle({ tiles })`: `init` に渡したスタイルを、GL JS が CRS `crs.name` の上で `getTile` のタイルから描くスタイルに書き換えて返します。`tiles(sourceId)` は各ソースのタイル URL テンプレート（その CRS の格子の `{z}/{x}/{y}`）を返す関数です。vector / GeoJSON ソースは vector に（GeoJSON ソースのレイヤには `source-layer` を補います）、raster / image は raster に、raster-dem は `terrarium` の raster-dem に、いずれも 512px タイルで置き換えます。それ以外（video）のソースのレイヤは除きます。fill-extrusion レイヤはそのまま残ります。GL JS は投影格子上の自分のズームでスタイルを評価し、hillshade の傾斜もタイルのズームから求めるので、本レンダラの描画とはズーム依存の見え方が少し違います。
 - `pixelRatio`: 地図画像を返す全メソッド共通。出力の画素数は CSS ピクセル × `pixelRatio`（既定 1）です。
 - `margin`: 四辺に追加する描画余白（CSS ピクセル単位の非負整数、既定 0）。余白までタイル取得・symbol の衝突判定・描画を行い、中央の指定サイズを返します。出力サイズ・中心・ズームは変わりません。タイル境界の外側にアンカーを持つ symbol の欠落を軽減できますが、タイルごとの衝突判定の一致を保証するものではありません。余白を増やすほど取得量・描画時間・メモリ使用量も増えます。デモでは `64` CSS ピクセルを指定しています。大きな symbol には、より広い余白が必要になる場合があります。
 - `RenderedImage`: `width`、`height`、行優先の 8 bit RGBA 画素列 `data: Uint8ClampedArray` を持ちます。取得や描画の失敗は例外になります。
@@ -89,7 +89,7 @@ const image = await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000],
 const tile = await utm.renderTile({ z: 3, x: 4, y: 2 });
 
 // GL JS 自身に描かせる: 各ソースを再投影したタイルを配信し、書き換えたスタイルを渡す
-const mvt = await utm.renderSource({ source: 'openmaptiles', z: 3, x: 4, y: 2 });
+const mvt = await utm.getTile({ source: 'openmaptiles', z: 3, x: 4, y: 2 });
 const style = utm.toStyle({ tiles: (source) => `https://tiles.example.com/${source}/{z}/{x}/{y}` });
 ```
 

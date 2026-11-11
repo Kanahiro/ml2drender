@@ -79,7 +79,7 @@ export interface TileMatrixSet {
   extentAtZoom0: number;
 }
 
-/** A source of the style in a tile of a CRS's grid (see `ProjectedRenderer.renderSource`). */
+/** A source of the style in a tile of a CRS's grid (see `ProjectedRenderer.getTile`). */
 export interface SourceTile {
   /** A vector, GeoJSON, raster, raster-dem or image source of the style. */
   source: string;
@@ -105,10 +105,10 @@ export interface ProjectedRenderer {
    *
    * Source data is fetched at the zoom of the tile drawn at 512 CSS pixels.
    */
-  renderSource(tile: SourceTile): Promise<Uint8Array<ArrayBuffer>>;
+  getTile(tile: SourceTile): Promise<Uint8Array<ArrayBuffer>>;
   /**
    * The style for MapLibre GL JS to draw in the CRS (registered with `addProjection` as `crs.name`) from tiles of
-   * `renderSource`, whose URL templates (`{z}/{x}/{y}` of the CRS's grid) `tiles` gives for each source: vector and
+   * `getTile`, whose URL templates (`{z}/{x}/{y}` of the CRS's grid) `tiles` gives for each source: vector and
    * GeoJSON sources become vector sources (layers of a GeoJSON source read the layer named after it), raster and
    * image sources raster sources, raster-dem sources terrarium ones, all of 512 px tiles. Layers of other sources
    * (video) are left out. The style is the one given to `init`, fill-extrusion layers included.
@@ -511,7 +511,7 @@ export class MapRenderer {
         if (!Number.isInteger(tileSize) || tileSize < 1) throw new RangeError('tileSize must be a positive integer');
         return render({ bbox: box(tile), width: tileSize, height: tileSize, pixelRatio, margin });
       },
-      renderSource: (tile) => {
+      getTile: (tile) => {
         if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
         const view = { bbox: box(tile), width: 512, height: 512 };
         return this.run(...this.projectedArgs(projjson, view), encoder.encode(tile.source), this.wasm.renderer_export_tile);

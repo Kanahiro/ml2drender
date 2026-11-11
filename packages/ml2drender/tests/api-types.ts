@@ -21,14 +21,14 @@ async function projectedPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuf
 }
 
 async function sourceTile(renderer: MapRenderer): Promise<Response> {
-  const mvt = await renderer.projected(crs).renderSource({ source: 'openmaptiles', z: 3, x: 4, y: 2 });
+  const mvt = await renderer.projected(crs).getTile({ source: 'openmaptiles', z: 3, x: 4, y: 2 });
   // @ts-expect-error A source's tile is addressed by its tile index, not a box.
-  await renderer.projected(crs).renderSource({ source: 'openmaptiles', bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
+  await renderer.projected(crs).getTile({ source: 'openmaptiles', bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
   return new Response(mvt, { headers: { 'Content-Type': 'application/vnd.mapbox-vector-tile' } });
 }
 
 function glStyle(renderer: MapRenderer): StyleSpecification {
-  // The style for GL JS, from tiles a Worker serves with `renderSource`.
+  // The style for GL JS, from tiles a Worker serves with `getTile`.
   return renderer.projected(crs).toStyle({ tiles: (source) => `https://example.com/${source}/{z}/{x}/{y}` });
 }
 
