@@ -1,8 +1,4 @@
 import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
-import { Renderer, View as CoreView } from './core/renderer.ts';
-import { Projection as CoreProjection } from './core/projection.ts';
-import { encodePng } from './core/encode.ts';
-import { encodeWebp } from './core/webp.ts';
 
 /** A Web Mercator camera. */
 export interface View {
@@ -67,9 +63,9 @@ export interface RenderedImage {
   height: number;
   /** Row-major, 8-bit RGBA pixels. */
   data: Uint8ClampedArray<ArrayBuffer>;
-  /** Encode `data` as an owned, lossless RGBA8 PNG. */
+  /** Encode `data` inside WASM as an owned, lossless RGBA8 PNG. */
   toPng(): Uint8Array<ArrayBuffer>;
-  /** Encode `data` as an owned, lossless WebP. */
+  /** Encode `data` inside WASM as an owned, lossless WebP. */
   toWebp(): Uint8Array<ArrayBuffer>;
 }
 
@@ -82,6 +78,8 @@ export type { StyleSpecification };
 export interface InitOptions {
   /** Load complete resource bytes, or null for a missing resource (HTTP 404). Other failures must reject. */
   loadResource?: (url: string) => Promise<Uint8Array<ArrayBuffer> | null>;
+  /** Precompiled WASM (required on Cloudflare Workers). Defaults to the bundled asset in browsers. */
+  wasm?: WebAssembly.Module;
   /**
    * Decoded resources (tiles and their layer geometry, sprites, glyphs) are kept inside the
    * renderer and reused by later renders; the first render ttlMs or more after they started
@@ -91,6 +89,29 @@ export interface InitOptions {
   cache?: { ttlMs?: number };
   /** Replace each fill-extrusion layer. Defaults to a fill preserving its 2D appearance. */
   transformFillExtrusion?: (layer: FillExtrusionLayer) => StyleLayer;
+}
+
+interface WasmExports {
+  memory: WebAssembly.Memory;
+  alloc(len: number): number;
+  dealloc(ptr: number, len: number): void;
+  out_ptr(): number;
+  out_len(): number;
+  renderer_new(stylePtr: number, styleLen: number, ...view: ViewArgs): number;
+  renderer_set_view(handle: number, ...view: ViewArgs): void;
+  renderer_set_projected_view(handle: number, projjsonPtr: number, projjsonLen: number, minX: number, minY: number, maxX: number, maxY: number, width: number, height: number, pixelRatio: number, margin: number): number;
+  renderer_set_ticket(handle: number, ticket: number): void;
+  renderer_needs(handle: number): number;
+  renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
+  renderer_render(handle: number, oldest: number): number;
+  encode_png(ptr: number, len: number, width: number, height: number): number;
+  encode_webp(ptr: number, len: number, width: number, height: number): number;
+  renderer_free(handle: number): void;
+  projection_new(ptr: number, len: number): number;
+  projection_forward(handle: number, lng: number, lat: number): number;
+  projection_inverse(handle: number, x: number, y: number): number;
+  projection_free(handle: number): void;
+  xy_ptr(): number;
 }
 
 /** A CRS's projection, computed by the renderer itself. */
@@ -103,14 +124,16 @@ export interface Projection {
 
 type ViewArgs = [lng: number, lat: number, zoom: number, bearing: number, width: number, height: number, pixelRatio: number, margin: number];
 
-/** A core renderer shared by overlapping renders; dropped once retired. */
+/** A WASM renderer shared by overlapping renders; freed once retired and idle. */
 interface Core {
-  renderer: Renderer;
+  handle: number;
   createdAt: number;
   active: number;
   retired: boolean;
 }
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
 const SUPPORTED_LAYERS = new Set<string>([
   'background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap',
@@ -126,29 +149,89 @@ async function fetchResource(url: string): Promise<Uint8Array<ArrayBuffer> | nul
   return new Uint8Array(await response.arrayBuffer());
 }
 
+/** The bundled module, compiled once. */
+let bundled: Promise<WebAssembly.Module> | undefined;
+
+async function loadWasm(module: WebAssembly.Module | undefined): Promise<WasmExports> {
+  if (!module) {
+    // Vite bundles this asset for browsers. Workers supply their imported module and
+    // never fetch or compile WASM at runtime. Fetched directly: `loadResource` serves the style.
+    if (!bundled) {
+      const url = new URL('../wasm/ml2drender_wasm.wasm', import.meta.url).href;
+      bundled = fetchResource(url).then((bytes) => {
+        if (bytes === null) throw new Error(`WASM not found: ${url}`);
+        return WebAssembly.compile(bytes);
+      });
+      // A failed load is retried by the next call.
+      bundled.catch(() => { bundled = undefined; });
+    }
+    module = await bundled;
+  }
+  const instance = await WebAssembly.instantiate(module);
+  return instance.exports as unknown as WasmExports;
+}
+
+/** Copied output buffer of the last call. */
+function output(w: WasmExports): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(w.memory.buffer, w.out_ptr(), w.out_len()).slice();
+}
+
+function withBytes<T>(w: WasmExports, bytes: Uint8Array, call: (ptr: number, len: number) => T): T {
+  const ptr = w.alloc(bytes.length);
+  new Uint8Array(w.memory.buffer, ptr, bytes.length).set(bytes);
+  try {
+    return call(ptr, bytes.length);
+  } finally {
+    w.dealloc(ptr, bytes.length);
+  }
+}
+
+/** One WASM instance per module for all projections (the bundled one under `undefined`). */
+const projectionWasm = new Map<WebAssembly.Module | undefined, Promise<WasmExports>>();
+const freeProjection = new FinalizationRegistry<{ w: WasmExports; handle: number }>(({ w, handle }) => w.projection_free(handle));
+
 /**
  * Load a PROJJSON CRS the way `renderProjected` reads `ProjectedView.projjson`, e.g. to compute
  * tile bounds or to register the CRS with MapLibre's `addProjection`, so both agree on the CRS.
  * Throws for a CRS the renderer does not support.
  */
-export async function loadProjection(projjson: object): Promise<Projection> {
-  return createProjection(projjson);
+export async function loadProjection(projjson: object, options: Pick<InitOptions, 'wasm'> = {}): Promise<Projection> {
+  return (await loadProjectionFactory(options))(projjson);
 }
 
 /**
- * A synchronous `loadProjection`, for hosts that must build a projection without awaiting, such
- * as MapLibre's worker `setProjectionHandler`.
+ * Load the WASM once and return a synchronous `loadProjection`, for hosts that must build a
+ * projection without awaiting, such as MapLibre's worker `setProjectionHandler`.
  */
-export async function loadProjectionFactory(): Promise<(projjson: object) => Projection> {
-  return createProjection;
-}
-
-function createProjection(projjson: object): Projection {
-  if (!projjson || typeof projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
-  const p = CoreProjection.parse(JSON.stringify(projjson));
-  return {
-    forward: ([lng, lat]) => p.forward(lng, lat),
-    inverse: ([x, y]) => p.inverse([x, y]) ?? [NaN, NaN],
+export async function loadProjectionFactory(options: Pick<InitOptions, 'wasm'> = {}): Promise<(projjson: object) => Projection> {
+  let instance = projectionWasm.get(options.wasm);
+  if (!instance) {
+    instance = loadWasm(options.wasm);
+    projectionWasm.set(options.wasm, instance);
+    // A failed load is retried by the next call.
+    instance.catch(() => projectionWasm.delete(options.wasm));
+  }
+  const w = await instance;
+  return (projjson) => {
+    if (!projjson || typeof projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
+    const handle = withBytes(w, encoder.encode(JSON.stringify(projjson)), (ptr, len) => w.projection_new(ptr, len));
+    if (!handle) throw new Error(decoder.decode(output(w)));
+    // A fresh view per call: memory growth detaches earlier ones.
+    const xy = () => [...new Float64Array(w.memory.buffer, w.xy_ptr(), 2)];
+    // The methods hold `owner`, which frees the handle once collected: callers may keep only them.
+    const owner = { handle };
+    const projection: Projection = {
+      forward: ([lng, lat]) => {
+        w.projection_forward(owner.handle, lng, lat);
+        return xy();
+      },
+      inverse: ([x, y]) => {
+        w.projection_inverse(owner.handle, x, y);
+        return xy();
+      },
+    };
+    freeProjection.register(owner, { w, handle });
+    return projection;
   };
 }
 
@@ -242,7 +325,7 @@ function flattenFillExtrusion(layer: FillExtrusionLayer): FillLayerSpecification
   };
 }
 
-function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOptions['transformFillExtrusion']> = flattenFillExtrusion): object {
+function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOptions['transformFillExtrusion']> = flattenFillExtrusion): Uint8Array {
   if (!style || typeof style !== 'object' || !Array.isArray(style.layers)) {
     throw new Error('Style must contain a layers array');
   }
@@ -254,65 +337,40 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
     }
     return replacement;
   });
-  return jsonClone({ ...style, layers }) as object;
-}
-
-/** `JSON.parse(JSON.stringify(v))` for the values a style holds, in one pass (a style can carry
- * large inline GeoJSON). Throws on cycles, like `JSON.stringify`. */
-function jsonClone(v: unknown): unknown {
-  if (typeof v === 'number') return Number.isFinite(v) ? v + 0 : null; // -0 → 0
-  if (typeof v === 'bigint') throw new TypeError('BigInt is not JSON');
-  if (typeof v !== 'object' || v === null) return v;
-  const j = (v as { toJSON?: unknown }).toJSON;
-  if (typeof j === 'function') return jsonClone(j.call(v));
-  if (Array.isArray(v)) {
-    const out = new Array(v.length);
-    for (let i = 0; i < v.length; i++) {
-      const e = jsonClone(v[i]);
-      out[i] = e === undefined || typeof e === 'function' || typeof e === 'symbol' ? null : e;
-    }
-    return out;
-  }
-  const out: Record<string, unknown> = {};
-  for (const k of Object.keys(v)) {
-    const e = jsonClone((v as Record<string, unknown>)[k]);
-    if (e !== undefined && typeof e !== 'function' && typeof e !== 'symbol') out[k] = e;
-  }
-  return out;
+  return encoder.encode(JSON.stringify({ ...style, layers }));
 }
 
 /** Render a MapLibre Style as a static 2D RGBA image. */
 export class MapRenderer {
   private core?: Core;
+  /** A trap (Rust panic or out of memory) left the WASM instance in an unknown state. */
+  private broken?: unknown;
   /** Fetches in flight, shared by overlapping renders, with the newest ticket that awaits each. */
   private readonly pending = new Map<string, { request: Promise<void>; ticket: number }>();
-  /** Tickets of the renders in progress: the core keeps the tiles they need (`setTicket`). */
+  /** Tickets of the renders in progress: WASM keeps the tiles they need (`renderer_set_ticket`). */
   private readonly tickets = new Set<number>();
   private lastTicket = 0;
-  /** Snapshot of the style; each core renderer takes over a copy. */
-  private readonly style: object;
-  private readonly loadResource: NonNullable<InitOptions['loadResource']>;
-  private readonly ttlMs: number;
 
-  private constructor(style: object, loadResource: NonNullable<InitOptions['loadResource']>, ttlMs: number) {
-    this.style = style;
-    this.loadResource = loadResource;
-    this.ttlMs = ttlMs;
-  }
+  private constructor(
+    private readonly wasm: WasmExports,
+    private readonly style: Uint8Array,
+    private readonly loadResource: NonNullable<InitOptions['loadResource']>,
+    private readonly ttlMs: number,
+  ) {}
 
   /** Snapshot a style object and load the renderer. Resource URLs are passed to `loadResource` as written. */
   static async init(style: StyleSpecification, options: InitOptions = {}): Promise<MapRenderer> {
     const ttlMs = options.cache?.ttlMs ?? DEFAULT_TTL_MS;
     if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
     const loadResource = options.loadResource ?? fetchResource;
-    return new MapRenderer(prepareStyle(style, options.transformFillExtrusion), loadResource, ttlMs);
+    const prepared = prepareStyle(style, options.transformFillExtrusion);
+    return new MapRenderer(await loadWasm(options.wasm), prepared, loadResource, ttlMs);
   }
 
   /** Fetch required resources and return a new RGBA image of a Web Mercator camera. */
   async renderView(view: View): Promise<RenderedImage> {
-    const [lng, lat, zoom, bearing, width, height, pixelRatio, margin] = viewArgs(view);
-    const coreView = new CoreView([lng, lat], zoom, bearing, width, height, pixelRatio, margin);
-    return this.draw(view, coreView, (r) => r.setView(coreView));
+    const args = viewArgs(view);
+    return this.draw(view, args, (handle) => this.wasm.renderer_set_view(handle, ...args));
   }
 
   /** `renderView` of an XYZ tile of the Web Mercator grid. */
@@ -329,48 +387,64 @@ export class MapRenderer {
   async renderProjected(view: ProjectedView): Promise<RenderedImage> {
     if (!view.projjson || typeof view.projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
     const margin = marginArg(view.margin);
-    const [width, height, pixelRatio] = sizeArgs(view);
+    const size = sizeArgs(view);
     if (!view.bbox.every(Number.isFinite)) throw new RangeError('bbox must be finite');
-    const projected = { projjson: JSON.stringify(view.projjson), bbox: [...view.bbox] as [number, number, number, number], width, height, pixelRatio, margin };
+    const crs = encoder.encode(JSON.stringify(view.projjson));
     // The initial camera is replaced before the first `needs`.
-    const initial = new CoreView([0, 0], 0, 0, width, height, pixelRatio, 0);
-    return this.draw(view, initial, (r) => r.setProjectedView(projected));
+    const args: ViewArgs = [0, 0, 0, 0, ...size, 0];
+    return this.draw(view, args, (handle) => {
+      const ok = this.withBytes(crs, (ptr, len) =>
+        this.wasm.renderer_set_projected_view(handle, ptr, len, ...view.bbox, ...size, margin));
+      if (!ok) throw new Error(decoder.decode(this.output()));
+    });
   }
 
   /** The fetch-and-render loop of Mercator and projected views; `setView` points a core at the view. */
-  private async draw(view: View | ProjectedView, initial: CoreView, setView: (r: Renderer) => void): Promise<RenderedImage> {
-    const core = this.acquire(initial);
+  private async draw(view: View | ProjectedView, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
+    try {
+      return await this.drawOnce(view, args, setView);
+    } catch (error) {
+      if (error instanceof WebAssembly.RuntimeError) this.broken = error;
+      throw error;
+    }
+  }
+
+  private async drawOnce(view: View | ProjectedView, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
+    const w = this.wasm;
+    const core = this.acquire(args);
     const ticket = ++this.lastTicket;
     this.tickets.add(ticket);
-    let out: { width: number; height: number; data: Uint8Array };
+    let bytes: Uint8Array<ArrayBuffer>;
     try {
       // Other renders may move the camera while this one awaits resources.
       for (let round = 0; ; round++) {
-        setView(core.renderer);
-        core.renderer.setTicket(ticket);
-        const needs = core.renderer.needs();
-        if (needs.length === 0) break;
+        setView(core.handle);
+        w.renderer_set_ticket(core.handle, ticket);
+        const count = w.renderer_needs(core.handle);
+        if (count === 0) break;
         if (round >= 32) throw new Error('Resource requests did not settle');
-        await Promise.all(needs.map(({ url }) => this.fetch(core, url, ticket)));
+        const urls = decoder.decode(this.output()).split('\n');
+        await Promise.all(urls.map((url) => this.fetch(core, url, ticket)));
       }
       // Tickets increase, so the first in the set is the oldest in progress.
       const oldest = this.tickets.values().next().value!;
-      out = core.renderer.renderRetaining(oldest);
+      if (!w.renderer_render(core.handle, oldest)) throw new Error(decoder.decode(this.output()));
+      // Own the bytes before another render can overwrite or grow WASM memory.
+      bytes = this.output();
     } finally {
       this.tickets.delete(ticket);
       this.release(core);
     }
     const width = Math.round(view.width * (view.pixelRatio ?? 1));
     const height = Math.round(view.height * (view.pixelRatio ?? 1));
-    const bytes = out.data;
-    const data = new Uint8ClampedArray(bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength);
-    return {
-      width,
-      height,
-      data,
-      toPng: () => encodePng(bytes, width, height) as Uint8Array<ArrayBuffer>,
-      toWebp: () => encodeWebp(bytes, width, height) as Uint8Array<ArrayBuffer>,
+    const data = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const encode = (format: typeof w.encode_png) => () => {
+      if (!this.withBytes(bytes, (ptr, len) => format(ptr, len, width, height))) {
+        throw new Error(decoder.decode(this.output()));
+      }
+      return this.output();
     };
+    return { width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp) };
   }
 
   /**
@@ -386,27 +460,30 @@ export class MapRenderer {
     }
     const entry = { ticket, request: Promise.resolve() };
     entry.request = this.loadResource(url).then((bytes) => {
-      // A retired core no render uses any more is dropped; its successor fetches again.
+      // A freed core was retired by the TTL; its successor fetches again.
       if (core.retired && core.active === 0) return;
-      core.renderer.setTicket(entry.ticket);
-      core.renderer.provide(url, bytes ?? undefined);
+      this.wasm.renderer_set_ticket(core.handle, entry.ticket);
+      this.withBytes(encoder.encode(url), (urlPtr, urlLen) =>
+        this.withBytes(bytes ?? new Uint8Array(), (dataPtr, dataLen) =>
+          this.wasm.renderer_provide(core.handle, urlPtr, urlLen, dataPtr, dataLen, bytes === null ? 0 : 1)));
     }).finally(() => this.pending.delete(url));
     this.pending.set(url, entry);
     return entry.request;
   }
 
-  /** The current core renderer, replaced once older than the cache TTL. */
-  private acquire(view: CoreView): Core {
+  /** The current WASM renderer, replaced once older than the cache TTL. */
+  private acquire(args: ViewArgs): Core {
+    if (this.broken) throw new Error('The renderer crashed earlier; create a new one', { cause: this.broken });
     const now = performance.now();
     if (this.core && now - this.core.createdAt >= this.ttlMs) {
       this.core.retired = true;
+      if (this.core.active === 0) this.wasm.renderer_free(this.core.handle);
       this.core = undefined;
     }
     if (!this.core) {
-      const renderer = new Renderer(jsonClone(this.style) as object, view);
-      // A renderer used for one render needs no buckets afterwards: dropping them as it goes bounds its memory.
-      renderer.keepBuckets = this.ttlMs > 0;
-      this.core = { renderer, createdAt: now, active: 0, retired: false };
+      const handle = this.withBytes(this.style, (ptr, len) => this.wasm.renderer_new(ptr, len, ...args));
+      if (!handle) throw new Error(decoder.decode(this.output()));
+      this.core = { handle, createdAt: now, active: 0, retired: false };
     }
     this.core.active++;
     return this.core;
@@ -414,5 +491,14 @@ export class MapRenderer {
 
   private release(core: Core) {
     core.active--;
+    if (core.retired && core.active === 0) this.wasm.renderer_free(core.handle);
+  }
+
+  private output(): Uint8Array<ArrayBuffer> {
+    return output(this.wasm);
+  }
+
+  private withBytes<T>(bytes: Uint8Array, call: (ptr: number, len: number) => T): T {
+    return withBytes(this.wasm, bytes, call);
   }
 }

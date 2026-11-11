@@ -1,9 +1,10 @@
 import type { FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import { loadProjection, loadProjectionFactory, MapRenderer, type FillExtrusionLayer, type InitOptions, type Projection, type StyleLayer } from '../src/index';
+import wasm from 'ml2drender/renderer.wasm';
 
 async function pngResponse() {
   const style: StyleSpecification = await (await fetch('https://example.com/style.json')).json();
-  const renderer = await MapRenderer.init(style);
+  const renderer = await MapRenderer.init(style, { wasm });
   const png: Uint8Array<ArrayBuffer> = (await renderer.renderView({ center: [0, 0], zoom: 0, width: 256, height: 256 })).toPng();
   return new Response(png, { headers: { 'Content-Type': 'image/png' } });
 }
@@ -30,11 +31,11 @@ async function wrongPath(renderer: MapRenderer) {
 }
 
 async function utmEasting(): Promise<number> {
-  const projection: Projection = await loadProjection(utm);
+  const projection: Projection = await loadProjection(utm, { wasm });
   const lngLat: number[] = projection.inverse(projection.forward([139.76, 35.68]));
   // @ts-expect-error `loadProjection` takes PROJJSON, not a PROJ string.
   await loadProjection('+proj=utm +zone=54 +ellps=GRS80');
-  const create: (projjson: object) => Projection = await loadProjectionFactory();
+  const create: (projjson: object) => Projection = await loadProjectionFactory({ wasm });
   create(utm).forward([139.76, 35.68]);
   return lngLat ? lngLat[0] : NaN;
 }
@@ -77,8 +78,8 @@ const customResourceLoader: InitOptions = {
 };
 const missingResourceLoader: InitOptions = { loadResource: async () => null };
 
-MapRenderer.init({ version: 8, sources: {}, layers: [] });
+MapRenderer.init({ version: 8, sources: {}, layers: [] }, { wasm });
 // @ts-expect-error The style must be an object; fetch a style URL first.
-MapRenderer.init('https://example.com/style.json');
+MapRenderer.init('https://example.com/style.json', { wasm });
 // @ts-expect-error Style Spec version must be 8.
 MapRenderer.init({ version: 7, sources: {}, layers: [] });
