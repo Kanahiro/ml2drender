@@ -45,28 +45,22 @@ function usize(x: number): number {
     return x !== x || x <= 0 ? 0 : Math.trunc(x);
 }
 
-/** Splits every triangle edge longer than `max` at its midpoint (appended to `points`) until none
+/** Splits every triangle edge longer than `max` at its midpoint (appended to `xy`) until none
  * is, for projections that curve them. An edge is split the same way in both of its triangles, so
  * the mesh stays free of T-junctions (and of cracks between triangles). */
-function subdivide(points: P[], triangles: number[], max: number): number[] {
+function subdivide(xy: number[], triangles: number[], max: number): number[] {
     const mids = new Map<number, number>();
     const out: number[] = [];
     const todo: [number, number, number][] = [];
     for (let i = 0; i + 2 < triangles.length; i += 3) todo.push([triangles[i], triangles[i + 1], triangles[i + 2]]);
-    const long = (a: number, b: number) => {
-        const p = points[a];
-        const q = points[b];
-        return (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 > max * max;
-    };
+    const long = (a: number, b: number) => (xy[2 * a] - xy[2 * b]) ** 2 + (xy[2 * a + 1] - xy[2 * b + 1]) ** 2 > max * max;
     const mid = (a: number, b: number) => {
         // ponytail: numeric key assumes < 2^26 points per polygon.
         const key = Math.min(a, b) * 67108864 + Math.max(a, b);
         let m = mids.get(key);
         if (m === undefined) {
-            const p = points[a];
-            const q = points[b];
-            points.push([(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]);
-            m = points.length - 1;
+            xy.push((xy[2 * a] + xy[2 * b]) / 2, (xy[2 * a + 1] + xy[2 * b + 1]) / 2);
+            m = xy.length / 2 - 1;
             mids.set(key, m);
         }
         return m;
@@ -356,8 +350,8 @@ interface FillBucket {
 }
 
 interface FillPolygon {
-    /** Ring vertices, concatenated (exterior first), in tile units. */
-    points: P[];
+    /** Ring vertices, concatenated (exterior first), as x, y pairs in tile units. */
+    xy: number[];
     ringLens: number[];
     /** `earcut` indices into `points`. */
     triangles: number[];
@@ -378,10 +372,9 @@ function newFillBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): FillBucket {
             // npm `earcut` (v3, as MapLibre uses) where Rust used `earcutr` (a port of earcut 2.x):
             // triangulations can differ, their coverage of a valid polygon cannot.
             let triangles = earcut(flat, holes, 2);
-            const points = polygon.flat();
             // Long interior edges curve in a projected output too (after the rings' points).
-            if (ctx.transform.isProjected()) triangles = subdivide(points, triangles, PROJECTED_SEGMENT);
-            return {points, ringLens: polygon.map((r) => r.length), triangles};
+            if (ctx.transform.isProjected()) triangles = subdivide(flat, triangles, PROJECTED_SEGMENT);
+            return {xy: flat, ringLens: polygon.map((r) => r.length), triangles};
         });
         polygons.push([i, polys]);
     });
@@ -611,11 +604,13 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                 ? {kind: 'Color', c: color(ctx.paint(layer, 'fill-outline-color', f, tf.tile), opacity)}
                 : paint;
             for (const polygon of polygons) {
-                const screen = polygon.points.map(toScreen);
+                const points: P[] = [];
+                for (let k = 0; k < polygon.xy.length; k += 2) points.push([polygon.xy[k], polygon.xy[k + 1]]);
+                const screen = points.map(toScreen);
                 // Only patterns read the varying (outlines too: theirs is a color or this pattern).
                 const vary: [number, number][] =
                     paint.kind === 'Pattern'
-                        ? polygon.points.map((p, k) => tp.pos(size, p, screen[k]) as [number, number])
+                        ? points.map((p, k) => tp.pos(size, p, screen[k]) as [number, number])
                         : screen.map((): [number, number] => [0, 0]);
                 if (opacity >= 0.01 && pass !== 'Translucent') {
                     const tris = polygon.triangles;
@@ -628,7 +623,7 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                         // singularity (e.g. near the antipode of an azimuthal projection, which spreads
                         // a triangle's corners around the rim): its chord triangle would cover the map.
                         if (projected) {
-                            const tri = [polygon.points[t0], polygon.points[t1], polygon.points[t2]];
+                            const tri = [points[t0], points[t1], points[t2]];
                             if ([0, 1, 2].some((j) => bent(toScreen, tri[j], tri[(j + 1) % 3], p[j], p[(j + 1) % 3]))) continue;
                         }
                         if (constantOpaque) {
@@ -677,7 +672,7 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                         for (let i = 1; i < len; i++) {
                             const a = start + i - 1;
                             const b = start + i;
-                            if (projected && bent(toScreen, polygon.points[a], polygon.points[b], screen[a], screen[b])) continue;
+                            if (projected && bent(toScreen, points[a], points[b], screen[a], screen[b])) continue;
                             outlines.push([screen[a], screen[b], vary[a], vary[b], outlinePaint]);
                         }
                         start += len;
