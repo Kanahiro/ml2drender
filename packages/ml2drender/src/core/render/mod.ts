@@ -224,12 +224,12 @@ export class Ctx {
         const out: BucketFeature[] = [];
         tf.layer.features.forEach((f, index) => {
             const scaleGeometry = (): P[][] => {
-                const {xy, ends} = f.geometry;
+                const {xy, ends} = tf.layer;
                 const out: P[][] = [];
-                let i = 0;
-                for (const end of ends) {
+                let i = f.lineStart > 0 ? ends[f.lineStart - 1] : 0;
+                for (let k = f.lineStart; k < f.lineEnd; k++) {
                     const line: P[] = [];
-                    for (; i < end; i++) line.push([roundAway(xy[2 * i] * scale), roundAway(xy[2 * i + 1] * scale)]);
+                    for (; i < ends[k]; i++) line.push([roundAway(xy[2 * i] * scale), roundAway(xy[2 * i + 1] * scale)]);
                     out.push(line);
                 }
                 return out;

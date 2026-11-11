@@ -4,7 +4,7 @@
 
 import {GEOJSONVT_CLIP_END, GEOJSONVT_CLIP_START, type GeoJSONVTFeature, GeoJSONVT} from '@maplibre/geojson-vt';
 import {type StyleExpression, createExpression} from '@maplibre/maplibre-gl-style-spec';
-import {type Feature, type GeomType, type Layer, flat} from './mvt.ts';
+import {type Feature, type GeomType, type Layer, LayerBuilder} from './mvt.ts';
 import {asU8, clamp} from './util.ts';
 
 export const EXTENT = 8192;
@@ -95,18 +95,14 @@ export class GeoJsonIndex {
 
     /** The tile `z/x/y` as a single vector tile layer with extent 8192. */
     tile(z: number, x: number, y: number): Layer {
-        const features: Feature[] = [];
+        const out = new LayerBuilder();
         const t = this.vt.getTile(z, x, y);
         for (const f of (t?.features ?? []) as GeoJSONVTFeature[]) {
-            const feature: Feature = {
-                type: f.type as GeomType,
-                properties: (f.tags as Props | null) ?? {},
-                geometry: flat(f.type === 1 ? f.geometry.map(p => [p]) : f.geometry),
-            };
+            const feature: Omit<Feature, 'lineStart' | 'lineEnd'> = {type: f.type as GeomType, properties: (f.tags as Props | null) ?? {}};
             if (f.id != null) feature.id = f.id;
-            features.push(feature);
+            out.add(feature, f.type === 1 ? f.geometry.map(p => [p]) : f.geometry);
         }
-        return {name: '', extent: EXTENT, features};
+        return out.layer('', EXTENT);
     }
 }
 

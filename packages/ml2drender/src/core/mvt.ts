@@ -15,56 +15,59 @@ export function geomTypeName(t: GeomType): 'Unknown' | 'Point' | 'LineString' | 
 
 /**
  * A decoded feature in tile coordinates of its layer's extent. Rings/lines are explicit
- * (polygon rings closed by repeating the first point, like vector-tile-js).
+ * (polygon rings closed by repeating the first point, like vector-tile-js). Its geometry is the
+ * lines `lineStart .. lineEnd` of its layer (`lines`).
  */
 export interface Feature {
     id?: unknown;
     type: GeomType;
     properties: Record<string, unknown>;
-    geometry: Geometry;
+    lineStart: number;
+    lineEnd: number;
 }
 
-/** Points, lines or rings, flat (no array per point: dense tiles hold millions of points). Line `k`
- * is the points `ends[k - 1] .. ends[k]` (from 0 for the first) of `xy`, which holds x, y pairs. */
-export interface Geometry {
+/** A layer's features, with their points packed (dense tiles hold millions): line `k` is the points
+ * `ends[k - 1] .. ends[k]` (from 0 for the first) of `xy`, which holds x, y pairs. */
+export interface Layer {
+    name: string;
+    extent: number;
+    features: Feature[];
     xy: Int32Array;
-    ends: number[];
+    ends: Uint32Array;
 }
 
-/** `g` as an array of point arrays per line. */
-export function lines(g: Geometry): [number, number][][] {
+/** The geometry of `f` in `layer`, as an array of points per line. */
+export function lines(layer: Layer, f: Feature): [number, number][][] {
     const out: [number, number][][] = [];
-    let i = 0;
-    for (const end of g.ends) {
+    const {xy, ends} = layer;
+    let i = f.lineStart > 0 ? ends[f.lineStart - 1] : 0;
+    for (let k = f.lineStart; k < f.lineEnd; k++) {
         const line: [number, number][] = [];
-        for (; i < end; i++) line.push([g.xy[2 * i], g.xy[2 * i + 1]]);
+        for (; i < ends[k]; i++) line.push([xy[2 * i], xy[2 * i + 1]]);
         out.push(line);
     }
     return out;
 }
 
-/** The flat form of `lines` (whose coordinates are integers). */
-export function flat(lines: ArrayLike<ArrayLike<ArrayLike<number>>>): Geometry {
-    let n = 0;
-    for (let k = 0; k < lines.length; k++) n += lines[k].length;
-    const xy = new Int32Array(2 * n);
-    const ends: number[] = [];
-    let i = 0;
-    for (let k = 0; k < lines.length; k++) {
-        const line = lines[k];
-        for (let j = 0; j < line.length; j++, i++) {
-            xy[2 * i] = line[j][0];
-            xy[2 * i + 1] = line[j][1];
-        }
-        ends.push(i);
-    }
-    return {xy, ends};
-}
+/** Packs features and their (integer) lines into a `Layer`. */
+export class LayerBuilder {
+    private features: Feature[] = [];
+    private xy: number[] = [];
+    private ends: number[] = [];
 
-export interface Layer {
-    name: string;
-    extent: number;
-    features: Feature[];
+    add(f: Omit<Feature, 'lineStart' | 'lineEnd'>, lines: ArrayLike<ArrayLike<ArrayLike<number>>>): void {
+        const lineStart = this.ends.length;
+        for (let k = 0; k < lines.length; k++) {
+            const line = lines[k];
+            for (let j = 0; j < line.length; j++) this.xy.push(line[j][0], line[j][1]);
+            this.ends.push(this.xy.length / 2);
+        }
+        this.features.push({...f, lineStart, lineEnd: this.ends.length});
+    }
+
+    layer(name: string, extent: number): Layer {
+        return {name, extent, features: this.features, xy: Int32Array.from(this.xy), ends: Uint32Array.from(this.ends)};
+    }
 }
 
 const lossy = new TextDecoder('utf-8', {ignoreBOM: true});
@@ -216,25 +219,17 @@ function decodeValue(data: Uint8Array): unknown {
     return v;
 }
 
-/** Scratch coordinates of the geometry being decoded. */
-let scratch = new Int32Array(1024);
-
-function decodeGeometry(cmds: number[]): Geometry {
-    // At most one point per two command integers, plus one per ClosePath.
-    if (scratch.length < 2 * cmds.length) scratch = new Int32Array(2 * cmds.length);
-    const xy = scratch;
-    const ends: number[] = [];
-    let n = 0;
-    // Start of the current line, -1 before the first MoveTo.
+/** Appends the geometry commands' lines to `xy` / `ends` (see `Layer`). */
+function decodeGeometry(cmds: number[], xy: number[], ends: number[]): void {
+    // Point index where the current line starts, -1 before the first MoveTo.
     let start = -1;
     let x = 0;
     let y = 0;
     let i = 0;
     const zz = (v: number) => ((v >>> 1) ^ -(v & 1)) | 0;
     // A truncated or unknown command drops the line in progress.
-    const done = (complete: boolean) => {
-        if (complete && start >= 0) ends.push(n);
-        return {xy: xy.slice(0, 2 * (ends.length > 0 ? ends[ends.length - 1] : 0)), ends};
+    const drop = () => {
+        if (start >= 0) xy.length = 2 * start;
     };
     while (i < cmds.length) {
         const cmd = cmds[i] & 7;
@@ -242,31 +237,25 @@ function decodeGeometry(cmds: number[]): Geometry {
         i++;
         if (cmd === 1 || cmd === 2) {
             for (let c = 0; c < count; c++) {
-                if (i + 1 >= cmds.length) return done(false);
+                if (i + 1 >= cmds.length) return drop();
                 x = (x + zz(cmds[i])) | 0;
                 y = (y + zz(cmds[i + 1])) | 0;
                 i += 2;
                 if (cmd === 1) {
-                    if (start >= 0) ends.push(n);
-                    start = n;
+                    if (start >= 0) ends.push(xy.length / 2);
+                    start = xy.length / 2;
                 } else if (start < 0) {
-                    start = 0;
+                    start = xy.length / 2;
                 }
-                xy[2 * n] = x;
-                xy[2 * n + 1] = y;
-                n++;
+                xy.push(x, y);
             }
         } else if (cmd === 7) {
-            if (start >= 0 && n > start) {
-                xy[2 * n] = xy[2 * start];
-                xy[2 * n + 1] = xy[2 * start + 1];
-                n++;
-            }
+            if (start >= 0 && xy.length / 2 > start) xy.push(xy[2 * start], xy[2 * start + 1]);
         } else {
-            return done(false);
+            return drop();
         }
     }
-    return done(true);
+    if (start >= 0) ends.push(xy.length / 2);
 }
 
 /** The layer's name bytes; `undefined` when malformed. */
@@ -317,6 +306,8 @@ function decodeLayer(data: Uint8Array): Layer | undefined {
         }
     }
     const features: Feature[] = [];
+    const xy: number[] = [];
+    const ends: number[] = [];
     const tags: number[] = [];
     const geom: number[] = [];
     for (const fd of rawFeatures) {
@@ -352,11 +343,13 @@ function decodeLayer(data: Uint8Array): Layer | undefined {
             const value = tags[k + 1] < values.length ? values[tags[k + 1]] : undefined;
             if (key !== undefined && value !== undefined) properties[key] = value;
         }
-        const feature: Feature = {type, properties, geometry: decodeGeometry(geom)};
+        const lineStart = ends.length;
+        decodeGeometry(geom, xy, ends);
+        const feature: Feature = {type, properties, lineStart, lineEnd: ends.length};
         if (id !== undefined) feature.id = id;
         features.push(feature);
     }
-    return {name, extent, features};
+    return {name, extent, features, xy: Int32Array.from(xy), ends: Uint32Array.from(ends)};
 }
 
 /**
@@ -406,23 +399,21 @@ export function sliceLayer(layer: Layer, parent: TileId, target: TileId): Layer 
     const buffer = Math.max(128, roundAway((128 * extent) / 4096));
     const lo = -buffer;
     const hi = extent + buffer;
-    const features: Feature[] = [];
+    const out = new LayerBuilder();
     for (const f of layer.features) {
-        const geom = lines(f.geometry).map(r => r.map(p => [p[0] * scale - ox, p[1] * scale - oy] as [number, number]));
+        const geom = lines(layer, f).map(r => r.map(p => [p[0] * scale - ox, p[1] * scale - oy] as [number, number]));
         const clipped = clipAxis(clipAxis(geom, f.type, lo, hi, 0), f.type, lo, hi, 1);
         if (clipped.length === 0) continue;
-        const feature: Feature = {type: f.type, properties: f.properties, geometry: reencode(clipped, f.type)};
-        if (f.id !== undefined) feature.id = f.id;
-        features.push(feature);
+        out.add(f.id !== undefined ? {type: f.type, properties: f.properties, id: f.id} : {type: f.type, properties: f.properties}, reencode(clipped, f.type));
     }
-    return {name: layer.name, extent: layer.extent, features};
+    return out.layer(layer.name, layer.extent);
 }
 
 /**
  * vt-pbf `writeGeometry` + decode: each delta is truncated (`zigzag` uses int32 ops)
  * while the encoder's cursor tracks the exact float position.
  */
-function reencode(geom: [number, number][][], type: GeomType): Geometry {
+function reencode(geom: [number, number][][], type: GeomType): [number, number][][] {
     let fx = 0;
     let fy = 0;
     let ix = 0;
@@ -449,7 +440,7 @@ function reencode(geom: [number, number][][], type: GeomType): Geometry {
             out.push(r);
         }
     }
-    return flat(out);
+    return out;
 }
 
 /** `clipGeometryOnAxis` (symbol/clip_line.ts). */

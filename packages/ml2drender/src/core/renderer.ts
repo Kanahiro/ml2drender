@@ -570,7 +570,7 @@ export class Renderer {
     /** Calls `f` with the source's resolved tiles: their clip masks and `layer`'s features.
      * Each also gets its bucket cache. */
     private withTiles<R>(ctx: Ctx, src: Source, layer: StyleLayer, w: number, h: number, f: (tiles: TileFeatures[]) => R): R {
-        const empty: MvtLayer = {name: '', extent: 4096, features: []};
+        const empty: MvtLayer = {name: '', extent: 4096, features: [], xy: new Int32Array(0), ends: new Uint32Array(0)};
         const layersByTile = this.tileLayers(src);
         const masks = ctx.masks(layersByTile.map((r) => r[0]), w, h);
         const tiles = layersByTile.map(([rt, tl, buckets], i) => new TileFeatures(rt, masks[i], this.sourceLayer(src, layer, tl) ?? empty, buckets));
@@ -827,7 +827,7 @@ export class Renderer {
      * layer down. Layers with identical layout share their leader's buckets. */
     private placeSymbols(ctx: Ctx): [[StyleLayer, any, SymbolBucket[]][], Map<string, number>, InstancePlacement[][][]] {
         const t = ctx.transform;
-        const empty: MvtLayer = {name: '', extent: 4096, features: []};
+        const empty: MvtLayer = {name: '', extent: 4096, features: [], xy: new Int32Array(0), ends: new Uint32Array(0)};
         // Symbols are laid out and placed for all layers before drawing (placement runs from
         // the top layer down).
         const noMask = Mask.empty();
