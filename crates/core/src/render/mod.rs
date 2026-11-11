@@ -209,6 +209,7 @@ struct FillPolygon {
 impl FillBucket {
     fn new(layer: &Layer, ctx: &Ctx, tf: &TileFeatures) -> Self {
         let features = ctx.bucket_features(layer, tf, Some("fill-sort-key"));
+        let mut earcut = earcut::Earcut::new();
         let polygons = features
             .iter()
             .enumerate()
@@ -228,7 +229,9 @@ impl FillBucket {
                             }
                             points.extend_from_slice(ring);
                         }
-                        let mut triangles = earcutr::earcut(points.as_flattened(), &holes, 2).unwrap_or_default();
+                        let mut triangles = Vec::new();
+                        earcut.earcut(points.iter().copied(), &holes, &mut triangles);
+                        triangles.shrink_to_fit();
                         // Long interior edges curve in a projected output too (after the rings' points).
                         if ctx.transform.is_projected() {
                             triangles = subdivide(&mut points, &triangles, PROJECTED_SEGMENT);

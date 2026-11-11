@@ -31,7 +31,7 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 - `needs()` の段階: style → (TileJSON / GeoJSON / sprite json+png / image) → タイル → (欠落 raster の祖先 / グリフ範囲)。`provide` は現在のビューではなく `needs()` が返した URL の記録と照合する(`needs` と `provide` の間に `set_view` されても取りこぼさない)。`provide(None)` は上流の 404 と同じ意味(vector は空タイル、raster は祖先で代替、グリフ範囲は欠落)。
 - 取得済みバイト列のキャッシュはホストの責務(TS 側は同一 URL の同時取得をまとめるだけ)。
 - 単一スレッド。並列化しない。
-- 採用済みクレート(すべて純 Rust・wasm32 確認済み): `serde_json`, `indexmap`, `unicode-normalization`, `earcutr`, `miniz_oxide`, `png`, `zune-jpeg`, `image-webp`。描画は自前のソフトウェア GL(tiny-skia は不採用: GL の AA・合成規則と一致させるため)。
+- 採用済みクレート(すべて純 Rust・wasm32 確認済み): `serde_json`, `indexmap`, `unicode-normalization`, `earcut`(earcut.js 3.x の移植。MapLibre と同じ系統), `miniz_oxide`, `png`, `zune-jpeg`, `image-webp`。描画は自前のソフトウェア GL(tiny-skia は不採用: GL の AA・合成規則と一致させるため)。
 - テキストは SDF グリフを自前でしきい値処理して合成(halo / text-opacity もこの層)。MapLibre は HarfBuzz を使わず PBF グリフのメトリクスで自前レイアウトしているので、`shaping` / `placement` のアルゴリズムを再現する。RTL 等は後回し。
 
 ## 構成
