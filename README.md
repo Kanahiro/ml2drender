@@ -48,8 +48,8 @@ pnpm demo         # デモ（examples/browser）を起動
 const renderer = await MapRenderer.init(style);
 
 await renderer.renderView({ center: [lng, lat], zoom: 12, bearing: 30, width: 800, height: 600 }); // カメラ
-await renderer.renderZxy({ z: 12, x: 3638, y: 1612 });                                             // XYZ タイル
-await renderer.renderLngLat({ bbox: [139.5, 35.5, 140, 36], size: 1024 });                         // 経緯度の範囲
+await renderer.renderTile({ z: 12, x: 3638, y: 1612 });                                            // XYZ タイル
+await renderer.render({ bbox: [139.5, 35.5, 140, 36], size: 1024 });                               // 経緯度の範囲
 ```
 
 ブラウザでは、`RenderedImage` の `data` を `ImageData` にしてそのまま canvas に描けます。
@@ -114,8 +114,8 @@ Style オブジェクト（公式の `StyleSpecification` 型）を受け取り�
 | メソッド | 描く範囲 |
 |---|---|
 | `renderView({ center, zoom, bearing?, width, height })` | Web Mercator のカメラ。ズームは GL JS と同じです（ズーム 0 で世界全体が 512 CSS px）。 |
-| `renderZxy({ z, x, y, tileSize? })` | Web Mercator の XYZ タイル（`tileSize` の既定は 256）。 |
-| `renderLngLat({ bbox, size })` | 経緯度の範囲 `[west, south, east, north]`。長辺が `size` px になるようにカメラを合わせます。`west > east` は反子午線をまたぐ範囲です。 |
+| `renderTile({ z, x, y, tileSize? })` | Web Mercator の XYZ タイル（`tileSize` の既定は 256）。 |
+| `render({ bbox, size })` | 経緯度の範囲 `[west, south, east, north]`。長辺が `size` px になるようにカメラを合わせます。`west > east` は反子午線をまたぐ範囲です。 |
 | `projected(crs).render({ bbox, width, height })` | CRS の範囲 `[minX, minY, maxX, maxY]`（CRS の単位）。 |
 | `projected(crs).renderTile({ z, x, y, tileSize? })` | CRS の格子のタイル。 |
 

@@ -13,7 +13,7 @@ export interface View {
 }
 
 /** An XYZ tile of the Web Mercator grid (`tileSize` CSS pixels square). */
-export interface TileView {
+export interface Tile {
   z: number;
   x: number;
   y: number;
@@ -28,7 +28,7 @@ export interface TileView {
  * A longitude/latitude box in Web Mercator. The image has the box's aspect ratio, `size` on its long side,
  * at the zoom that fits the box into it.
  */
-export interface LngLatView {
+export interface LngLatBox {
   /** Degrees; `west > east` crosses the antimeridian. Latitudes are clamped to Web Mercator's ±85.0511°. */
   bbox: [west: number, south: number, east: number, north: number];
   /** Positive integer CSS pixels of the image's long side. */
@@ -58,7 +58,7 @@ export interface Crs {
  * symbol) are drawn in it with projected vertices; raster, hillshade and color-relief are rendered in Web Mercator
  * and warped.
  */
-export interface ProjectedView {
+export interface ProjectedBox {
   /** In CRS units (degrees for longlat), always easting/longitude first whatever the CRS's axis order. */
   bbox: [minX: number, minY: number, maxX: number, maxY: number];
   width: number;
@@ -91,10 +91,10 @@ export interface SourceTile {
 /** A `MapRenderer` drawing in a CRS (see `MapRenderer.projected`). */
 export interface ProjectedRenderer {
   readonly crs: Crs;
-  /** Fetch required resources and return a new RGBA image of `view.bbox` (CRS units). */
-  render(view: ProjectedView): Promise<RenderedImage>;
+  /** Fetch required resources and return a new RGBA image of `box.bbox` (CRS units). */
+  render(box: ProjectedBox): Promise<RenderedImage>;
   /** `render` of tile `z/x/y` of the CRS's grid, `tileSize` CSS pixels (default 256) on a side. */
-  renderTile(tile: TileView): Promise<RenderedImage>;
+  renderTile(tile: Tile): Promise<RenderedImage>;
   /**
    * Fetch the data of `tile.source` and return it in tile `z/x/y` of the CRS's grid, for MapLibre GL JS to draw the
    * style in the CRS from (see `toStyle`), not a picture of the map:
@@ -344,7 +344,7 @@ function sizeArgs({ width, height, pixelRatio = 1 }: { width: number; height: nu
   return [width, height, pixelRatio];
 }
 
-function tileView({ z, x, y, tileSize = 256, pixelRatio, margin }: TileView): View {
+function tileView({ z, x, y, tileSize = 256, pixelRatio, margin }: Tile): View {
   const n = 2 ** z;
   if (!Number.isInteger(z) || z < 0 || z > 30) throw new RangeError('z must be an integer in 0..=30');
   if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) throw new RangeError('x and y must be integers in 0..2^z');
@@ -362,7 +362,7 @@ function tileView({ z, x, y, tileSize = 256, pixelRatio, margin }: TileView): Vi
 
 const MAX_LAT = 85.0511287798066;
 
-function fitLngLat({ bbox: [west, south, east, north], size, pixelRatio, margin }: LngLatView): View {
+function fitLngLat({ bbox: [west, south, east, north], size, pixelRatio, margin }: LngLatBox): View {
   if (!Number.isInteger(size) || size < 1 || size > 0xffffffff) throw new RangeError('size must be a positive uint32 integer');
   if (east < west) east += 360;
   [south, north] = [south, north].map((lat) => Math.max(-MAX_LAT, Math.min(MAX_LAT, lat)));
@@ -476,13 +476,13 @@ export class MapRenderer {
   }
 
   /** `renderView` of an XYZ tile of the Web Mercator grid. */
-  async renderZxy(tile: TileView): Promise<RenderedImage> {
+  async renderTile(tile: Tile): Promise<RenderedImage> {
     return this.renderView(tileView(tile));
   }
 
-  /** `renderView` of a longitude/latitude box, `view.size` CSS pixels on the long side. */
-  async renderLngLat(view: LngLatView): Promise<RenderedImage> {
-    return this.renderView(fitLngLat(view));
+  /** `renderView` of a longitude/latitude box, `box.size` CSS pixels on the long side. */
+  async render(box: LngLatBox): Promise<RenderedImage> {
+    return this.renderView(fitLngLat(box));
   }
 
   /** This renderer drawing in `crs`, on its tile grid. Resources fetched for one CRS serve the others too. */
@@ -495,7 +495,7 @@ export class MapRenderer {
     }
     const projjson = encoder.encode(JSON.stringify(crs.projjson));
     // The box of tile z/x/y of the grid.
-    const box = ({ z, x, y }: { z: number; x: number; y: number }): ProjectedView['bbox'] => {
+    const box = ({ z, x, y }: { z: number; x: number; y: number }): ProjectedBox['bbox'] => {
       const n = 2 ** z;
       if (!Number.isInteger(z) || z < 0 || z > 30) throw new RangeError('z must be an integer in 0..=30');
       if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) throw new RangeError('x and y must be integers in 0..2^z');
@@ -503,7 +503,7 @@ export class MapRenderer {
       const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
       return [minX, maxY - s, minX + s, maxY];
     };
-    const render = (view: ProjectedView) => this.draw(view, ...this.projectedArgs(projjson, view));
+    const render = (view: ProjectedBox) => this.draw(view, ...this.projectedArgs(projjson, view));
     return {
       crs,
       render,
@@ -536,7 +536,7 @@ export class MapRenderer {
   }
 
   /** The core arguments and `setView` of a view of the CRS `projjson` (encoded). */
-  private projectedArgs(projjson: Uint8Array, view: ProjectedView): [ViewArgs, (handle: number) => void] {
+  private projectedArgs(projjson: Uint8Array, view: ProjectedBox): [ViewArgs, (handle: number) => void] {
     const margin = marginArg(view.margin);
     const size = sizeArgs(view);
     if (!view.bbox.every(Number.isFinite)) throw new RangeError('bbox must be finite');
@@ -549,7 +549,7 @@ export class MapRenderer {
   }
 
   /** The fetch-and-render loop of images; `setView` points a core at the view. */
-  private async draw(view: View | ProjectedView, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
+  private async draw(view: View | ProjectedBox, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
     const w = this.wasm;
     const bytes = await this.run(args, setView, new Uint8Array(), w.renderer_render);
     const width = Math.round(view.width * (view.pixelRatio ?? 1));

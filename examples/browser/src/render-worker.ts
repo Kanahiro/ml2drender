@@ -1,11 +1,11 @@
 /// <reference lib="webworker" />
-import { type Crs, MapRenderer, type SourceTile, type TileView } from 'ml2drender';
+import { type Crs, MapRenderer, type SourceTile, type Tile } from 'ml2drender';
 import type { StyleSpecification } from 'maplibre-gl';
 
 export type WorkerRequest =
   | { kind: 'init'; generation: number; style: StyleSpecification }
   /** A tile of the Web Mercator grid, or with `crs` of that CRS's grid. */
-  | { kind: 'render'; generation: number; id: number; tile: TileView; crs?: Crs }
+  | { kind: 'render'; generation: number; id: number; tile: Tile; crs?: Crs }
   | { kind: 'source'; generation: number; id: number; tile: SourceTile; crs: Crs };
 
 export type WorkerResponse =
@@ -54,7 +54,7 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
       .catch(failed);
     return;
   }
-  void (request.crs ? active.projected(request.crs).renderTile(request.tile) : active.renderZxy(request.tile))
+  void (request.crs ? active.projected(request.crs).renderTile(request.tile) : active.renderTile(request.tile))
     .then(async (image) => {
       // Includes resource loading and overlapping renders; this is elapsed time, not CPU time.
       const renderMs = performance.now() - started;

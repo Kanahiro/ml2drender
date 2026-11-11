@@ -47,7 +47,7 @@ const busy = await MapRenderer.init(style, {
     return null;
   },
 });
-await Promise.all(Array.from({ length: 64 }, (_, i) => busy.renderZxy({ z: 6, x: i % 8, y: Math.floor(i / 8), margin: 64 })));
+await Promise.all(Array.from({ length: 64 }, (_, i) => busy.renderTile({ z: 6, x: i % 8, y: Math.floor(i / 8), margin: 64 })));
 assert.ok(many.size > 8, `${many.size} tiles fit the WASM tile cache`);
 assert.deepEqual([...many].filter(([, n]) => n > 1), []);
 console.log(`ok: ${many.size} URLs fetched once each by 64 overlapping renders`);
