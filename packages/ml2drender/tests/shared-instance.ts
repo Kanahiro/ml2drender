@@ -40,8 +40,14 @@ const fetched: StyleSpecification = { ...style, sources: { g: { type: 'geojson',
 const data = new TextEncoder().encode(JSON.stringify({ type: 'FeatureCollection', features }));
 const peak = async (renders: number, exclusive: boolean) => {
   const module = await WebAssembly.compile(readFileSync(new URL('../wasm/ml2drender_wasm.wasm', import.meta.url)));
+  // Overlapping renders all get their data at once, so that they all hold it before any draws
+  // (exclusive ones fetch one at a time).
+  const waiting: (() => void)[] = [];
   const loadResource = async () => {
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise<void>((resolve) => {
+      waiting.push(resolve);
+      if (waiting.length === (exclusive ? 1 : renders)) setTimeout(() => waiting.splice(0).forEach((r) => r()), 10);
+    });
     return data.slice();
   };
   const renderers = await Promise.all(Array.from({ length: renders }, () =>

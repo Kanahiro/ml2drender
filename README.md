@@ -1,96 +1,188 @@
 # ml2drender
 
-MapLibre Style の **2D 表現のみ**をRGBA画像またはPNGに描画する、Rust 製のソフトウェアレンダラです。GPU を使わず、`wasm32-unknown-unknown` でブラウザやCloudflare Workersから実行できます。MapLibre GL JS の実装を参照し、Vibe Coding で作成しました。
+**MapLibre Style を GPU なしで描く、Rust 製の 2D 地図レンダラ。** WebAssembly で、ブラウザ・Cloudflare Workers・Node.js から使えます。
 
-対象は平面地図です。Web Mercator のカメラ（中心・ズーム・回転）に加え、PROJJSON で指定した投影座標系の範囲（bbox）を描画できます（[投影座標系](#投影座標系)）。`background`、`fill`、`line`、`circle`、`raster`、`symbol`、`hillshade`、`color-relief`、`heatmap` レイヤを扱います。`fill-extrusion` は JavaScript API で既定で `fill` に変換します。**3D 系の表現は今後もサポートしません。** 立体の描画、terrain、globe、pitch などは対象外です。実行中のスタイルの変更も対象外です。
+[デモ](https://kanahiro.github.io/ml2drender/) · [JavaScript API](#javascript-api) · [投影座標系](#投影座標系) · [Cloudflare Workers](#cloudflare-workers)
 
-## 試す
+- **GPU・ネイティブ依存なし** — 純 Rust のソフトウェアラスタライザです。`wasm32-unknown-unknown` で動き、C ライブラリに依存しません。
+- **MapLibre 準拠** — MapLibre GL JS のバケット生成とシェーダの計算を移植しています。上流の render テストのうち、対象の 98.0% を GL JS と同じ許容差で通ります（[準拠状況](#準拠状況)）。
+- **任意の投影座標系** — PROJJSON で指定した CRS（UTM・平面直角座標系・LAEA・極ステレオ・Equal Earth・静止衛星視など）に、地図を直接描けます。
+- **GL JS で任意の CRS** — スタイルの全ソース（ベクトルタイル・GeoJSON・ラスタ・DEM）をその CRS のタイル格子に再投影して配信できます。これを使えば、MapLibre GL JS 自身が元のスタイルを任意の CRS で描けます。
+- **サーバレス向き** — ネットワークやファイル I/O を持たない設計です（取得はホストが行います）。Cloudflare Workers の 128 MB の上限に収まるよう、メモリを抑えています。
 
-Node.js は `.node-version`、pnpm は `package.json` の指定に合わせてください。Rust と `wasm32-unknown-unknown` ターゲットも必要です。
+> [!NOTE]
+> 対象は平面の 2D 地図です。fill-extrusion・terrain・globe・pitch などの 3D 表現は扱いません（fill-extrusion は既定で fill として描きます）。また、描画中にスタイルを変更する API はありません。
 
-```sh
-pnpm install
-rustup target add wasm32-unknown-unknown
-pnpm demo
-```
+MapLibre GL JS の実装を参照し、Vibe Coding で作成しました。
 
-`pnpm demo` は WASM をビルドして Vite のデモ画面を起動します。本レンダラが生成した 256px ラスタータイルだけを MapLibre GL JS の raster ソースで表示します（GL JS 自身のベクタ描画は使いません）。左の Style JSON・PROJJSON・GeoJSON の入力欄が描画の設定で、入力が止まると（500ms のデバウンス）自動で反映します。各欄は見出しで開閉でき、閉じているときはプルダウンだけ、開くと直接入力できます。それぞれのプルダウンで入力欄をプリセット（スタイル: MapLibre デモタイル・経緯線付き・地理院タイル・OpenFreeMap Liberty、投影: 経緯度・Equal Earth・平面直角座標系・UTM・Lambert-93・LAEA Europe・極ステレオ・ひまわり Full Disk など）に書き換えて再描画します。PROJJSON が空欄なら Web Mercator を再投影なしで描きます。PROJJSON を指定すると、`loadProjection` の投影式と、PROJJSON の `bbox`（適用範囲、なければ全球）を投影した正方形のタイル格子で GL JS の `addProjection` に登録し、各タイルを `renderProjected`（PROJJSON が空欄なら `renderZxy`）で描きます。整合確認用に GeoJSON 欄の内容（既定は Natural Earth の都市）を GL JS 自身が重ね、ホバーで属性を表示します。GL JS は GeoJSON を Worker でタイル化するので、`importScriptInWorkers` で `loadProjectionFactory` を使う `setProjectionHandler` を Worker に読み込みます。表示位置は URL ハッシュ（`#zoom/lat/lng`）に残り、投影を切り替えても同じ場所・ほぼ同じ縮尺を保ちます。リソース取得と WASM 描画は複数の Web Worker（最大4、CPUコア数−1）で並列に実行し、Worker 内で `ImageBitmap` に変換して所有権を移譲し、メインスレッドでタイルに表示します。デモではレンダラを無期限に再利用し（`ttlMs: Infinity`）、取得はブラウザの HTTP キャッシュに任せます。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
-
-デモの統計欄には、完了タイル数と直近200タイルの生成時間（平均・p95・最大）、平均Worker往復時間、初期化時間を表示します。生成時間には素材取得を含み、往復時間には画像変換・通信・待ち時間も含みます。画面への表示時間やWASM単体のCPU時間ではありません。Style JSON が変わるとスタイルとレンダラ、統計を初期化し、PROJJSON だけの変更では Worker 内のレンダラ（デコード済みタイル）を維持します。
-
-## JavaScript API
-
-[`MapRenderer`](packages/ml2drender/src/index.ts) が、WASM のロード、リソース取得、画像生成をまとめて扱います。先に `pnpm build:wasm` を実行してください。専用 `wasm` プロファイル（LTO・SIMD有効）でビルドし、成果物を公開パッケージへコピーします。ブラウザの既定ロードは `new URL(..., import.meta.url)` によるアセット参照を使い、Viteで動作します。Cloudflare Workersではコンパイル済みモジュールを渡します（後述）。
-
-JS API は workspace パッケージ `ml2drender` として利用します。利用側の `package.json` に `"ml2drender": "workspace:*"` を追加してください。現在は TypeScript ソースを公開する非公開パッケージで、npm 配布用のビルドは用意していません。
+## クイックスタート
 
 ```ts
 import { MapRenderer } from 'ml2drender';
 
-const style = await (await fetch('/style.json')).json();
-const renderer = await MapRenderer.init(style, {
-  cache: { ttlMs: 300_000 },
-});
-const image = await renderer.renderView({
-  center: [139.767, 35.681], // [経度, 緯度]
-  zoom: 12,
-  width: 512,
-  height: 512,
-  pixelRatio: devicePixelRatio,
-  margin: 64, // CSS px
-});
+const style = await (await fetch('https://demotiles.maplibre.org/style.json')).json();
+const renderer = await MapRenderer.init(style);
 
-const canvas = document.querySelector('canvas')!;
-canvas.width = image.width;
-canvas.height = image.height;
-canvas.getContext('2d')!.putImageData(
-  new ImageData(image.data, image.width, image.height), 0, 0,
-);
+const image = await renderer.renderView({ center: [139.767, 35.681], zoom: 5, width: 512, height: 512 });
+const png = image.toPng(); // または image.toWebp()、生の RGBA は image.data
 ```
 
-- `MapRenderer.init(style, options?)`: 公式 `StyleSpecification` 型の Style オブジェクトを受け取り、WASM をロードします。Style JSON の取得（`fetch` や `fs.readFile`）は呼び出し側で行ってください。呼び出し時点の内容をコピーして使用します。スタイル内のリソース URL は書かれたまま `loadResource` に渡します。Style Spec では `glyphs` と TileJSON の `url` は絶対 URL のため、絶対 URL を使ってください（ブラウザの既定 fetch では相対 URL はページ基準で解決されます）。
-- `options.loadResource`: タイル・TileJSON・sprite・glyph を取得する `(url: string) => Promise<Uint8Array<ArrayBuffer> | null>`。既定は HTTP fetch です。HTTP 404 は欠落リソース（`null`）として描画を続行します。それ以外の HTTP エラーや通信・本文読み取りの失敗は例外になります。空タイルを表す HTTP 204 は成功として扱います。同梱の Wasm（`wasm` 未指定時）はこれを使わず HTTP fetch で取得し、一度だけコンパイルします。ホスト側の同時数制限・再試行・タイムアウトを実装する場合に指定できます。
-- `options.wasm`: コンパイル済みの `WebAssembly.Module`。指定時はWASMのfetch・実行時コンパイルを行いません。Cloudflare Workersでは必須です。`cache.ttlMs` が `0` のレンダラと `loadProjection` は、モジュールごとに1つの WASM インスタンスを共有します（WASM のメモリは縮まないため、ある描画が解放したメモリを次の描画が再利用します）。リソースを保持するレンダラは専用のインスタンスを持ち、レンダラとともに回収されます。
-- `options.cache.ttlMs`: WASM 内のレンダラを描画をまたいで再利用する期間（ミリ秒）。既定は 5 分。レンダラはデコード済みのタイルと線・塗りのジオメトリ（ソースごとに最近使った8タイル分）、GeoJSON・sprite・グリフなどを保持し、生成から `ttlMs` 経過後の描画で作り直します。`0` なら描画ごとに作り直し（描画が終わると解放し、描画中も各レイヤの線・塗りのジオメトリを描き終えた時点で捨てます）、`Infinity` なら作り直しません。密なタイルではこの保持に数十 MiB を使うため、メモリが厳しい環境では `0` にしてください。Style はインスタンス内で再利用します。
-- `options.exclusive`: `true` なら、同じ WASM インスタンス上の他の `exclusive` な描画と1本ずつ順に実行します（最初の取得から画像まで）。重なって走る描画は取得を待つあいだもそれぞれのデコード済みリソースを保持するため、WASM メモリが本数に比例して増えます。`exclusive` なら最大の1枚分で済みます。既定は `false`。
-- 取得したバイト列はキャッシュしません。同じ URL を同時に要求した場合は取得を 1 回にまとめます。同じインスタンスで重なって走る描画は、互いにまだ描いていないタイルを WASM 内のキャッシュから追い出しません。再取得を避けるには、ブラウザの HTTP キャッシュに任せるか、`loadResource` 内でキャッシュしてください（Cloudflare Workers なら Cache API など）。
-- `options.transformFillExtrusion`: Style JSON にある各 `fill-extrusion` レイヤを、対応する 2D レイヤ定義へ変換する関数です。省略時は `fill` に変換し、ID・metadata・source・source-layer・ズーム範囲・filter・visibility を維持します。色・不透明度・パターン・平行移動・移動の基準と、それらの式・transition を対応する fill プロパティへ引き継ぎます。高さ・底面の高さ・立体の陰影・角の丸みは反映しません。不透明度は fill のフィーチャ単位の合成に従うため、重なる地物の見え方は異なる場合があります。独自の関数を指定すると既定の変換を置き換えます。`init()` 時に適用されます。引数の `FillExtrusionLayer` は公式 [`@maplibre/maplibre-gl-style-spec`](https://github.com/maplibre/maplibre-style-spec) の `FillExtrusionLayerSpecification`、返り値の `StyleLayer` は公式 `LayerSpecification` から `fill-extrusion` を除いた型です。レイヤ種別ごとの必須項目・paint・layout を型チェックします。型定義は取得した JSON の実行時検証を行うものではありません。
-- 描画メソッドは 4 つあり、いずれも必要なタイル・画像・グリフを取得して `Promise<RenderedImage>` を返します。同じインスタンスで、異なる視点やメソッドを混在させて繰り返し描画できます。`renderView`・`renderZxy`・`renderLngLat` は Web Mercator で描き、`renderProjected` だけが投影座標系で描きます。
-  - `renderer.renderView(view)`: Web Mercator のカメラ。`view.center: [lng, lat]`、`zoom`、`width`、`height` は必須で、`bearing`（時計回りの度数、既定 0）は省略できます。幅・高さは CSS ピクセル単位、ズームは MapLibre GL JS と同じ（ズーム 0 で世界全体が 512 CSS ピクセル）です。
-  - `renderer.renderZxy(tile)`: Web Mercator の XYZ タイル。`tile.z`・`x`・`y`（整数）は必須で、`tileSize`（CSS ピクセル、既定 256）は省略できます。出力は `tileSize` 四方です。
-  - `renderer.renderLngLat(view)`: 経緯度の範囲。`view.bbox: [west, south, east, north]`（度）と `size`（長辺の CSS ピクセル数、正の整数）は必須です。出力は範囲の（Web Mercator 上の）縦横比で長辺が `size`、短辺はそれに合わせて四捨五入した大きさになり、範囲がちょうど収まるズーム（小数）を自動で選びます。`west > east` は反子午線をまたぐ範囲、緯度は ±85.0511° に丸めます。
-  - `renderer.renderProjected(view)`: 投影座標系の範囲。`view.projjson`（PROJJSON オブジェクト）、`bbox: [minX, minY, maxX, maxY]`（CRS の単位、経緯度なら度）、`width`、`height` は必須です。bbox は出力の幅・高さにそのまま割り当てるので、縦横比を揃えてください。回転には対応していません。非対応の CRS は例外になります（[投影座標系](#投影座標系)）。
-- `pixelRatio`: 全メソッド共通。出力の画素数は CSS ピクセル × `pixelRatio`（既定 1）です。
-- `margin`: 四辺に追加する描画余白（CSS ピクセル単位の非負整数、既定 0）。余白までタイル取得・symbol の衝突判定・描画を行い、中央の指定サイズを返します。出力サイズ・中心・ズームは変わりません。タイル境界の外側にアンカーを持つ symbol の欠落を軽減できますが、タイルごとの衝突判定の一致を保証するものではありません。余白を増やすほど取得量・描画時間・メモリ使用量も増えます。デモでは `64` CSS ピクセルを指定しています。大きな symbol には、より広い余白が必要になる場合があります。
-- `RenderedImage`: `width`、`height`、行優先の 8 bit RGBA 画素列 `data: Uint8ClampedArray` を持ちます。取得や描画の失敗は例外になります。
-- `image.toPng()`: `data` を WASM 内で PNG 化した `Uint8Array<ArrayBuffer>` を返します（同期）。RGBA8の可逆圧縮で、速度重視の圧縮設定です。返すバイト列は独立したコピーなので、続けて描画しても書き換わりません。
-- `image.toWebp()`: 同様に可逆（VP8L）WebP を返します。地図画像では PNG より小さくなります（bright スタイル 512×512 で約 3 割減）。非可逆 WebP には対応していません。
-- `loadProjection(projjson, options?)`: PROJJSON オブジェクトを受け取り、`renderProjected` と同じ解釈・同じ Rust の投影式を `Promise<Projection>` で返します。`projection.forward([lng, lat])` は CRS 座標（投影できない点は NaN）、`projection.inverse([x, y])` は経緯度（範囲外は NaN）を返します。タイル範囲の計算や、MapLibre GL JS の `addProjection` への登録に使うと、描画と位置が一致します。`options` は `wasm` を受け付け、WASM インスタンスはモジュールごとに共有します。
-- `loadProjectionFactory(options?)`: WASM を読み込んだうえで、同期版の `loadProjection`（`(projjson) => Projection`）を返します。GL JS の Worker で `setProjectionHandler` に渡すなど、await できない場面向けです。
+必要なタイル・TileJSON・sprite・グリフは、レンダラが判断して取得します。ブラウザ（Vite など）では同梱の WASM を自動で読み込みます。Node.js と Cloudflare Workers では、コンパイル済みの WASM を `wasm` オプションで渡してください（Node.js なら `WebAssembly.compile(readFileSync(...))`）。
+
+### インストール
+
+現在は npm に公開しておらず、このリポジトリの pnpm workspace パッケージ `ml2drender` として使います（`"ml2drender": "workspace:*"`）。ビルドには Node.js（`.node-version`）・pnpm（`packageManager`）・Rust と `wasm32-unknown-unknown` ターゲットが必要です。
+
+```sh
+pnpm install
+rustup target add wasm32-unknown-unknown
+pnpm build:wasm   # WASM をビルドして packages/ml2drender/wasm/ に置く
+pnpm demo         # デモ（examples/browser）を起動
+```
+
+## 使い方
+
+### Web Mercator の地図画像
+
+```ts
+const renderer = await MapRenderer.init(style);
+
+await renderer.renderView({ center: [lng, lat], zoom: 12, bearing: 30, width: 800, height: 600 }); // カメラ
+await renderer.renderZxy({ z: 12, x: 3638, y: 1612 });                                             // XYZ タイル
+await renderer.renderLngLat({ bbox: [139.5, 35.5, 140, 36], size: 1024 });                         // 経緯度の範囲
+```
+
+ブラウザでは、`RenderedImage` の `data` を `ImageData` にしてそのまま canvas に描けます。
+
+```ts
+canvas.getContext('2d')!.putImageData(new ImageData(image.data, image.width, image.height), 0, 0);
+```
+
+### 投影座標系の地図画像
+
+```ts
+const utm = renderer.projected({
+  name: 'EPSG:32654',
+  projjson: utm54n, // EPSG:32654 の PROJJSON
+  tileMatrixSet: { origin: [-2_000_000, 6_000_000], extentAtZoom0: 4_000_000 },
+});
+
+await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000], width: 512, height: 512 }); // CRS の範囲
+await utm.renderTile({ z: 3, x: 4, y: 2 });                                                     // CRS の格子のタイル
+```
+
+### MapLibre GL JS で任意の CRS に描かせる
+
+ml2drender が各ソースを CRS の格子に再投影したタイルを返し、MapLibre GL JS はそれを元のスタイルで描きます。CRS の登録には、GL JS 6.15 の `addProjection`（実験的な API）を使います。地図は GL JS の WebGL で描かれるので、インタラクティブに動き、地物のクエリもできます。
+
+```ts
+// サーバ（Workers など）: ソースの再投影タイルを返す
+const crs = { name: 'EPSG:32654', projjson: utm54n, tileMatrixSet };
+const tile = await renderer.projected(crs).getTile({ source, z, x, y }); // MVT / PNG / terrarium PNG
+
+// ブラウザ: CRS を GL JS に登録し、書き換えたスタイルで描く
+import { addProjection, Map } from 'maplibre-gl';
+import { loadProjection } from 'ml2drender';
+
+addProjection({ name: crs.name, projection: await loadProjection(crs.projjson), tileMatrixSet: crs.tileMatrixSet });
+const glStyle = renderer.projected(crs).toStyle({ tiles: (source) => `https://tiles.example.com/${source}/{z}/{x}/{y}` });
+new Map({ container: 'map', style: glStyle });
+```
+
+`addProjection` に渡す投影式は `loadProjection` で作ると、ml2drender の描画と同じ式になり、位置が一致します。GeoJSON ソースを GL JS 自身に描かせる場合は、GL JS の Worker でも同じ投影式を使ってください（`loadProjectionFactory` と `setProjectionHandler`。[デモの実装](examples/browser/src/gl-projection-handler.ts)を参照）。
+
+## JavaScript API
+
+### `MapRenderer.init(style, options?)`
+
+Style オブジェクト（公式の `StyleSpecification` 型）を受け取り、WASM を読み込みます。スタイルは呼び出し時点の内容をコピーして使います。リソースの URL は、スタイルに書かれたまま `loadResource` に渡ります（`glyphs` と TileJSON の `url` は絶対 URL にしてください）。
+
+| オプション | 既定 | 説明 |
+|---|---|---|
+| `loadResource` | HTTP fetch | `(url) => Promise<Uint8Array \| null>`。タイル・TileJSON・sprite・グリフを取得します。`null`（HTTP 404）は欠落リソースとして描画を続け、それ以外の失敗は例外になります。同時数の制限・再試行・キャッシュはここで実装します。 |
+| `wasm` | 同梱の WASM | コンパイル済みの `WebAssembly.Module`。Node.js と Cloudflare Workers では必須です。 |
+| `cache.ttlMs` | `300_000` | WASM 内のレンダラ（デコード済みのタイル・ジオメトリ・グリフ）を描画をまたいで再利用する期間です。`0` は描画ごとに作り直して解放し（メモリ最小）、`Infinity` は作り直しません。 |
+| `exclusive` | `false` | 同じ WASM インスタンス上の描画を1本ずつ実行します。重なった描画がそれぞれデコード済みのデータを抱えたまま待つのを防ぎます（Workers 向け）。 |
+| `transformFillExtrusion` | fill に変換 | fill-extrusion レイヤを 2D のレイヤに置き換える関数です。既定では色・不透明度・パターン・平行移動を引き継いだ fill にします。 |
+
+同じ URL を同時に要求した場合は、取得を1回にまとめます。取得したバイト列そのものはキャッシュしないので、ブラウザの HTTP キャッシュか、`loadResource` 内のキャッシュ（Workers なら Cache API など）を使ってください。
+
+### 地図画像を返すメソッド
+
+いずれも必要なリソースを取得し、スタイルの全レイヤを描いた `Promise<RenderedImage>` を返します。同じレンダラで、視点・メソッド・CRS を混在させて（同時にも）描画でき、取得したリソースは共有されます。
+
+| メソッド | 描く範囲 |
+|---|---|
+| `renderView({ center, zoom, bearing?, width, height })` | Web Mercator のカメラ。ズームは GL JS と同じです（ズーム 0 で世界全体が 512 CSS px）。 |
+| `renderZxy({ z, x, y, tileSize? })` | Web Mercator の XYZ タイル（`tileSize` の既定は 256）。 |
+| `renderLngLat({ bbox, size })` | 経緯度の範囲 `[west, south, east, north]`。長辺が `size` px になるようにカメラを合わせます。`west > east` は反子午線をまたぐ範囲です。 |
+| `projected(crs).render({ bbox, width, height })` | CRS の範囲 `[minX, minY, maxX, maxY]`（CRS の単位）。 |
+| `projected(crs).renderTile({ z, x, y, tileSize? })` | CRS の格子のタイル。 |
+
+共通のオプションは2つです。
+
+- `pixelRatio`(既定 1):出力の画素数は CSS px × `pixelRatio` です。
+- `margin`(既定 0):四辺に余分に描いて切り取る CSS px です。タイルの縁の外にアンカーがある symbol の欠落を減らせます。
+
+`RenderedImage` は次のものを持ちます。
+
+- `width`・`height`
+- `data`:行優先の RGBA を並べた `Uint8ClampedArray`
+- `toPng()`・`toWebp()`:WASM 内でエンコードした可逆の PNG / WebP を返します。WebP は PNG より約3割小さくなります。
+
+### `renderer.projected(crs)`
+
+レンダラを書き換えず、CRS `crs` で描く `ProjectedRenderer` を返します。`crs` は MapLibre GL JS の `addProjection` に登録する CRS と同じ形です。
+
+- `name`:GL JS での名前
+- `projjson`:CRS の PROJJSON
+- `tileMatrixSet`:`{ origin: [minX, maxY], extentAtZoom0 }`。タイル 0/0/0 は左上が `origin`、一辺 `extentAtZoom0` の正方形で、ズームごとに4分割します。x は東、y は南に増えます。
+
+上の `render`・`renderTile` のほかに、GL JS に描かせるためのメソッドが2つあります。
+
+#### `getTile({ source, z, x, y })`
+
+地図画像ではなく、スタイルのソース1つのデータを格子のタイルに再投影し、GL JS がそのまま読める形で `Promise<Uint8Array>` として返します。スタイルのレイヤやフィルタは適用しません。元のデータは、そのタイルを 512 CSS px で描く場合のズームで取得します。
+
+| ソース | 返すもの |
+|---|---|
+| vector / geojson | MVT（extent 4096、外側 128 単位まで）。全レイヤ・全地物・全属性をそのまま出力し、GeoJSON ソースはソース ID をレイヤ名にします。 |
+| raster / image | 512 px の PNG。既定の paint の raster レイヤで描いたものです。image ソースもタイルになります。 |
+| raster-dem | 512 px の PNG。各画素の位置の標高（元 DEM から双線形補間）を `terrarium` で符号化したものです。 |
+
+ベクトルの再投影の詳細は次のとおりです。
+
+- 元タイルの縁で切られたポリゴンは、属性が同じ断片どうしを結合してから投影するので、元タイルの境界で割れません。ID は断片の ID がそろうときだけ残します。
+- 線は元タイルの境界で分かれたままです。
+- 投影の定義域（静止衛星視の地球の裏側など）の外は除きます。線は定義域の縁で終わり、ポリゴンは縁に沿って閉じます。
+
+#### `toStyle({ tiles })`
+
+`init` に渡した元のスタイルを、GL JS が CRS `crs.name` の上で `getTile` のタイルから描けるように書き換えて返します。
+
+- `tiles(sourceId)`:各ソースのタイル URL テンプレート（その CRS の格子の `{z}/{x}/{y}`）を返す関数です。
+- vector / geojson ソースは vector に、raster / image は raster に、raster-dem は terrarium の raster-dem に置き換えます（いずれも 512 px タイル）。
+- GeoJSON ソースのレイヤには `source-layer` を補います。
+- fill-extrusion などのレイヤはそのまま残ります。video ソースのレイヤは除きます。
+
+GL JS は、投影格子上の自分のズームでスタイルを評価します。hillshade の傾斜もタイルのズームから求めます。そのため、ズームに依存する見え方は ml2drender の描画と少し違います。
+
+### `loadProjection(projjson, options?)` / `loadProjectionFactory(options?)`
+
+描画と同じ Rust の投影式を返します。`forward([lng, lat])` は CRS 座標を、`inverse([x, y])` は経緯度を返し、投影できない点は NaN です。タイル範囲の計算や GL JS の `addProjection` に使います。`loadProjectionFactory` は同期版の `(projjson) => Projection` を返すので、GL JS の Worker の `setProjectionHandler` のように await できない場面で使えます。
 
 ## 投影座標系
 
-`renderProjected` で、PROJJSON で指定した CRS の範囲を描画できます。CRS の指定は PROJJSON だけで、PROJ 文字列や WKT は受け付けません。PROJJSON は PROJ の `projinfo -o PROJJSON -q EPSG:32654` などで得られます。
+CRS は PROJJSON（`GeographicCRS` / `ProjectedCRS`）で指定します。PROJ 文字列や WKT は受け付けません。PROJJSON は `projinfo -o PROJJSON -q EPSG:32654` などで得られます。
 
-```ts
-const image = await renderer.renderProjected({
-  projjson: utm54n, // EPSG:32654 の PROJJSON オブジェクト
-  bbox: [300_000, 3_900_000, 500_000, 4_100_000], // [minX, minY, maxX, maxY]
-  width: 512,
-  height: 512,
-});
-```
-
-- 対応する投影: 経緯度、横メルカトル（UTM を含む）、メルカトル（Web Mercator を含む）、ランベルト正角円錐、極ステレオ、ランベルト正積方位、Equal Earth、静止衛星視（geos）。PROJJSON は `GeographicCRS` と `ProjectedCRS` を受け付け、楕円体は `semi_major_axis` と `inverse_flattening`/`semi_minor_axis`、または `radius` から読みます。単位はメートル、本初子午線はグリニッジのみです。
-- 測地系変換は行いません。スタイルの座標（WGS84）をそのまま CRS の楕円体上の経緯度として投影します。変換を含む `BoundCRS` などは例外になります。
-- 座標は CRS の軸順にかかわらず常に東・北（経度・緯度）の順です。EPSG:4326 でも `[minLng, minLat, maxLng, maxLat]` で指定します。
-- ベクタ由来のレイヤ（`background`・`fill`・`line`・`circle`・`heatmap`・`symbol`）は頂点を投影して出力画像に直接描きます。線幅・円の半径・文字の大きさなどのピクセル長は投影後も画面上で一定です。`*-pattern` は CRS 座標に固定した原点から画面ピクセル上に一様に敷き、破線と `line-pattern` は投影後の線に沿った距離で敷きます。投影の反子午線をまたぐタイルは分けて描きます。
-- `raster`・`hillshade`・`color-relief` は Web Mercator で描いた画像をメッシュで変形します。
-- 投影の定義域外（静止衛星視の地球の裏側など）は透明になります。
+- **対応する投影**:経緯度、横メルカトル（UTM・平面直角座標系）、メルカトル（Web Mercator を含む）、ランベルト正角円錐、極ステレオ、ランベルト正積方位、Equal Earth、静止衛星視（geos）。任意の楕円体に対応します。単位はメートル、本初子午線はグリニッジのみです。
+- **測地系変換は行いません。** スタイルの座標（WGS84）を、そのまま CRS の楕円体上の経緯度として投影します。
+- **座標の順序**:CRS の軸順にかかわらず、常に東・北（経度・緯度）の順です。
+- **描き方**:background・fill・line・circle・heatmap・symbol は、頂点を投影して出力に直接描きます。線幅・半径・文字の大きさなどのピクセル長は、投影後も画面上で一定です。raster・hillshade・color-relief は、Web Mercator で描いた画像をメッシュで変形します。定義域の外は透明になります。
 
 ## Cloudflare Workers
 
-Wranglerで `ml2drender/renderer.wasm` をimportすると `WebAssembly.Module` として渡せます。`?url` や実行時コンパイルは不要です（[Cloudflare公式ドキュメント](https://developers.cloudflare.com/workers/runtime-apis/webassembly/javascript/)）。`.wasm` 拡張子を含むこの公開パスを使ってください。
+Wrangler で `ml2drender/renderer.wasm` を import すると、`WebAssembly.Module` として渡せます。
 
 ```ts
 import { MapRenderer } from 'ml2drender';
@@ -100,73 +192,74 @@ export default {
   async fetch() {
     const style = await (await fetch('https://demotiles.maplibre.org/style.json')).json();
     const renderer = await MapRenderer.init(style, { wasm, cache: { ttlMs: 0 }, exclusive: true });
-    const image = await renderer.renderView({
-      center: [0, 0], zoom: 0, width: 512, height: 512, margin: 64,
-    });
+    const image = await renderer.renderView({ center: [0, 0], zoom: 0, width: 512, height: 512, margin: 64 });
     return new Response(image.toWebp(), { headers: { 'Content-Type': 'image/webp' } });
   },
 };
 ```
 
-ブラウザのWeb Workerとは別のランタイムです。画像配信ではBitmap化せず、エンコードしたバイト列をHTTPレスポンスにします。`toWebp()`（可逆）は `toPng()` より小さくなります。リソース取得はリクエスト内で行います。
+isolate のメモリ上限 128 MB は、JS ヒープと WASM メモリ（縮まない）の合計にかかります。レンダラはリクエストごとに `ttlMs: 0` で作り、`exclusive: true` にしてください。こうしたレンダラは isolate 内で WASM インスタンスを共有し、同時に来たリクエストを1本ずつ描きます。OpenFreeMap Liberty で東京駅周辺の z14 を描くと、WASM メモリは約 75 MiB です（512 px・margin 64、ローカルの workerd で同時 8 リクエストでも同じ）。
 
-isolate のメモリ上限は 128MB で、JS ヒープと WASM メモリ（縮まない）の合計です。レンダラはリクエストごとに `ttlMs: 0` で生成し、`exclusive: true` を指定してください。これらのレンダラは isolate 内で WASM インスタンスを共有し、同時に来たリクエストの描画は1本ずつ実行されます。OpenFreeMap Liberty で東京駅周辺の z14（512px、margin 64、データタイル 9 枚・グリフ範囲 152 本）の WASM メモリは約 75 MiB です（ローカルの workerd で同時 8 リクエストでも同じ）。
+## 準拠状況
+
+[MapLibre GL JS の render テスト](https://github.com/maplibre/maplibre-gl-js/tree/main/test/integration/render)を、GL JS と同じ比較（pixelmatch、テストごとの許容差）で実行しています。
+
+| | 件数 |
+|---|---|
+| render テスト（対象 1008 件） | 988 pass / 20 fail（98.0%） |
+| 式テスト（Style Spec、583 件） | 581 pass / 2 fail（99.7%） |
+
+対象外（727 件）は、3D・pitch・非 Mercator の GL 投影・実行時のスタイル変更などのテストです。主な既知の非対応は次のとおりです。
+
+- 双方向テキスト・アラビア文字の字形整形、ブラウザフォントでのグリフ描画（TinySDF）
+- 配置の履歴依存（`prevAnchor`・CrossTileSymbolIndex）。単発の静止画では再現しません。
+- ロケール別の照合、`number-format` の en-US 以外
 
 ## アーキテクチャ
 
 ```mermaid
 flowchart LR
-    Host[MapRenderer<br/>init・render*・リソース取得] -->|Style JSON・View| ABI[wasm<br/>C ABI・メモリ受け渡し]
-    ABI --> Core[core / Renderer<br/>必要リソースの管理]
+    Host[MapRenderer<br/>取得ループ・API] -->|Style・視点| ABI[wasm<br/>C ABI]
+    ABI --> Core[core::Renderer]
     Core -->|needs: URL| Host
     Host -->|provide: バイト列| Core
-    Core --> Style[style・expression<br/>Style と式の評価]
-    Core --> Sources[tile・mvt・geojson・image・sprite<br/>ソースのデコード]
-    Core --> Symbols[symbol<br/>グリフ・レイアウト・配置]
-    Core --> Proj[projection・reproject<br/>投影式・ラスタの変形]
-    Style --> Draw[render<br/>ソフトウェアラスタライズ]
-    Sources --> Draw
-    Symbols --> Draw
-    Proj --> Draw
+    Core --> Style[style・expression]
+    Core --> Sources[mvt・geojson・image・sprite]
+    Core --> Symbols[symbol<br/>シェーピング・配置]
+    Core --> Proj[projection・reproject]
+    Style & Sources & Symbols & Proj --> Draw[render<br/>ソフトウェア GL]
     Draw -->|RGBA| ABI
-    ABI -->|RGBA / PNG| Host
+    Proj -->|MVT・PNG| ABI
+    ABI -->|画像・タイル| Host
 ```
 
-`crates/core/` はネットワークやファイル I/O を持たない Rust ライブラリです。必要な URL を `needs()` で通知し、ホストから `provide()` で受け取ったデータを処理します。視点は `set_view`（Web Mercator）か `set_projected_view`（投影座標系）で切り替え、取得済みのリソースとタイル単位のジオメトリを再利用します。`crates/wasm/` はこの API と投影式（`projection_*`）を C ABI として公開し、`packages/ml2drender/src/index.ts` の `MapRenderer` と `loadProjection` が WASM メモリ操作と取得ループを隠します。`examples/browser/` は Web Worker 内で公開クラスを使い、生成したタイルの画素データを Worker 内で `ImageBitmap` に変換します。その所有権をメインスレッドへ移譲し、`addProtocol` 経由で MapLibre GL JS の raster ソースに渡します。`crates/cli/` はテストとネイティブでの検証に使います。
+- `crates/core/` は、ネットワーク・ファイル・非同期・スレッド・時計に依存しない（sans-IO）Rust ライブラリです。必要な URL を `needs()` で知らせ、ホストが `provide()` で渡したデータを処理します。必要なリソースは、タイル → テキスト → グリフ範囲のように段階的に確定します。
+- `crates/wasm/` は、この API を wasm-bindgen なしの C ABI で公開します。
+- [`packages/ml2drender`](packages/ml2drender/src/index.ts) が、WASM のメモリ操作と取得ループを隠します。
+
+描画は GPU パイプラインの構造は真似ず、MapLibre のバケット生成・シェーダの計算・量子化を移植し、GL と同じ規則でラスタライズします。
 
 ## 開発
 
-Cargo と pnpm の workspace をルートで管理します。Rust の crate は `crates/`、TypeScript のライブラリは `packages/`、利用例は `examples/` に置きます。
-
-```text
-.
-├── Cargo.toml / Cargo.lock         # Rust workspace
-├── package.json / pnpm-workspace.yaml / pnpm-lock.yaml
-├── crates/
-│   ├── core/                      # I/O を持たない描画エンジン
-│   ├── wasm/                      # C ABI
-│   └── cli/
-│       ├── src/                   # ネイティブ実行・上流テストランナー
-│       └── tests/exclusions.json  # render テストの除外ルール
-├── packages/ml2drender/
-│   ├── src/                       # MapRenderer と公開型
-│   ├── tests/                     # API の型テスト
-│   ├── package.json / tsconfig.json
-│   └── wasm/                      # build:wasm で配置する生成物（gitignore）
-├── examples/browser/              # パッケージ名で API を使う Vite デモ
-├── scripts/                       # リポジトリ全体の開発スクリプト
-├── fixtures/                      # 上流テストデータ（gitignore）
-└── target/                        # Cargo の生成物・テストレポート（gitignore）
-```
-
-テストや設定は所有するパッケージに置き、ルートには全体を管理するものを置きます。`pnpm build:wasm` は Cargo の出力を JS パッケージ内にコピーするため、利用側が Rust の生成物のパスを知る必要はありません。
-
 ```sh
 pnpm test              # Rust の単体テスト
-pnpm typecheck         # JavaScript API・型の回帰テスト・ブラウザサンプルの型チェック
-pnpm fixtures          # 上流のテストデータを取得（初回）
-pnpm test:render       # MapLibre GL JS の render テスト
-pnpm test:expression   # Style Spec の式テスト
+pnpm typecheck         # TypeScript の型チェック（API の型テストを含む）
+pnpm fixtures          # 上流のテストデータを取得（初回のみ、約 144 MB）
+pnpm test:render       # render テスト → target/test-report/render/
+pnpm test:expression   # 式テスト → target/test-report/expression/
+pnpm bench base=<dir> head=.   # WASM の性能比較
 ```
 
-設計方針と既知の非対応は [AGENTS.md](AGENTS.md) を参照してください。
+```text
+crates/core/          描画エンジン（sans-IO）
+crates/wasm/          C ABI
+crates/cli/           テストランナー・ネイティブ検証
+packages/ml2drender/  JavaScript API
+examples/browser/     デモ（Vite + MapLibre GL JS）
+```
+
+設計の制約と方針は [AGENTS.md](AGENTS.md) にあります。
+
+## ライセンス
+
+BSD-3-Clause。MapLibre GL JS と MapLibre Style Spec の実装を参照しています。テストデータ（`pnpm fixtures`）はそれぞれのライセンスに従います。

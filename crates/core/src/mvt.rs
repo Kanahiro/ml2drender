@@ -1,4 +1,4 @@
-//! Mapbox Vector Tile (protobuf) decoding.
+//! Mapbox Vector Tile (protobuf) decoding and encoding.
 
 use crate::expression::{Properties, TagTable, Value};
 use std::rc::Rc;
@@ -339,7 +339,7 @@ fn reencode(geom: &[Vec<[f64; 2]>], ty: GeomType) -> Vec<Vec<[i32; 2]>> {
 }
 
 /// `clipGeometryOnAxis` (symbol/clip_line.ts).
-fn clip_axis(geom: &[Vec<[f64; 2]>], ty: GeomType, start: f64, end: f64, axis: usize) -> Vec<Vec<[f64; 2]>> {
+pub(crate) fn clip_axis(geom: &[Vec<[f64; 2]>], ty: GeomType, start: f64, end: f64, axis: usize) -> Vec<Vec<[f64; 2]>> {
     let mut out = Vec::new();
     match ty {
         GeomType::Point => {
@@ -401,4 +401,183 @@ fn clip_axis(geom: &[Vec<[f64; 2]>], ty: GeomType, start: f64, end: f64, axis: u
         GeomType::Unknown => {}
     }
     out
+}
+
+/// Encodes `layers` as a vector tile (MVT 2), geometry as `decode` returns it. Like vt-pbf,
+/// null properties are left out and arrays/objects written as JSON strings. Repeated points are
+/// dropped, then lines under 2 points, rings under 3 and layers without features.
+pub fn encode(layers: &[Layer]) -> Vec<u8> {
+    let mut tile = Vec::new();
+    for l in layers {
+        let mut out = Vec::new();
+        let (mut keys, mut key_ids) = (Vec::new(), crate::hash::HashMap::<Rc<str>, u32>::default());
+        let (mut values, mut value_ids) = (Vec::new(), crate::hash::HashMap::<Vec<u8>, u32>::default());
+        for f in &l.features {
+            let geom = encode_geometry(&f.geometry, f.ty);
+            if geom.is_empty() {
+                continue;
+            }
+            let mut tags = Vec::new();
+            for (k, v) in f.properties.to_object().iter() {
+                let Some(v) = encode_value(v) else { continue };
+                tags.push(*key_ids.entry(k.clone()).or_insert_with(|| {
+                    keys.push(k.clone());
+                    keys.len() as u32 - 1
+                }));
+                tags.push(*value_ids.entry(v).or_insert_with_key(|v| {
+                    values.push(v.clone());
+                    values.len() as u32 - 1
+                }));
+            }
+            let mut feature = Vec::new();
+            if let Some(Value::Number(id)) = f.id
+                && id >= 0.0
+                && id.fract() == 0.0
+                && id < 1.8e19
+            {
+                put_varint(&mut feature, 1 << 3, id as u64);
+            }
+            put_packed(&mut feature, 2, &tags);
+            put_varint(&mut feature, 3 << 3, f.ty as u64);
+            put_packed(&mut feature, 4, &geom);
+            put_bytes(&mut out, 2, &feature);
+        }
+        if out.is_empty() {
+            continue;
+        }
+        put_varint(&mut out, 15 << 3, 2);
+        put_bytes(&mut out, 1, l.name.as_bytes());
+        for k in &keys {
+            put_bytes(&mut out, 3, k.as_bytes());
+        }
+        for v in &values {
+            put_bytes(&mut out, 4, v);
+        }
+        put_varint(&mut out, 5 << 3, l.extent as u64);
+        put_bytes(&mut tile, 3, &out);
+    }
+    tile
+}
+
+fn varint(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push(v as u8 | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+/// A varint field; `key` is `field << 3` (wire type 0).
+fn put_varint(out: &mut Vec<u8>, key: u64, v: u64) {
+    varint(out, key);
+    varint(out, v);
+}
+
+fn put_bytes(out: &mut Vec<u8>, field: u64, bytes: &[u8]) {
+    varint(out, field << 3 | 2);
+    varint(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+fn put_packed(out: &mut Vec<u8>, field: u64, vs: &[u32]) {
+    let mut b = Vec::with_capacity(vs.len());
+    for &v in vs {
+        varint(&mut b, v as u64);
+    }
+    put_bytes(out, field, &b);
+}
+
+fn encode_value(v: &Value) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    match v {
+        Value::Null => return None,
+        Value::Bool(b) => put_varint(&mut out, 7 << 3, *b as u64),
+        Value::String(s) => put_bytes(&mut out, 1, s.as_bytes()),
+        &Value::Number(n) if n.fract() == 0.0 && n.abs() < 9.2e18 => match n >= 0.0 {
+            true => put_varint(&mut out, 5 << 3, n as u64),
+            false => put_varint(&mut out, 6 << 3, ((n as i64) << 1 ^ (n as i64) >> 63) as u64),
+        },
+        Value::Number(n) => {
+            out.push(3 << 3 | 1);
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        v => put_bytes(&mut out, 1, v.to_json().to_string().as_bytes()),
+    }
+    Some(out)
+}
+
+fn encode_geometry(geom: &[Vec<[i32; 2]>], ty: GeomType) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut cursor = [0i32; 2];
+    let mut to = |out: &mut Vec<u32>, p: [i32; 2]| {
+        for k in 0..2 {
+            let d = p[k].wrapping_sub(cursor[k]);
+            out.push(((d << 1) ^ (d >> 31)) as u32);
+        }
+        cursor = p;
+    };
+    if ty == GeomType::Point {
+        let points: Vec<[i32; 2]> = geom.iter().flatten().copied().collect();
+        if !points.is_empty() {
+            out.push(1 | (points.len() as u32) << 3);
+            points.into_iter().for_each(|p| to(&mut out, p));
+        }
+        return out;
+    }
+    let polygon = ty == GeomType::Polygon;
+    for ring in geom {
+        let mut pts = ring.clone();
+        pts.dedup();
+        if polygon && pts.len() > 1 && pts[0] == pts[pts.len() - 1] {
+            pts.pop();
+        }
+        if pts.len() < if polygon { 3 } else { 2 } {
+            continue;
+        }
+        out.push(1 | 1 << 3);
+        to(&mut out, pts[0]);
+        out.push(2 | ((pts.len() - 1) as u32) << 3);
+        pts[1..].iter().for_each(|&p| to(&mut out, p));
+        if polygon {
+            out.push(7 | 1 << 3);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expression::Object;
+
+    #[test]
+    fn encode_roundtrips_through_decode() {
+        let mut props = Object::default();
+        props.insert("name".into(), Value::str("a"));
+        props.insert("n".into(), Value::Number(-3.0));
+        props.insert("f".into(), Value::Number(1.5));
+        props.insert("skip".into(), Value::Null);
+        let feature = |ty, geometry| Feature { id: Some(Value::Number(7.0)), ty, properties: Properties::Object(Rc::new(props.clone())), geometry };
+        let layer = Layer {
+            name: "l".into(),
+            extent: 4096,
+            features: vec![
+                feature(GeomType::Point, vec![vec![[1, 2]], vec![[-5, 6]]]),
+                feature(GeomType::LineString, vec![vec![[0, 0], [0, 0], [10, 10]], vec![[3, 3]]]),
+                feature(GeomType::Polygon, vec![vec![[0, 0], [10, 0], [10, 10], [0, 0]]]),
+            ],
+        };
+        let decoded = decode(&encode(&[layer]), |_| true).unwrap();
+        let l = &decoded[0];
+        assert_eq!((l.name.as_str(), l.extent, l.features.len()), ("l", 4096, 3));
+        assert_eq!(l.features[0].geometry, vec![vec![[1, 2]], vec![[-5, 6]]]);
+        assert_eq!(l.features[1].geometry, vec![vec![[0, 0], [10, 10]]]);
+        assert_eq!(l.features[2].geometry, vec![vec![[0, 0], [10, 0], [10, 10], [0, 0]]]);
+        let p = &l.features[2].properties;
+        assert!(matches!(p.get("name"), Some(Value::String(s)) if &**s == "a"));
+        assert!(matches!(p.get("n"), Some(Value::Number(-3.0))));
+        assert!(matches!(p.get("f"), Some(Value::Number(1.5))));
+        assert!(p.get("skip").is_none());
+        assert!(matches!(l.features[0].id, Some(Value::Number(7.0))));
+    }
 }

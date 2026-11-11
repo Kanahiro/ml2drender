@@ -10,9 +10,26 @@ async function pngResponse() {
 }
 
 const utm = { type: 'ProjectedCRS', name: 'WGS 84 / UTM zone 54N' /* ... */ };
+// The CRS as registered with GL JS's `addProjection`, on the same tile grid.
+const crs = { name: 'EPSG:32654', projjson: utm, tileMatrixSet: { origin: [-2000000, 6000000] as [number, number], extentAtZoom0: 4000000 } };
 
-async function projectedPng(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>> {
-  return (await renderer.renderProjected({ projjson: utm, bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 })).toPng();
+async function projectedPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>[]> {
+  const utmRenderer = renderer.projected(crs);
+  const box = await utmRenderer.render({ bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
+  const tile = await utmRenderer.renderTile({ z: 3, x: 4, y: 2, tileSize: 512 });
+  return [box.toPng(), tile.toWebp()];
+}
+
+async function sourceTile(renderer: MapRenderer): Promise<Response> {
+  const mvt = await renderer.projected(crs).getTile({ source: 'openmaptiles', z: 3, x: 4, y: 2 });
+  // @ts-expect-error A source's tile is addressed by its tile index, not a box.
+  await renderer.projected(crs).getTile({ source: 'openmaptiles', bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
+  return new Response(mvt, { headers: { 'Content-Type': 'application/vnd.mapbox-vector-tile' } });
+}
+
+function glStyle(renderer: MapRenderer): StyleSpecification {
+  // The style for GL JS, from tiles a Worker serves with `getTile`.
+  return renderer.projected(crs).toStyle({ tiles: (source) => `https://example.com/${source}/{z}/{x}/{y}` });
 }
 
 async function mercatorPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>[]> {
@@ -22,12 +39,12 @@ async function mercatorPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuff
 }
 
 async function wrongPath(renderer: MapRenderer) {
-  // @ts-expect-error A CRS box renders with `renderProjected`.
-  await renderer.renderView({ projjson: utm, bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
+  // @ts-expect-error A CRS box renders with `projected(crs).render`.
+  await renderer.renderView({ bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
   // @ts-expect-error A Mercator camera renders with `renderView`.
-  await renderer.renderProjected({ center: [0, 0], zoom: 0, width: 256, height: 256 });
-  // @ts-expect-error `renderProjected` takes PROJJSON, not a PROJ string.
-  await renderer.renderProjected({ projjson: '+proj=utm +zone=54 +ellps=GRS80', bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
+  await renderer.projected(crs).render({ center: [0, 0], zoom: 0, width: 256, height: 256 });
+  // @ts-expect-error A CRS is PROJJSON, not a PROJ string.
+  renderer.projected({ ...crs, projjson: '+proj=utm +zone=54 +ellps=GRS80' });
 }
 
 async function utmEasting(): Promise<number> {

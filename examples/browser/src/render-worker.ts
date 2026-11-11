@@ -1,14 +1,17 @@
 /// <reference lib="webworker" />
-import { MapRenderer, type ProjectedView, type TileView } from 'ml2drender';
+import { type Crs, MapRenderer, type SourceTile, type TileView } from 'ml2drender';
 import type { StyleSpecification } from 'maplibre-gl';
 
 export type WorkerRequest =
   | { kind: 'init'; generation: number; style: StyleSpecification }
-  | { kind: 'render'; generation: number; id: number; view: TileView | ProjectedView };
+  /** A tile of the Web Mercator grid, or with `crs` of that CRS's grid. */
+  | { kind: 'render'; generation: number; id: number; tile: TileView; crs?: Crs }
+  | { kind: 'source'; generation: number; id: number; tile: SourceTile; crs: Crs };
 
 export type WorkerResponse =
   | { kind: 'ready'; generation: number }
   | { kind: 'image'; generation: number; id: number; bitmap: ImageBitmap; renderMs: number }
+  | { kind: 'source'; generation: number; id: number; data: ArrayBuffer; renderMs: number }
   | { kind: 'error'; generation: number; id?: number; message: string };
 
 let generation = 0;
@@ -36,8 +39,22 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const active = renderer;
   if (request.generation !== generation || !active) return;
   const started = performance.now();
-  const view = request.view;
-  void ('projjson' in view ? active.renderProjected(view) : active.renderZxy(view))
+  const failed = (error: unknown) => {
+    if (request.generation === generation) {
+      worker.postMessage({ kind: 'error', generation, id: request.id, message: String(error) } satisfies WorkerResponse);
+    }
+  };
+  if (request.kind === 'source') {
+    void active.projected(request.crs).getTile(request.tile)
+      .then((tile) => {
+        if (request.generation !== generation) return;
+        const data = tile.slice().buffer;
+        worker.postMessage({ kind: 'source', generation, id: request.id, data, renderMs: performance.now() - started } satisfies WorkerResponse, [data]);
+      })
+      .catch(failed);
+    return;
+  }
+  void (request.crs ? active.projected(request.crs).renderTile(request.tile) : active.renderZxy(request.tile))
     .then(async (image) => {
       // Includes resource loading and overlapping renders; this is elapsed time, not CPU time.
       const renderMs = performance.now() - started;
@@ -54,9 +71,5 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
         throw error;
       }
     })
-    .catch((error: unknown) => {
-      if (request.generation === generation) {
-        worker.postMessage({ kind: 'error', generation, id: request.id, message: String(error) } satisfies WorkerResponse);
-      }
-    });
+    .catch(failed);
 };
