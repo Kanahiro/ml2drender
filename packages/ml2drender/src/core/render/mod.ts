@@ -349,27 +349,42 @@ export class RotationGrid {
     }
 }
 
-/** A fill layer's polygons in one tile, triangulated. */
+/** A fill layer's polygons in one tile, triangulated. Packed (dense tiles have many small
+ * polygons): entry `e` is the polygon feature `features[feature[e]]`, with the polygons
+ * `first[e] .. first[e + 1]`. Polygon `p` has the points `pointStart[p] .. pointStart[p + 1]` of `xy`
+ * (x, y pairs in tile units; rings concatenated, exterior first), the ring lengths
+ * `ringStart[p] .. ringStart[p + 1]` of `ringLens`, and the `earcut` triangles
+ * `triStart[p] .. triStart[p + 1]` of `triangles` (indices from the polygon's first point). */
 interface FillBucket {
     features: BucketFeature[];
-    /** Per polygon feature (by index into `features`): its polygons. */
-    polygons: [number, FillPolygon[]][];
+    feature: Uint32Array;
+    first: Uint32Array;
+    xy: ArrayLike<number>;
+    pointStart: Uint32Array;
+    ringLens: Uint32Array;
+    ringStart: Uint32Array;
+    triangles: Uint32Array;
+    triStart: Uint32Array;
 }
 
-interface FillPolygon {
-    /** Ring vertices, concatenated (exterior first), as x, y pairs in tile units. */
-    xy: number[];
-    ringLens: number[];
-    /** `earcut` indices into `points`. */
-    triangles: number[];
+/** `xs` in an Int32Array if that keeps every value (-0 included), else a Float64Array. */
+export function packed(xs: number[]): Int32Array | Float64Array {
+    return xs.every((v) => (v | 0) === v && !Object.is(v, -0)) ? Int32Array.from(xs) : Float64Array.from(xs);
 }
 
 function newFillBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): FillBucket {
     const features = ctx.bucketFeatures(layer, tf, 'fill-sort-key');
-    const polygons: [number, FillPolygon[]][] = [];
+    const feature: number[] = [];
+    const first = [0];
+    const xy: number[] = [];
+    const pointStart = [0];
+    const ringLens: number[] = [];
+    const ringStart = [0];
+    const triangles: number[] = [];
+    const triStart = [0];
     features.forEach((f, i) => {
         if (f.ty !== 3) return;
-        const polys = classifyRings(drawnGeometry(ctx, f.geometry), 500).map((polygon): FillPolygon => {
+        for (const polygon of classifyRings(drawnGeometry(ctx, f.geometry), 500)) {
             const flat: number[] = [];
             const holes: number[] = [];
             polygon.forEach((ring, i) => {
@@ -378,16 +393,26 @@ function newFillBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): FillBucket {
             });
             // npm `earcut` (v3, as MapLibre uses) where Rust used `earcutr` (a port of earcut 2.x):
             // triangulations can differ, their coverage of a valid polygon cannot.
-            let triangles = earcut(flat, holes, 2);
+            let tris = earcut(flat, holes, 2);
             // Long interior edges curve in a projected output too (after the rings' points).
-            if (ctx.transform.isProjected()) triangles = subdivide(flat, triangles, PROJECTED_SEGMENT);
-            return {xy: flat, ringLens: polygon.map((r) => r.length), triangles};
-        });
-        polygons.push([i, polys]);
+            if (ctx.transform.isProjected()) tris = subdivide(flat, tris, PROJECTED_SEGMENT);
+            for (const v of flat) xy.push(v);
+            pointStart.push(xy.length / 2);
+            for (const r of polygon) ringLens.push(r.length);
+            ringStart.push(ringLens.length);
+            for (const t of tris) triangles.push(t);
+            triStart.push(triangles.length);
+        }
+        feature.push(i);
+        first.push(pointStart.length - 1);
     });
     // Only the triangulated polygons are drawn.
     for (const f of features) f.geometry = NO_GEOMETRY;
-    return {features, polygons};
+    const u32 = (xs: number[]) => Uint32Array.from(xs);
+    return {
+        features, feature: u32(feature), first: u32(first), xy: packed(xy), pointStart: u32(pointStart),
+        ringLens: u32(ringLens), ringStart: u32(ringStart), triangles: u32(triangles), triStart: u32(triStart),
+    };
 }
 
 /** `BucketFeature.geometry` once a bucket no longer needs it. Never modified. */
@@ -590,8 +615,8 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
         };
         const tp = new pattern.TilePattern(ctx, tf.tile);
         const outlines: Outline[] = [];
-        for (const [i, polygons] of bucket.polygons) {
-            const f = bucket.features[i];
+        for (let e = 0; e < bucket.feature.length; e++) {
+            const f = bucket.features[bucket.feature[e]];
             const opacity = num(ctx.paint(layer, 'fill-opacity', f, tf.tile));
             const fillColor = color(ctx.paint(layer, 'fill-color', f, tf.tile), opacity);
             let coverFill: raster.Coverer | undefined;
@@ -613,9 +638,9 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
             const outlinePaint: FillPaint = hasOutlineColor
                 ? {kind: 'Color', c: color(ctx.paint(layer, 'fill-outline-color', f, tf.tile), opacity)}
                 : paint;
-            for (const polygon of polygons) {
+            for (let pg = bucket.first[e]; pg < bucket.first[e + 1]; pg++) {
                 const points: P[] = [];
-                for (let k = 0; k < polygon.xy.length; k += 2) points.push([polygon.xy[k], polygon.xy[k + 1]]);
+                for (let k = bucket.pointStart[pg]; k < bucket.pointStart[pg + 1]; k++) points.push([bucket.xy[2 * k], bucket.xy[2 * k + 1]]);
                 const screen = points.map(toScreen);
                 // Only patterns read the varying (outlines too: theirs is a color or this pattern).
                 const vary: [number, number][] =
@@ -623,7 +648,7 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                         ? points.map((p, k) => tp.pos(size, p, screen[k]) as [number, number])
                         : screen.map((): [number, number] => [0, 0]);
                 if (opacity >= 0.01 && pass !== 'Translucent') {
-                    const tris = polygon.triangles;
+                    const tris = bucket.triangles.subarray(bucket.triStart[pg], bucket.triStart[pg + 1]);
                     for (let k = 0; k + 2 < tris.length; k += 3) {
                         const t0 = tris[k];
                         const t1 = tris[k + 1];
@@ -678,7 +703,7 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                 }
                 if (antialias && opacity >= 0.01) {
                     let start = 0;
-                    for (const len of polygon.ringLens) {
+                    for (const len of bucket.ringLens.subarray(bucket.ringStart[pg], bucket.ringStart[pg + 1])) {
                         for (let i = 1; i < len; i++) {
                             const a = start + i - 1;
                             const b = start + i;

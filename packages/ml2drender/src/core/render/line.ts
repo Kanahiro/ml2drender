@@ -8,7 +8,7 @@ import {asU8, roundAway, wrapI8} from '../util.ts';
 import * as raster from './raster.ts';
 import type {Rgba, Target} from './raster.ts';
 import * as pattern from './pattern.ts';
-import {type BucketFeature, Ctx, EXTENT, NO_GEOMETRY, type TileFeatures, bent, color, drawnGeometry, num} from './mod.ts';
+import {type BucketFeature, Ctx, EXTENT, NO_GEOMETRY, type TileFeatures, bent, color, drawnGeometry, num, packed} from './mod.ts';
 
 const EXTRUDE_SCALE = 63;
 const COS_HALF_SHARP_CORNER = 0.7933533402912352; // cos(75° / 2)
@@ -128,13 +128,9 @@ class Builder {
 
     /** The built vertices in exact-size typed arrays. */
     compact(): LineGeometry {
-        // Int32 when that keeps every value (-0 included).
-        const int32 = (v: number) => (v | 0) === v && !Object.is(v, -0);
-        const integral = this.x.every(int32) && this.y.every(int32);
-        const pos = integral ? Int32Array : Float64Array;
         return {
-            x: pos.from(this.x),
-            y: pos.from(this.y),
+            x: packed(this.x),
+            y: packed(this.y),
             ext: Int8Array.from(this.ext),
             flags: Uint8Array.from(this.flags),
             linesofar: Float64Array.from(this.linesofar),
