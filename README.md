@@ -50,7 +50,7 @@ canvas.getContext('2d')!.putImageData(
 
 - `MapRenderer.init(style, options?)`: 公式 `StyleSpecification` 型の Style オブジェクトを受け取り、WASM をロードします。Style JSON の取得（`fetch` や `fs.readFile`）は呼び出し側で行ってください。呼び出し時点の内容をコピーして使用します。スタイル内のリソース URL は書かれたまま `loadResource` に渡します。Style Spec では `glyphs` と TileJSON の `url` は絶対 URL のため、絶対 URL を使ってください（ブラウザの既定 fetch では相対 URL はページ基準で解決されます）。
 - `options.loadResource`: タイル・TileJSON・sprite・glyph を取得する `(url: string) => Promise<Uint8Array<ArrayBuffer> | null>`。既定は HTTP fetch です。HTTP 404 は欠落リソース（`null`）として描画を続行します。それ以外の HTTP エラーや通信・本文読み取りの失敗は例外になります。空タイルを表す HTTP 204 は成功として扱います。同梱の Wasm（`wasm` 未指定時）はこれを使わず HTTP fetch で取得し、一度だけコンパイルします。ホスト側の同時数制限・再試行・タイムアウトを実装する場合に指定できます。
-- `options.wasm`: コンパイル済みの `WebAssembly.Module`。指定時はWASMのfetch・実行時コンパイルを行いません。Cloudflare Workersでは必須です。WASM インスタンスはモジュールごとに1つで、同じモジュールのレンダラと `loadProjection` が共有します（WASM のメモリは縮まないため、ある描画が解放したメモリを次の描画が再利用します）。
+- `options.wasm`: コンパイル済みの `WebAssembly.Module`。指定時はWASMのfetch・実行時コンパイルを行いません。Cloudflare Workersでは必須です。`cache.ttlMs` が `0` のレンダラと `loadProjection` は、モジュールごとに1つの WASM インスタンスを共有します（WASM のメモリは縮まないため、ある描画が解放したメモリを次の描画が再利用します）。リソースを保持するレンダラは専用のインスタンスを持ち、レンダラとともに回収されます。
 - `options.cache.ttlMs`: WASM 内のレンダラを描画をまたいで再利用する期間（ミリ秒）。既定は 5 分。レンダラはデコード済みのタイルと線・塗りのジオメトリ（ソースごとに最近使った8タイル分）、GeoJSON・sprite・グリフなどを保持し、生成から `ttlMs` 経過後の描画で作り直します。`0` なら描画ごとに作り直し（描画が終わると解放し、描画中も各レイヤの線・塗りのジオメトリを描き終えた時点で捨てます）、`Infinity` なら作り直しません。密なタイルではこの保持に数十 MiB を使うため、メモリが厳しい環境では `0` にしてください。Style はインスタンス内で再利用します。
 - `options.exclusive`: `true` なら、同じ WASM インスタンス上の他の `exclusive` な描画と1本ずつ順に実行します（最初の取得から画像まで）。重なって走る描画は取得を待つあいだもそれぞれのデコード済みリソースを保持するため、WASM メモリが本数に比例して増えます。`exclusive` なら最大の1枚分で済みます。既定は `false`。
 - 取得したバイト列はキャッシュしません。同じ URL を同時に要求した場合は取得を 1 回にまとめます。同じインスタンスで重なって走る描画は、互いにまだ描いていないタイルを WASM 内のキャッシュから追い出しません。再取得を避けるには、ブラウザの HTTP キャッシュに任せるか、`loadResource` 内でキャッシュしてください（Cloudflare Workers なら Cache API など）。
@@ -110,7 +110,7 @@ export default {
 
 ブラウザのWeb Workerとは別のランタイムです。画像配信ではBitmap化せず、エンコードしたバイト列をHTTPレスポンスにします。`toWebp()`（可逆）は `toPng()` より小さくなります。リソース取得はリクエスト内で行います。
 
-isolate のメモリ上限は 128MB で、JS ヒープと WASM メモリ（縮まない）の合計です。レンダラはリクエストごとに `ttlMs: 0` で生成し、`exclusive: true` を指定してください。WASM インスタンスは isolate 内のレンダラで共有され、同時に来たリクエストの描画は1本ずつ実行されます。OpenFreeMap Liberty で東京駅周辺の z14（512px、margin 64、データタイル 9 枚・グリフ範囲 152 本）の WASM メモリは約 75 MiB です（ローカルの workerd で同時 8 リクエストでも同じ）。
+isolate のメモリ上限は 128MB で、JS ヒープと WASM メモリ（縮まない）の合計です。レンダラはリクエストごとに `ttlMs: 0` で生成し、`exclusive: true` を指定してください。これらのレンダラは isolate 内で WASM インスタンスを共有し、同時に来たリクエストの描画は1本ずつ実行されます。OpenFreeMap Liberty で東京駅周辺の z14（512px、margin 64、データタイル 9 枚・グリフ範囲 152 本）の WASM メモリは約 75 MiB です（ローカルの workerd で同時 8 リクエストでも同じ）。
 
 ## アーキテクチャ
 

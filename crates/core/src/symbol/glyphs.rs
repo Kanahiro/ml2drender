@@ -114,6 +114,9 @@ pub struct Glyphs {
     ranges: HashMap<(String, u32), Range>,
 }
 
+/// The code points of text by font stack.
+pub type Dependencies = std::collections::BTreeMap<String, BTreeSet<u32>>;
+
 /// A range file to fetch: its key and the code points to keep from it.
 pub type RangeNeed = ((String, u32), BTreeSet<u32>);
 
@@ -127,10 +130,10 @@ impl Glyphs {
         Some(self.url.as_ref()?.replace("{fontstack}", stack).replace("{range}", &format!("{begin}-{}", begin + 255)))
     }
 
-    /// URLs of the ranges with code points in `deps` (font stack, code point) not looked up yet.
-    pub fn needs(&self, deps: &BTreeSet<(String, u32)>) -> Vec<(String, RangeNeed)> {
+    /// URLs of the ranges with code points in `deps` not looked up yet.
+    pub fn needs(&self, deps: &Dependencies) -> Vec<(String, RangeNeed)> {
         let mut out: Vec<(String, RangeNeed)> = Vec::new();
-        for (stack, cp) in deps {
+        for (stack, cp) in deps.iter().flat_map(|(stack, cps)| cps.iter().map(move |cp| (stack, cp))) {
             let key = (stack.clone(), cp / 256);
             if self.ranges.get(&key).is_some_and(|r| r.failed || r.looked_up.contains(cp)) {
                 continue;

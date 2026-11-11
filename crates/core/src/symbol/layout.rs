@@ -12,7 +12,6 @@ use crate::render::{num, num2, BucketFeature, Ctx, TileFeatures, EXTENT};
 use crate::style::{Layer, PropValue};
 use crate::tile::RenderTile;
 use crate::hash::HashMap;
-use std::collections::BTreeSet;
 
 const SIZE_PACK_FACTOR: f64 = 128.0;
 const MAX_PACKED_SIZE: f64 = 255.0 * SIZE_PACK_FACTOR;
@@ -319,7 +318,7 @@ fn feature_icon(layer: &Layer, ctx: &Ctx, tile: &RenderTile, raw: &serde_json::V
 }
 
 /// Glyph ranges a tile's features need: `(font stack, range)`.
-pub fn glyph_dependencies(layer: &Layer, ctx: &Ctx, tf: &TileFeatures, raw: &serde_json::Value, out: &mut BTreeSet<(String, u32)>) {
+pub fn glyph_dependencies(layer: &Layer, ctx: &Ctx, tf: &TileFeatures, raw: &serde_json::Value, out: &mut crate::symbol::glyphs::Dependencies) {
     let res = Resolved::new(layer, ctx, &tf.tile);
     let keep_upright = ctx.layout(layer, "text-keep-upright", None, &tf.tile).truthy();
     let allow_vertical = res.placement == "point"
@@ -331,11 +330,15 @@ pub fn glyph_dependencies(layer: &Layer, ctx: &Ctx, tf: &TileFeatures, raw: &ser
         // Vertical labels may swap punctuation for its vertical form.
         let vertical_forms = ((res.text_along_line() && keep_upright) || allow_vertical) && unicode::allows_vertical_writing_mode(&unformatted);
         for s in text.sections.iter().filter(|s| s.image.is_none()) {
-            let stack = s.font_stack.clone().unwrap_or_else(|| ft.font_stack.clone());
+            let stack = s.font_stack.as_ref().unwrap_or(&ft.font_stack);
+            let cps = match out.get_mut(stack) {
+                Some(cps) => cps,
+                None => out.entry(stack.clone()).or_default(),
+            };
             for c in s.text.chars() {
-                out.insert((stack.clone(), c as u32));
+                cps.insert(c as u32);
                 if let Some(v) = unicode::verticalized(c).filter(|_| vertical_forms) {
-                    out.insert((stack.clone(), v as u32));
+                    cps.insert(v as u32);
                 }
             }
         }

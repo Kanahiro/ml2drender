@@ -182,9 +182,9 @@ pub struct Renderer {
     /// Glyph range URLs returned by `needs()`, with the code points to keep from each, so
     /// `provide()` need not re-evaluate text.
     glyph_urls: std::cell::RefCell<HashMap<String, symbol::glyphs::RangeNeed>>,
-    /// The (font stack, code point) pairs of the text. They depend on source data and camera,
-    /// not on downloaded glyphs.
-    glyph_dependencies: std::cell::RefCell<Option<BTreeSet<(String, u32)>>>,
+    /// The code points of the text by font stack. They depend on source data and camera, not
+    /// on downloaded glyphs.
+    glyph_dependencies: std::cell::RefCell<Option<symbol::glyphs::Dependencies>>,
     /// Tile URLs returned by `needs()` and not yet provided, with the (source, tile) they fill.
     /// `provide` matches against these, so a view change in between does not lose them.
     requested: std::cell::RefCell<HashMap<String, Vec<(String, TileId)>>>,
@@ -616,7 +616,7 @@ impl Renderer {
             return self.glyphs.needs(deps);
         }
         let ctx = self.ctx();
-        let mut deps = BTreeSet::new();
+        let mut deps = symbol::glyphs::Dependencies::new();
         let no_mask = render::raster::Mask::empty();
         for layer in &self.style.layers {
             if layer.ty != "symbol" || layer.is_hidden(self.transform.zoom, &self.style.global_state) {
