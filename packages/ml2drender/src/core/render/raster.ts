@@ -37,13 +37,19 @@ export class Target {
         // `f32::clamp` keeps NaN, which ends up as 0 like Rust's saturating `as u8`.
         const a = c[3];
         const inv = 1 - (a < 0 ? 0 : a > 1 ? 1 : a);
-        for (let k = 0; k < 4; k++) {
-            const ck = c[k];
-            const v = (ck < 0 ? 0 : ck > 1 ? 1 : ck) + (d[o + k] / 255) * inv;
-            // Non-negative (or NaN), where `Math.round` rounds halves away from zero like `f32::round`.
-            const r = Math.round(v * 255);
-            d[o + k] = r > 255 ? 255 : r; // NaN → 0 on store
-        }
+        // Non-negative (or NaN), where `Math.round` rounds halves away from zero like `f32::round`;
+        // NaN → 0 on store.
+        const c0 = c[0];
+        const r0 = Math.round(((c0 < 0 ? 0 : c0 > 1 ? 1 : c0) + (d[o] / 255) * inv) * 255);
+        d[o] = r0 > 255 ? 255 : r0;
+        const c1 = c[1];
+        const r1 = Math.round(((c1 < 0 ? 0 : c1 > 1 ? 1 : c1) + (d[o + 1] / 255) * inv) * 255);
+        d[o + 1] = r1 > 255 ? 255 : r1;
+        const c2 = c[2];
+        const r2 = Math.round(((c2 < 0 ? 0 : c2 > 1 ? 1 : c2) + (d[o + 2] / 255) * inv) * 255);
+        d[o + 2] = r2 > 255 ? 255 : r2;
+        const r3 = Math.round(((a < 0 ? 0 : a > 1 ? 1 : a) + (d[o + 3] / 255) * inv) * 255);
+        d[o + 3] = r3 > 255 ? 255 : r3;
     }
 
     /** Whether pixel `i` survives the opaque layers above the current one. */
@@ -89,8 +95,10 @@ export class Target {
     intoUnpremultiplied(): Uint8Array {
         const p = this.px;
         for (let o = 0; o < p.length; o += 4) {
-            const a = p[o + 3] / 255;
-            if (a === 0) continue;
+            const a8 = p[o + 3];
+            // Opaque pixels are unchanged (`v / 1`).
+            if (a8 === 0 || a8 === 255) continue;
+            const a = a8 / 255;
             for (let k = 0; k < 3; k++) p[o + k] = Math.trunc(p[o + k] / a) & 0xff;
         }
         return p;
