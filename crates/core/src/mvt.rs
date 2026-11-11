@@ -149,7 +149,15 @@ fn decode_geometry(cmds: &[u32]) -> Vec<Vec<[i32; 2]>> {
                     y += zz(dy);
                     if cmd == 1 {
                         lines.extend(line.take());
-                        line = Some(Vec::new());
+                        // Sized for the LineTo (and ClosePath) that usually follow: growing by
+                        // doubling would leave up to half of each ring unused.
+                        let mut n = 1;
+                        if let Some(&next) = cmds.get(i) && next & 7 == 2 {
+                            n += (next >> 3) as usize;
+                            let close = i + 1 + 2 * (next >> 3) as usize;
+                            n += cmds.get(close).is_some_and(|&c| c & 7 == 7) as usize;
+                        }
+                        line = Some(Vec::with_capacity(n));
                     }
                     line.get_or_insert_with(Vec::new).push([x, y]);
                 }
