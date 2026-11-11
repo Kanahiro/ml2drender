@@ -84,6 +84,8 @@ export interface InitOptions {
    * Decoded resources (tiles and their layer geometry, sprites, glyphs) are kept inside the
    * renderer and reused by later renders; the first render ttlMs or more after they started
    * being kept drops them. 0 disables reuse, Infinity never expires. Default: 5 minutes.
+   * With 0, a render also drops each layer bucket once drawn, which lowers its peak memory
+   * (e.g. on Cloudflare Workers, whose 128 MB includes WASM memory, which never shrinks).
    * Fetched bytes are not cached: rely on the HTTP cache, or cache in `loadResource`.
    */
   cache?: { ttlMs?: number };
@@ -101,6 +103,7 @@ interface WasmExports {
   renderer_set_view(handle: number, ...view: ViewArgs): void;
   renderer_set_projected_view(handle: number, projjsonPtr: number, projjsonLen: number, minX: number, minY: number, maxX: number, maxY: number, width: number, height: number, pixelRatio: number, margin: number): number;
   renderer_set_ticket(handle: number, ticket: number): void;
+  renderer_set_keep_buckets(handle: number, keep: number): void;
   renderer_needs(handle: number): number;
   renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
   renderer_render(handle: number, oldest: number): number;
@@ -483,6 +486,8 @@ export class MapRenderer {
     if (!this.core) {
       const handle = this.withBytes(this.style, (ptr, len) => this.wasm.renderer_new(ptr, len, ...args));
       if (!handle) throw new Error(decoder.decode(this.output()));
+      // A core that is not reused drops buckets as soon as they are drawn.
+      if (this.ttlMs === 0) this.wasm.renderer_set_keep_buckets(handle, 0);
       this.core = { handle, createdAt: now, active: 0, retired: false };
     }
     this.core.active++;

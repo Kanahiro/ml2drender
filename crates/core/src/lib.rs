@@ -196,6 +196,8 @@ pub struct Renderer {
     /// Set by `set_projected_view`: `view` is then the Mercator render of its rasters and DEMs,
     /// warped into it.
     projected: Option<(reproject::ProjectedView, Rc<reproject::Warp>)>,
+    /// Whether fill and line buckets are kept for later renders (see `set_keep_buckets`).
+    keep_buckets: bool,
 }
 
 fn tilejson_from(json: &J, overrides: &J) -> TileJson {
@@ -366,6 +368,7 @@ impl Renderer {
             max_zoom: 22.0,
             cross_source_collisions: true,
             projected: None,
+            keep_buckets: true,
         };
         r.set_max_zoom(22.0);
         Ok(r)
@@ -403,6 +406,13 @@ impl Renderer {
     /// calls (after `set_view`, which advances the clock itself), and draw with
     /// `render_retaining` the oldest ticket still in progress, so that no render drops tiles
     /// another one still has to draw (which it would fetch again).
+    /// With `false`, a render drops each fill and line bucket once the last layer using it is
+    /// drawn, instead of keeping it for later renders: a renderer that draws one view needs less
+    /// memory (WASM memory never shrinks, so its peak is what a host must fit).
+    pub fn set_keep_buckets(&mut self, keep: bool) {
+        self.keep_buckets = keep;
+    }
+
     pub fn set_ticket(&mut self, ticket: u64) {
         self.clock = ticket;
     }
@@ -791,6 +801,15 @@ impl Renderer {
         // Rasters and DEMs are drawn in Mercator into `target`, which is warped into
         // `out` before the next layer drawn directly, and at the end.
         let mut warped_pending = false;
+        // Without `keep_buckets`: the last layer drawing each (source, layout group)'s buckets.
+        let mut last_bucket_use: HashMap<(&str, &str), usize> = HashMap::default();
+        if !self.keep_buckets {
+            for (i, layer) in self.style.layers.iter().enumerate() {
+                if visible[i] && matches!(layer.ty.as_str(), "fill" | "line") && let Some(src) = layer.source.as_deref() {
+                    last_bucket_use.insert((src, layer.layout_group.as_str()), i);
+                }
+            }
+        }
         for (i, layer) in self.style.layers.iter().enumerate() {
             if !visible[i] {
                 continue;
@@ -867,6 +886,16 @@ impl Renderer {
                 }
                 _ => {}
             });
+            if let Some(&last) = last_bucket_use.get(&(layer.source.as_deref().unwrap_or(""), layer.layout_group.as_str()))
+                && last == i
+            {
+                let projected = format!("{}\0projected", layer.layout_group);
+                for buckets in src.buckets.borrow().values() {
+                    let mut buckets = buckets.borrow_mut();
+                    buckets.remove(&layer.layout_group);
+                    buckets.remove(&projected);
+                }
+            }
             if let (Some(off), Some(o)) = (offscreen, layer_opacity) {
                 for (i, p) in off.px.iter().enumerate() {
                     if (p[3] != 0 || p[0] != 0 || p[1] != 0 || p[2] != 0) && main.visible(i) {
@@ -1324,6 +1353,8 @@ mod tests {
         let style = serde_json::json!({"version": 8, "sprite": "/sprite", "sources": {"g": {"type": "geojson", "maxzoom": 3, "data": {"type": "FeatureCollection", "features": features}}}, "layers": [
             {"id": "f", "type": "fill", "source": "g", "paint": {"fill-color": ["match", ["get", "k"], 0, "#c33", 1, "#3c3", "#33c"], "fill-opacity": 0.7}},
             {"id": "l", "type": "line", "source": "g", "layout": {"line-join": "round", "line-cap": "round"}, "paint": {"line-width": 3}},
+            // Shares the fill buckets of "f" (same layout), drawn after another layer.
+            {"id": "f2", "type": "fill", "source": "g", "paint": {"fill-color": "#000", "fill-opacity": 0.2}},
             // Line labels depend on the world copy; icon sizes on the sprite's pixel ratio.
             {"id": "s", "type": "symbol", "source": "g", "layout": {"icon-image": "marker", "symbol-placement": "line", "symbol-spacing": 40}},
         ]})
@@ -1354,6 +1385,9 @@ mod tests {
             shared.set_view(view);
             let rgba = render(&mut shared);
             assert_eq!(rgba, render(&mut Renderer::new(&style, view).unwrap()), "view {i}");
+            let mut once = Renderer::new(&style, view).unwrap();
+            once.set_keep_buckets(false);
+            assert_eq!(rgba, render(&mut once), "view {i} without keeping buckets");
             drawn += rgba.chunks_exact(4).any(|p| p[3] > 0) as usize;
         }
         assert!(drawn > views.len() / 2);

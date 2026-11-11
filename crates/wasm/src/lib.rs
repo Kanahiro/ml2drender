@@ -122,6 +122,15 @@ pub unsafe extern "C" fn renderer_set_projected_view(
     }
 }
 
+/// See `Renderer::set_keep_buckets`.
+///
+/// # Safety
+/// `r` must be a live handle from `renderer_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn renderer_set_keep_buckets(r: *mut Renderer, keep: u32) {
+    unsafe { &mut *r }.set_keep_buckets(keep != 0);
+}
+
 /// Tiles needed or provided from now on are kept for render `ticket` (see
 /// `Renderer::set_ticket`); a JS number, an integer below 2^53.
 ///
