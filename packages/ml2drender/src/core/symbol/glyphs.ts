@@ -90,6 +90,8 @@ const rangeKey = (stack: string, range: number) => `${range}/${stack}`;
 export class Glyphs {
   url: string | undefined;
   private ranges = new Map<string, Range | undefined>();
+  /** `ranges` by stack and range index, filled by `get` (`null`: the range failed to load). */
+  private byStack = new Map<string, Map<number, Range | null>>();
 
   constructor(url: string | undefined) {
     this.url = url;
@@ -123,6 +125,17 @@ export class Glyphs {
   /** `c`: one code point. */
   get(stack: string, c: string): Glyph | undefined {
     const cp = c.codePointAt(0)!;
-    return this.ranges.get(rangeKey(stack, Math.floor(cp / 256)))?.get(cp);
+    let byRange = this.byStack.get(stack);
+    if (!byRange) this.byStack.set(stack, (byRange = new Map()));
+    const range = Math.floor(cp / 256);
+    // Cached once the range is loaded (or failed); ranges are only ever added.
+    let r = byRange.get(range);
+    if (r === undefined) {
+      const k = rangeKey(stack, range);
+      if (!this.ranges.has(k)) return undefined;
+      r = this.ranges.get(k) ?? null;
+      byRange.set(range, r);
+    }
+    return r?.get(cp);
   }
 }

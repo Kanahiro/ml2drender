@@ -353,6 +353,7 @@ function drawSymbol(
     const size = sizeData.shaderSize(t.zoom, sym.size);
     const fontScale = m.isText ? size / 24.0 : size;
     let paintCache: [number, Paint] | undefined = undefined;
+    const out: Rgba = [0, 0, 0, 0];
     for (let qi = 0; qi < sym.quads.length; qi++) {
         const q = sym.quads[qi];
         const at = positions[qi];
@@ -389,32 +390,37 @@ function drawSymbol(
         const gammaBase = 0.105 / dpr;
         const fs = fontScale;
         const sdf = q.isSdf;
+        // The fragment shader; its result is reused by the next fragment.
         const shade = (v: ArrayLike<number>): Rgba | undefined => {
-            const s = sample(q.tex, v[0], v[1], m.filter);
-            if (!sdf) return [s[0] * totalOpacity, s[1] * totalOpacity, s[2] * totalOpacity, s[3] * totalOpacity];
-            const dist = s[3];
-            const gamma = gammaBase / fs;
-            let text: Rgba = [0, 0, 0, 0];
-            let halo: Rgba = [0, 0, 0, 0];
-            if (m.plain) {
-                const alpha = raster.smoothstep(0.75 - gamma, 0.75 + gamma, dist);
-                const k = totalOpacity * alpha;
-                text = [pt.fill[0] * k, pt.fill[1] * k, pt.fill[2] * k, pt.fill[3] * k];
+            const tex = q.tex;
+            if (!sdf) {
+                const s = sample(tex, v[0], v[1], m.filter);
+                for (let j = 0; j < 4; j++) out[j] = s[j] * totalOpacity;
+                return out;
             }
+            const dist = tex.kind === 'Glyph' ? sampleGlyph(tex.glyph, v[0], v[1]) : sample(tex, v[0], v[1], m.filter)[3];
+            const gamma = gammaBase / fs;
+            // `text` and `halo` colors are `color * k`; a disabled one is transparent.
+            const kText = m.plain ? totalOpacity * raster.smoothstep(0.75 - gamma, 0.75 + gamma, dist) : 0;
+            let kHalo = 0;
             if (m.halo) {
                 const gammaHalo = ((pt.haloBlur * 1.19) / 8.0 + gammaBase) / fs;
                 const inner = 0.75 + gammaHalo;
                 const alphaHalo = raster.smoothstep(inner - gammaHalo, inner + gammaHalo, dist);
                 const edge = (6.0 - pt.haloWidth / fs) / 8.0;
-                const a = Math.min(raster.smoothstep(edge - gammaHalo, edge + gammaHalo, dist), 1.0 - alphaHalo);
-                const k = totalOpacity * a;
-                halo = [pt.halo[0] * k, pt.halo[1] * k, pt.halo[2] * k, pt.halo[3] * k];
+                kHalo = totalOpacity * Math.min(raster.smoothstep(edge - gammaHalo, edge + gammaHalo, dist), 1.0 - alphaHalo);
             }
             if (m.plain && m.halo) {
-                const r = 1.0 - text[3];
-                return [text[0] + r * halo[0], text[1] + r * halo[1], text[2] + r * halo[2], text[3] + r * halo[3]];
+                const r = 1.0 - pt.fill[3] * kText;
+                for (let j = 0; j < 4; j++) out[j] = pt.fill[j] * kText + r * (pt.halo[j] * kHalo);
+            } else if (m.halo) {
+                for (let j = 0; j < 4; j++) out[j] = pt.halo[j] * kHalo;
+            } else if (m.plain) {
+                for (let j = 0; j < 4; j++) out[j] = pt.fill[j] * kText;
+            } else {
+                out.fill(0);
             }
-            return m.halo ? halo : text;
+            return out;
         };
         // Index order (0, 2, 1), (1, 2, 3).
         raster.triangle(target, undefined, [pts[0], pts[2], pts[1]], [uv[0], uv[2], uv[1]], shade);

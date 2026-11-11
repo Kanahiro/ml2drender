@@ -650,6 +650,29 @@ function drawFeature(
     }
     const pimg = img;
     const tris = b.triangles;
+    // The fragment shader; its result is reused by the next fragment.
+    const out: Rgba = [0, 0, 0, 0];
+    const scaled = (col: ArrayLike<number>, k: number): Rgba => {
+        for (let j = 0; j < 4; j++) out[j] = col[j] * k;
+        return out;
+    };
+    // All three vertices of a triangle share the split row.
+    let split = 0;
+    const shade = (v: ArrayLike<number>): Rgba | undefined => {
+        const d = Math.sqrt(v[0] * v[0] + v[1] * v[1]) * outset;
+        let alpha = Math.min(Math.max(Math.min(d - (inset - blur2), outset - d) / blur2, 0), 1);
+        if (dash) {
+            const r = dash.n * (1 - v[1]);
+            const sdf = sampleDash(dash, v[2], r);
+            alpha *= raster.smoothstep(0.5 - sdfgamma / floorwidth, 0.5 + sdfgamma / floorwidth, sdf);
+        }
+        if (pimg) {
+            const x = v[2] - Math.floor(v[2]);
+            return scaled(pattern.sampleLine(pimg, x, 0.5 * v[1] + 0.5), alpha * opacity);
+        }
+        if (gradient) return scaled(sampleGradient(gradient, v[3], split), alpha * opacity);
+        return scaled(c, alpha);
+    };
     for (let k = 0; k + 2 < tris.length; k += 3) {
         const t: [number, number, number] = [tris[k], tris[k + 1], tris[k + 2]];
         if (rotations) {
@@ -658,29 +681,7 @@ function drawFeature(
             const hi = Math.max(kk[0], kk[1], kk[2]);
             if (hi > lo && broken[lo]) continue;
         }
-        // All three vertices of a triangle share the split row.
-        const split = b.vertices[t[0]].split;
-        const shade = (v: ArrayLike<number>): Rgba | undefined => {
-            const d = Math.sqrt(v[0] * v[0] + v[1] * v[1]) * outset;
-            let alpha = Math.min(Math.max(Math.min(d - (inset - blur2), outset - d) / blur2, 0), 1);
-            if (dash) {
-                const r = dash.n * (1 - v[1]);
-                const sdf = sampleDash(dash, v[2], r);
-                alpha *= raster.smoothstep(0.5 - sdfgamma / floorwidth, 0.5 + sdfgamma / floorwidth, sdf);
-            }
-            if (pimg) {
-                const x = v[2] - Math.floor(v[2]);
-                const col = pattern.sampleLine(pimg, x, 0.5 * v[1] + 0.5);
-                const k = alpha * opacity;
-                return [col[0] * k, col[1] * k, col[2] * k, col[3] * k];
-            }
-            if (gradient) {
-                const g = sampleGradient(gradient, v[3], split);
-                const k = alpha * opacity;
-                return [g[0] * k, g[1] * k, g[2] * k, g[3] * k];
-            }
-            return [c[0] * alpha, c[1] * alpha, c[2] * alpha, c[3] * alpha];
-        };
+        split = b.vertices[t[0]].split;
         const vary = t.map((i) => {
             const v = b.vertices[i];
             const x = along ? along[pointOf[i]] : v.linesofar * scaleX;

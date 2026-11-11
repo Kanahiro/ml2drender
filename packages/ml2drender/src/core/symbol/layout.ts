@@ -314,7 +314,15 @@ export function glyphDependencies(layer: Layer, ctx: Ctx, tf: TileFeatures, raw:
     const keepUpright = truthy(ctx.layout(layer, 'text-keep-upright', undefined, tf.tile));
     const modes = ctx.layout(layer, 'text-writing-mode', undefined, tf.tile);
     const allowVertical = res.placement === 'point' && Array.isArray(modes) && modes.some((m) => m === 'vertical');
-    const add = (stack: string, range: number) => out.set(`${stack}\0${range}`, [stack, range]);
+    // Most characters repeat: skip building the key for ranges already added for the stack.
+    const seen = new Map<string, Set<number>>();
+    const add = (stack: string, range: number) => {
+        let ranges = seen.get(stack);
+        if (!ranges) seen.set(stack, (ranges = new Set()));
+        if (ranges.has(range)) return;
+        ranges.add(range);
+        out.set(`${stack}\0${range}`, [stack, range]);
+    };
     for (const f of ctx.filteredFeatures(layer, tf, undefined, false)) {
         const ft = featureText(layer, ctx, tf.tile, raw, f);
         const text = ft.text;

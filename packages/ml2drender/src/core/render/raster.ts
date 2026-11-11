@@ -247,6 +247,12 @@ export function forEachPixel(w: number, h: number, p: ArrayLike<ArrayLike<number
     });
 }
 
+/** Calls `f(y, x0, x1)` for each run of pixels `x0..x1` whose centers the triangle covers: the
+ * pixels `forEachPixel` visits, without their weights. */
+export function forEachRun(w: number, h: number, p: ArrayLike<ArrayLike<number>>, f: (y: number, x0: number, x1: number) => void): void {
+    Setup.create(w, h, p)?.runs(f);
+}
+
 /** The edge function at the center of pixel `x` in the row whose center is `cy`. */
 function edgeValue(e: Edge, cy: number, x: number): number {
     return e.sign * (e.dx * (cy - e.ay) - e.dy * (x + 0.5 - e.ax));
@@ -428,12 +434,22 @@ export function triangle(
     const vary: number[] = new Array(n).fill(0);
     const p0x = p[0][0];
     const p0y = p[0][1];
+    // `mask.get` and `t.visible`, specialized: a rectangle mask clips the run, others test pixels.
+    const cov = mask?.coverage;
+    const rect = cov?.kind === 'Rectangle' ? cov : undefined;
+    const pixelMask = cov && !rect ? mask : undefined;
+    const {cull, occ, layer} = t;
     setup.runs((y, x0, x1) => {
+        if (rect) {
+            if (y < rect.y[0] || y >= rect.y[1]) return;
+            x0 = Math.max(x0, rect.x[0]);
+            x1 = Math.min(x1, rect.x[1]);
+        }
         const dy = y + 0.5 - p0y;
         for (let k = 0; k < n; k++) row[k] = v[0][k] + gy[k] * dy;
         const base = y * w;
         for (let x = x0; x < x1; x++) {
-            if ((mask && !mask.get(x, y)) || !t.visible(base + x)) continue;
+            if ((pixelMask && !pixelMask.get(x, y)) || (cull && !(occ[base + x] <= layer))) continue;
             const dx = x + 0.5 - p0x;
             for (let k = 0; k < n; k++) vary[k] = row[k] + gx[k] * dx;
             const c = shade(vary);

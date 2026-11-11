@@ -41,17 +41,18 @@ export function interpolationFactor(interp: Interpolation | undefined, input: nu
     return interp ? Interpolate.interpolationFactor(interp as any, input, lower, upper) : 0;
 }
 
-const specFeatures = new WeakMap<Feature, object>();
 // style-spec reads `type` (geometry type name), `id` only when present, and `geometry` as {x, y} points.
+// The converted feature is cached on the feature itself (a WeakMap lookup per evaluation was slower).
+const SPEC = Symbol('specFeature');
 function specFeature(f: Feature): object {
-    let s = specFeatures.get(f);
+    let s = (f as any)[SPEC];
     if (!s) {
         const o: any = {type: f.geomType ?? 'Unknown', properties: f.properties};
         if (f.id !== undefined && f.id !== null) o.id = f.id;
         if (f.geometry) o.geometry = f.geometry.map((r) => r.map(([x, y]) => ({x, y})));
-        specFeatures.set(f, (s = o));
+        (f as any)[SPEC] = s = o;
     }
-    return s!;
+    return s;
 }
 
 /** A compiled layout/paint property (`PropValue`): constant, expression or legacy function. */

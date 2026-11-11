@@ -572,6 +572,7 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
             const f = bucket.features[i];
             const opacity = num(ctx.paint(layer, 'fill-opacity', f, tf.tile));
             const fillColor = color(ctx.paint(layer, 'fill-color', f, tf.tile), opacity);
+            let coverFill: ((i: number) => void) | undefined;
             let paint: FillPaint;
             if (hasPattern) {
                 // Cross-faded "to" image: the integer zoom, or the tile zoom when data-driven.
@@ -612,10 +613,13 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                         }
                         if (constantOpaque) {
                             const w = target.w;
-                            raster.forEachPixel(target.w, target.h, p, (x: number, y: number) => {
-                                if (tf.mask.get(x, y)) {
-                                    if (covered.length > 0) covered[y * w + x] = 1;
-                                    target.cover(y * w + x, fillColor);
+                            const cover = (coverFill ??= target.coverer(fillColor));
+                            raster.forEachRun(target.w, target.h, p, (y, x0, x1) => {
+                                for (let x = x0; x < x1; x++) {
+                                    if (tf.mask.get(x, y)) {
+                                        if (covered.length > 0) covered[y * w + x] = 1;
+                                        cover(y * w + x);
+                                    }
                                 }
                             });
                             continue;
