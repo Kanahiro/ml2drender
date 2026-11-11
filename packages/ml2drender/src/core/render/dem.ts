@@ -299,9 +299,15 @@ export function drawHillshadeTile(target: Target, ctx: Ctx, tile: RenderTile, te
     const [sw, sh] = tex.size();
     const px = [0, 0, 0, 0];
     const deriv: [number, number] = [0, 0];
+    // The last `v[1]` and its scale factor: with no bearing, a row shares one.
+    let lastV = NaN;
+    let scaleFactor = NaN;
     drawQuad(target, ctx, tile, mask, (v) => {
         tex.sample((v[0] * (sw - 2) + 1) / sw, (v[1] * (sh - 2) + 1) / sh, params.filter, params.filter, 0, px);
-        const scaleFactor = Math.cos(toRadians((lat0 - lat1) * (1 - v[1]) + lat1));
+        if (!Object.is(v[1], lastV)) {
+            lastV = v[1];
+            scaleFactor = Math.cos(toRadians((lat0 - lat1) * (1 - v[1]) + lat1));
+        }
         deriv[0] = (px[0] - 128 / 255) * 8 / scaleFactor;
         deriv[1] = (px[1] - 128 / 255) * 8 / scaleFactor;
         return params.shade(deriv);
