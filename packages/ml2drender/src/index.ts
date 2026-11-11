@@ -39,16 +39,26 @@ export interface LngLatView {
 }
 
 /**
- * A box of a projected CRS. Vector layers (background, fill, line, circle, heatmap, symbol) are drawn in it
- * with projected vertices; raster, hillshade and color-relief are rendered in Web Mercator and warped.
+ * A CRS on MapLibre GL JS's tile grid for it: what `addProjection` registers, with the CRS as PROJJSON.
  */
-export interface ProjectedView {
+export interface Crs {
+  /** The name GL JS knows the CRS by (`addProjection`'s `name`, `projection.type` of `toStyle`'s style). */
+  name: string;
   /**
    * PROJJSON of a geographic or projected CRS. Supported methods: Transverse Mercator, Mercator, Pseudo Mercator,
    * Lambert Conic Conformal, Polar Stereographic, Lambert Azimuthal Equal Area, Equal Earth and PROJ's
    * Geostationary Satellite, without datum shifts.
    */
   projjson: object;
+  tileMatrixSet: TileMatrixSet;
+}
+
+/**
+ * A box of a projected CRS (see `MapRenderer.projected`). Vector layers (background, fill, line, circle, heatmap,
+ * symbol) are drawn in it with projected vertices; raster, hillshade and color-relief are rendered in Web Mercator
+ * and warped.
+ */
+export interface ProjectedView {
   /** In CRS units (degrees for longlat), always easting/longitude first whatever the CRS's axis order. */
   bbox: [minX: number, minY: number, maxX: number, maxY: number];
   width: number;
@@ -69,16 +79,41 @@ export interface TileMatrixSet {
   extentAtZoom0: number;
 }
 
-/** A tile of a projected CRS's grid to render a source of the style in (see `renderProjectedSource`). */
-export interface ProjectedTile {
-  /** PROJJSON, as in `ProjectedView`. */
-  projjson: object;
-  tileMatrixSet: TileMatrixSet;
+/** A source of the style in a tile of a CRS's grid (see `ProjectedRenderer.renderSource`). */
+export interface SourceTile {
+  /** A vector, GeoJSON, raster, raster-dem or image source of the style. */
+  source: string;
   z: number;
   x: number;
   y: number;
-  /** A vector, GeoJSON, raster, raster-dem or image source of the style. */
-  source: string;
+}
+
+/** A `MapRenderer` drawing in a CRS (see `MapRenderer.projected`). */
+export interface ProjectedRenderer {
+  readonly crs: Crs;
+  /** Fetch required resources and return a new RGBA image of `view.bbox` (CRS units). */
+  render(view: ProjectedView): Promise<RenderedImage>;
+  /** `render` of tile `z/x/y` of the CRS's grid, `tileSize` CSS pixels (default 256) on a side. */
+  renderTile(tile: TileView): Promise<RenderedImage>;
+  /**
+   * Fetch the data of `tile.source` and return it in tile `z/x/y` of the CRS's grid, for MapLibre GL JS to draw the
+   * style in the CRS from (see `toStyle`), not a picture of the map:
+   * - vector / GeoJSON: a vector tile (MVT, extent 4096). Layers, features and properties are kept as they are (a
+   *   GeoJSON source's layer is named after the source).
+   * - raster / image: a 512 px PNG of the source as a raster layer with default paint draws it.
+   * - raster-dem: a 512 px PNG of its elevations in the `terrarium` encoding.
+   *
+   * Source data is fetched at the zoom of the tile drawn at 512 CSS pixels.
+   */
+  renderSource(tile: SourceTile): Promise<Uint8Array<ArrayBuffer>>;
+  /**
+   * The style for MapLibre GL JS to draw in the CRS (registered with `addProjection` as `crs.name`) from tiles of
+   * `renderSource`, whose URL templates (`{z}/{x}/{y}` of the CRS's grid) `tiles` gives for each source: vector and
+   * GeoJSON sources become vector sources (layers of a GeoJSON source read the layer named after it), raster and
+   * image sources raster sources, raster-dem sources terrarium ones, all of 512 px tiles. Layers of other sources
+   * (video) are left out. The style is the one given to `init`, fill-extrusion layers included.
+   */
+  toStyle(options: { tiles: (source: string) => string }): StyleSpecification;
 }
 
 export interface RenderedImage {
@@ -255,7 +290,7 @@ function discardInstance(module: WebAssembly.Module | undefined, instance: Promi
 const freeProjection = new FinalizationRegistry<{ w: WasmExports; handle: number }>(({ w, handle }) => w.projection_free(handle));
 
 /**
- * Load a PROJJSON CRS the way `renderProjected` reads `ProjectedView.projjson`, e.g. to compute
+ * Load a PROJJSON CRS the way `MapRenderer.projected` reads `Crs.projjson`, e.g. to compute
  * tile bounds or to register the CRS with MapLibre's `addProjection`, so both agree on the CRS.
  * Throws for a CRS the renderer does not support.
  */
@@ -397,29 +432,6 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
   return encoder.encode(JSON.stringify({ ...style, layers }));
 }
 
-/**
- * `style` for MapLibre GL JS to draw in the CRS registered as `projection` (`addProjection`) from tiles of
- * `renderProjectedSource`, whose URL templates (`{z}/{x}/{y}` of the CRS's tile matrix set) `tiles` gives for each
- * source: vector and GeoJSON sources become vector sources (layers of a GeoJSON source read the layer named after
- * it), raster and image sources raster sources, raster-dem sources terrarium ones, all of 512 px tiles. Layers of
- * other sources (video) are left out.
- */
-export function projectedStyle(style: StyleSpecification, { projection, tiles }: { projection: string; tiles: (source: string) => string }): StyleSpecification {
-  const sources: Record<string, SourceSpecification> = {};
-  for (const [id, source] of Object.entries(style.sources)) {
-    const common = { tiles: [tiles(id)], ...('attribution' in source && source.attribution ? { attribution: source.attribution } : {}) };
-    if (source.type === 'vector' || source.type === 'geojson') sources[id] = { type: 'vector', ...common };
-    else if (source.type === 'raster' || source.type === 'image') sources[id] = { type: 'raster', tileSize: 512, ...common };
-    else if (source.type === 'raster-dem') sources[id] = { type: 'raster-dem', tileSize: 512, encoding: 'terrarium', ...common };
-  }
-  const layers = style.layers.flatMap((layer): LayerSpecification[] => {
-    if (!('source' in layer) || typeof layer.source !== 'string') return [layer];
-    if (!sources[layer.source]) return [];
-    return [style.sources[layer.source].type === 'geojson' ? { ...layer, 'source-layer': layer.source } as LayerSpecification : layer];
-  });
-  return { ...style, projection: { type: projection }, sources, layers };
-}
-
 /** Per instance: the end of the last exclusive render queued (see `InitOptions.exclusive`). */
 const exclusiveRenders = new WeakMap<WasmExports, Promise<void>>();
 
@@ -440,6 +452,8 @@ export class MapRenderer {
     private readonly instance: Promise<WasmExports>,
     private readonly wasm: WasmExports,
     private readonly style: Uint8Array,
+    /** The style as given, for `toStyle`. */
+    private readonly original: StyleSpecification,
     private readonly loadResource: NonNullable<InitOptions['loadResource']>,
     private readonly ttlMs: number,
     private readonly exclusive: boolean,
@@ -452,7 +466,7 @@ export class MapRenderer {
     const loadResource = options.loadResource ?? fetchResource;
     const prepared = prepareStyle(style, options.transformFillExtrusion);
     const instance = ttlMs === 0 ? sharedWasm(options.wasm) : loadWasm(options.wasm);
-    return new MapRenderer(options.wasm, instance, await instance, prepared, loadResource, ttlMs, options.exclusive ?? false);
+    return new MapRenderer(options.wasm, instance, await instance, prepared, structuredClone(style), loadResource, ttlMs, options.exclusive ?? false);
   }
 
   /** Fetch required resources and return a new RGBA image of a Web Mercator camera. */
@@ -471,46 +485,64 @@ export class MapRenderer {
     return this.renderView(fitLngLat(view));
   }
 
-  /** Fetch required resources and return a new RGBA image of `view.bbox` in the CRS `view.projjson`. */
-  async renderProjected(view: ProjectedView): Promise<RenderedImage> {
-    return this.draw(view, ...this.projected(view));
-  }
-
-  /**
-   * Fetch the data of `tile.source` and return it reprojected as tile `z/x/y` of `tile.tileMatrixSet` in the CRS
-   * `tile.projjson`, for MapLibre GL JS to draw the style in that CRS (`addProjection`, see `projectedStyle`):
-   * - vector / GeoJSON: a vector tile (MVT, extent 4096). Layers, features and properties are kept as they are (a
-   *   GeoJSON source's layer is named after the source).
-   * - raster / image: a 512 px PNG of the source as a raster layer with default paint draws it.
-   * - raster-dem: a 512 px PNG of its elevations in the `terrarium` encoding.
-   *
-   * Source data is fetched at the zoom of the tile drawn at 512 CSS pixels.
-   */
-  async renderProjectedSource(tile: ProjectedTile): Promise<Uint8Array<ArrayBuffer>> {
-    if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
-    const { z, x, y, tileMatrixSet: { origin, extentAtZoom0 } } = tile;
-    const n = 2 ** z;
-    if (!Number.isInteger(z) || z < 0 || z > 30) throw new RangeError('z must be an integer in 0..=30');
-    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) throw new RangeError('x and y must be integers in 0..2^z');
+  /** This renderer drawing in `crs`, on its tile grid. Resources fetched for one CRS serve the others too. */
+  projected(crs: Crs): ProjectedRenderer {
+    if (typeof crs.name !== 'string' || !crs.name) throw new TypeError('crs.name must be a name');
+    if (!crs.projjson || typeof crs.projjson !== 'object') throw new TypeError('crs.projjson must be a PROJJSON object');
+    const { origin, extentAtZoom0 } = crs.tileMatrixSet;
     if (!origin.every(Number.isFinite) || !(extentAtZoom0 > 0 && Number.isFinite(extentAtZoom0))) {
-      throw new RangeError('tileMatrixSet must have a finite origin and a finite, positive extentAtZoom0');
+      throw new RangeError('crs.tileMatrixSet must have a finite origin and a finite, positive extentAtZoom0');
     }
-    const s = extentAtZoom0 / n;
-    const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
-    const view = { projjson: tile.projjson, bbox: [minX, maxY - s, minX + s, maxY] as ProjectedView['bbox'], width: 512, height: 512 };
-    return this.run(...this.projected(view), encoder.encode(tile.source), this.wasm.renderer_export_tile);
+    const projjson = encoder.encode(JSON.stringify(crs.projjson));
+    // The box of tile z/x/y of the grid.
+    const box = ({ z, x, y }: { z: number; x: number; y: number }): ProjectedView['bbox'] => {
+      const n = 2 ** z;
+      if (!Number.isInteger(z) || z < 0 || z > 30) throw new RangeError('z must be an integer in 0..=30');
+      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) throw new RangeError('x and y must be integers in 0..2^z');
+      const s = extentAtZoom0 / n;
+      const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
+      return [minX, maxY - s, minX + s, maxY];
+    };
+    const render = (view: ProjectedView) => this.draw(view, ...this.projectedArgs(projjson, view));
+    return {
+      crs,
+      render,
+      renderTile: ({ tileSize = 256, pixelRatio, margin, ...tile }) => {
+        if (!Number.isInteger(tileSize) || tileSize < 1) throw new RangeError('tileSize must be a positive integer');
+        return render({ bbox: box(tile), width: tileSize, height: tileSize, pixelRatio, margin });
+      },
+      renderSource: (tile) => {
+        if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
+        const view = { bbox: box(tile), width: 512, height: 512 };
+        return this.run(...this.projectedArgs(projjson, view), encoder.encode(tile.source), this.wasm.renderer_export_tile);
+      },
+      toStyle: ({ tiles }) => {
+        const style = this.original;
+        const sources: Record<string, SourceSpecification> = {};
+        for (const [id, source] of Object.entries(style.sources)) {
+          const common = { tiles: [tiles(id)], ...('attribution' in source && source.attribution ? { attribution: source.attribution } : {}) };
+          if (source.type === 'vector' || source.type === 'geojson') sources[id] = { type: 'vector', ...common };
+          else if (source.type === 'raster' || source.type === 'image') sources[id] = { type: 'raster', tileSize: 512, ...common };
+          else if (source.type === 'raster-dem') sources[id] = { type: 'raster-dem', tileSize: 512, encoding: 'terrarium', ...common };
+        }
+        const layers = style.layers.flatMap((layer): LayerSpecification[] => {
+          if (!('source' in layer) || typeof layer.source !== 'string') return [layer];
+          if (!sources[layer.source]) return [];
+          return [style.sources[layer.source].type === 'geojson' ? { ...layer, 'source-layer': layer.source } as LayerSpecification : layer];
+        });
+        return structuredClone({ ...style, projection: { type: crs.name }, sources, layers });
+      },
+    };
   }
 
-  /** The core arguments and `setView` of a projected view. */
-  private projected(view: ProjectedView): [ViewArgs, (handle: number) => void] {
-    if (!view.projjson || typeof view.projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
+  /** The core arguments and `setView` of a view of the CRS `projjson` (encoded). */
+  private projectedArgs(projjson: Uint8Array, view: ProjectedView): [ViewArgs, (handle: number) => void] {
     const margin = marginArg(view.margin);
     const size = sizeArgs(view);
     if (!view.bbox.every(Number.isFinite)) throw new RangeError('bbox must be finite');
-    const crs = encoder.encode(JSON.stringify(view.projjson));
     // The initial camera is replaced before the first `needs`.
     return [[0, 0, 0, 0, ...size, 0], (handle) => {
-      const ok = this.withBytes(crs, (ptr, len) =>
+      const ok = this.withBytes(projjson, (ptr, len) =>
         this.wasm.renderer_set_projected_view(handle, ptr, len, ...view.bbox, ...size, margin));
       if (!ok) throw new Error(decoder.decode(this.output()));
     }];

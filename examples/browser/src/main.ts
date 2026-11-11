@@ -4,16 +4,22 @@ import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import projectionHandlerUrl from './gl-projection-handler.ts?worker&url';
 import projjsonPresets from './projjson-presets.json';
 import { clipToCrs, type Crs, registerProjJson, zoomOffset } from './projections';
-import { projectedStyle } from 'ml2drender';
+import { type Crs as RendererCrs, MapRenderer } from 'ml2drender';
 import { stylePresets } from './styles';
 import { TileWorker } from './worker-client';
 
 const TILE_SIZE = 256;
-/** Vector tiles of a Mercator map: EPSG:3857 on GL JS's own tile grid. */
-const WEB_MERCATOR = {
-  definition: projjsonPresets.find((p) => p.projjson.conversion?.method?.name === 'Popular Visualisation Pseudo Mercator')!.projjson as object,
-  origin: [-20037508.342789244, 20037508.342789244] as [number, number],
-  extent: 40075016.68557849,
+/** Sources of a Mercator map for GL JS: EPSG:3857 on GL JS's own tile grid. */
+const WEB_MERCATOR: RendererCrs = {
+  name: 'mercator',
+  projjson: projjsonPresets.find((p) => p.projjson.conversion?.method?.name === 'Popular Visualisation Pseudo Mercator')!.projjson as object,
+  tileMatrixSet: { origin: [-20037508.342789244, 20037508.342789244], extentAtZoom0: 40075016.68557849 },
+};
+/** The applied projection as ml2drender takes it. */
+const rendererCrs = (): RendererCrs | undefined => projection && {
+  name: projection.name,
+  projjson: projection.definition,
+  tileMatrixSet: { origin: projection.origin, extentAtZoom0: projection.extent },
 };
 const modeSelect = document.getElementById('mode') as HTMLSelectElement;
 const MARGIN = 64;
@@ -44,7 +50,8 @@ let tileRevision = 0;
 let ready = false;
 /** The applied inputs: the renderer follows these. */
 let appliedStyle: string | undefined;
-let appliedStyleSpec: StyleSpecification | undefined;
+/** The applied style on the main thread, for the style GL JS draws from reprojected sources (`toStyle`). */
+let appliedRenderer: MapRenderer | undefined;
 let appliedProjJson: string | undefined;
 let appliedGeojson: string | undefined;
 const emptyCollection: GeoJSONSourceSpecification['data'] = { type: 'FeatureCollection', features: [] };
@@ -102,19 +109,8 @@ function recordTile(renderMs: number, started: number) {
 
 addProtocol('ml2drender', async (request, controller) => {
   const { z, x, y, checkActive } = tileRequest(request.url, controller.signal);
-  const n = 2 ** z;
-  const options = { pixelRatio: devicePixelRatio, margin: MARGIN };
-  let view: Parameters<TileWorker['render']>[0];
-  if (projection) {
-    // A tile of the CRS's grid.
-    const s = projection.extent / n;
-    const [minX, maxY] = [projection.origin[0] + x * s, projection.origin[1] - y * s];
-    view = { projjson: projection.definition, bbox: [minX, maxY - s, minX + s, maxY], width: TILE_SIZE, height: TILE_SIZE, ...options };
-  } else {
-    view = { z, x, y, tileSize: TILE_SIZE, ...options };
-  }
   const started = performance.now();
-  const { bitmap, renderMs } = await tileWorker.render(view);
+  const { bitmap, renderMs } = await tileWorker.render({ z, x, y, tileSize: TILE_SIZE, pixelRatio: devicePixelRatio, margin: MARGIN }, rendererCrs());
   try {
     checkActive();
     recordTile(renderMs, started);
@@ -125,17 +121,11 @@ addProtocol('ml2drender', async (request, controller) => {
   }
 });
 
-// GL JS mode: a source of the style reprojected onto the map's grid (see `projectedStyle`).
+// GL JS mode: a source of the style reprojected onto the map's grid (see `ProjectedRenderer.toStyle`).
 addProtocol('ml2drender-source', async (request, controller) => {
   const { url, z, x, y, checkActive } = tileRequest(request.url, controller.signal);
-  const crs = projection ?? WEB_MERCATOR;
   const started = performance.now();
-  const { data, renderMs } = await tileWorker.renderSource({
-    projjson: crs.definition,
-    tileMatrixSet: { origin: crs.origin, extentAtZoom0: crs.extent },
-    z, x, y,
-    source: url.searchParams.get('source')!,
-  });
+  const { data, renderMs } = await tileWorker.renderSource({ source: url.searchParams.get('source')!, z, x, y }, rendererCrs() ?? WEB_MERCATOR);
   checkActive();
   recordTile(renderMs, started);
   return { data };
@@ -198,8 +188,7 @@ function redraw() {
   const revision = `revision=${++tileRevision}${projection ? `&crs=${encodeURIComponent(projection.name)}` : ''}`;
   const crs = projection?.name ?? 'mercator';
   const tiles: StyleSpecification = modeSelect.value === 'gl'
-    ? projectedStyle(appliedStyleSpec!, {
-      projection: crs,
+    ? appliedRenderer!.projected(rendererCrs() ?? WEB_MERCATOR).toStyle({
       tiles: (source) => `ml2drender-source://${styleGeneration}/{z}/{x}/{y}?source=${encodeURIComponent(source)}&${revision}`,
     })
     : {
@@ -239,12 +228,12 @@ async function applyStyle(): Promise<boolean> {
   resetStats();
   status('Initializing style and WASM…');
   const started = performance.now();
-  await tileWorker.init(style);
+  const [renderer] = await Promise.all([MapRenderer.init(style, { cache: { ttlMs: 0 } }), tileWorker.init(style)]);
   if (generation !== styleGeneration) return false;
   initMs = performance.now() - started;
   updateStats();
   appliedStyle = text;
-  appliedStyleSpec = style;
+  appliedRenderer = renderer;
   ready = true;
   return true;
 }

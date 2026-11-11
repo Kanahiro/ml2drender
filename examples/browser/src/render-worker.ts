@@ -1,11 +1,12 @@
 /// <reference lib="webworker" />
-import { MapRenderer, type ProjectedTile, type ProjectedView, type TileView } from 'ml2drender';
+import { type Crs, MapRenderer, type SourceTile, type TileView } from 'ml2drender';
 import type { StyleSpecification } from 'maplibre-gl';
 
 export type WorkerRequest =
   | { kind: 'init'; generation: number; style: StyleSpecification }
-  | { kind: 'render'; generation: number; id: number; view: TileView | ProjectedView }
-  | { kind: 'source'; generation: number; id: number; tile: ProjectedTile };
+  /** A tile of the Web Mercator grid, or with `crs` of that CRS's grid. */
+  | { kind: 'render'; generation: number; id: number; tile: TileView; crs?: Crs }
+  | { kind: 'source'; generation: number; id: number; tile: SourceTile; crs: Crs };
 
 export type WorkerResponse =
   | { kind: 'ready'; generation: number }
@@ -44,7 +45,7 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
     }
   };
   if (request.kind === 'source') {
-    void active.renderProjectedSource(request.tile)
+    void active.projected(request.crs).renderSource(request.tile)
       .then((tile) => {
         if (request.generation !== generation) return;
         const data = tile.slice().buffer;
@@ -53,8 +54,7 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
       .catch(failed);
     return;
   }
-  const view = request.view;
-  void ('projjson' in view ? active.renderProjected(view) : active.renderZxy(view))
+  void (request.crs ? active.projected(request.crs).renderTile(request.tile) : active.renderZxy(request.tile))
     .then(async (image) => {
       // Includes resource loading and overlapping renders; this is elapsed time, not CPU time.
       const renderMs = performance.now() - started;

@@ -14,7 +14,7 @@ rustup target add wasm32-unknown-unknown
 pnpm demo
 ```
 
-`pnpm demo` は WASM をビルドして Vite のデモ画面を起動します。地図ペイン右上の切り替えで、本レンダラが生成した 256px ラスタータイルを MapLibre GL JS の raster ソースで表示するか、`renderProjectedSource` で再投影した各ソース（ベクトルタイル・ラスタ・DEM）から GL JS 自身にスタイルを描かせるか（`projectedStyle`）を選べます。GL JS で描くときは、地物にマウスを重ねるとレイヤ名・ソースレイヤ・ID・属性を表示します。左の Style JSON・PROJJSON・GeoJSON の入力欄が描画の設定で、入力が止まると（500ms のデバウンス）自動で反映します。各欄は見出しで開閉でき、閉じているときはプルダウンだけ、開くと直接入力できます。それぞれのプルダウンで入力欄をプリセット（スタイル: MapLibre デモタイル・経緯線付き・地理院タイル・OpenFreeMap Liberty、投影: 経緯度・Equal Earth・平面直角座標系・UTM・Lambert-93・LAEA Europe・極ステレオ・ひまわり Full Disk など）に書き換えて再描画します。PROJJSON が空欄なら Web Mercator を再投影なしで描きます。PROJJSON を指定すると、`loadProjection` の投影式と、PROJJSON の `bbox`（適用範囲、なければ全球）を投影した正方形のタイル格子で GL JS の `addProjection` に登録し、各タイルを `renderProjected`（PROJJSON が空欄なら `renderZxy`）で描きます。整合確認用に GeoJSON 欄の内容（既定は Natural Earth の都市）を GL JS 自身が重ね、ホバーで属性を表示します。GL JS は GeoJSON を Worker でタイル化するので、`importScriptInWorkers` で `loadProjectionFactory` を使う `setProjectionHandler` を Worker に読み込みます。表示位置は URL ハッシュ（`#zoom/lat/lng`）に残り、投影を切り替えても同じ場所・ほぼ同じ縮尺を保ちます。リソース取得と WASM 描画は複数の Web Worker（最大4、CPUコア数−1）で並列に実行し、Worker 内で `ImageBitmap` に変換して所有権を移譲し、メインスレッドでタイルに表示します。デモではレンダラを無期限に再利用し（`ttlMs: Infinity`）、取得はブラウザの HTTP キャッシュに任せます。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
+`pnpm demo` は WASM をビルドして Vite のデモ画面を起動します。地図ペイン右上の切り替えで、本レンダラが生成した 256px ラスタータイルを MapLibre GL JS の raster ソースで表示するか、`renderer.projected(crs).renderSource` で再投影した各ソース（ベクトルタイル・ラスタ・DEM）から GL JS 自身にスタイルを描かせるか（`toStyle`）を選べます。GL JS で描くときは、地物にマウスを重ねるとレイヤ名・ソースレイヤ・ID・属性を表示します。左の Style JSON・PROJJSON・GeoJSON の入力欄が描画の設定で、入力が止まると（500ms のデバウンス）自動で反映します。各欄は見出しで開閉でき、閉じているときはプルダウンだけ、開くと直接入力できます。それぞれのプルダウンで入力欄をプリセット（スタイル: MapLibre デモタイル・経緯線付き・地理院タイル・OpenFreeMap Liberty、投影: 経緯度・Equal Earth・平面直角座標系・UTM・Lambert-93・LAEA Europe・極ステレオ・ひまわり Full Disk など）に書き換えて再描画します。PROJJSON が空欄なら Web Mercator を再投影なしで描きます。PROJJSON を指定すると、`loadProjection` の投影式と、PROJJSON の `bbox`（適用範囲、なければ全球）を投影した正方形のタイル格子で GL JS の `addProjection` に登録し、各タイルを `renderer.projected(crs).renderTile`（PROJJSON が空欄なら `renderZxy`）で描きます。整合確認用に GeoJSON 欄の内容（既定は Natural Earth の都市）を GL JS 自身が重ね、ホバーで属性を表示します。GL JS は GeoJSON を Worker でタイル化するので、`importScriptInWorkers` で `loadProjectionFactory` を使う `setProjectionHandler` を Worker に読み込みます。表示位置は URL ハッシュ（`#zoom/lat/lng`）に残り、投影を切り替えても同じ場所・ほぼ同じ縮尺を保ちます。リソース取得と WASM 描画は複数の Web Worker（最大4、CPUコア数−1）で並列に実行し、Worker 内で `ImageBitmap` に変換して所有権を移譲し、メインスレッドでタイルに表示します。デモではレンダラを無期限に再利用し（`ttlMs: Infinity`）、取得はブラウザの HTTP キャッシュに任せます。テスト用の上流 fixture は `pnpm fixtures` で取得できます。
 
 デモの統計欄には、完了タイル数と直近200タイルの生成時間（平均・p95・最大）、平均Worker往復時間、初期化時間を表示します。生成時間には素材取得を含み、往復時間には画像変換・通信・待ち時間も含みます。画面への表示時間やWASM単体のCPU時間ではありません。Style JSON が変わるとスタイルとレンダラ、統計を初期化し、PROJJSON だけの変更では Worker 内のレンダラ（デコード済みタイル）を維持します。
 
@@ -55,35 +55,42 @@ canvas.getContext('2d')!.putImageData(
 - `options.exclusive`: `true` なら、同じ WASM インスタンス上の他の `exclusive` な描画と1本ずつ順に実行します（最初の取得から画像まで）。重なって走る描画は取得を待つあいだもそれぞれのデコード済みリソースを保持するため、WASM メモリが本数に比例して増えます。`exclusive` なら最大の1枚分で済みます。既定は `false`。
 - 取得したバイト列はキャッシュしません。同じ URL を同時に要求した場合は取得を 1 回にまとめます。同じインスタンスで重なって走る描画は、互いにまだ描いていないタイルを WASM 内のキャッシュから追い出しません。再取得を避けるには、ブラウザの HTTP キャッシュに任せるか、`loadResource` 内でキャッシュしてください（Cloudflare Workers なら Cache API など）。
 - `options.transformFillExtrusion`: Style JSON にある各 `fill-extrusion` レイヤを、対応する 2D レイヤ定義へ変換する関数です。省略時は `fill` に変換し、ID・metadata・source・source-layer・ズーム範囲・filter・visibility を維持します。色・不透明度・パターン・平行移動・移動の基準と、それらの式・transition を対応する fill プロパティへ引き継ぎます。高さ・底面の高さ・立体の陰影・角の丸みは反映しません。不透明度は fill のフィーチャ単位の合成に従うため、重なる地物の見え方は異なる場合があります。独自の関数を指定すると既定の変換を置き換えます。`init()` 時に適用されます。引数の `FillExtrusionLayer` は公式 [`@maplibre/maplibre-gl-style-spec`](https://github.com/maplibre/maplibre-style-spec) の `FillExtrusionLayerSpecification`、返り値の `StyleLayer` は公式 `LayerSpecification` から `fill-extrusion` を除いた型です。レイヤ種別ごとの必須項目・paint・layout を型チェックします。型定義は取得した JSON の実行時検証を行うものではありません。
-- 描画メソッドは 4 つあり、いずれも必要なタイル・画像・グリフを取得して `Promise<RenderedImage>` を返します。同じインスタンスで、異なる視点やメソッドを混在させて繰り返し描画できます。`renderView`・`renderZxy`・`renderLngLat` は Web Mercator で描き、`renderProjected` だけが投影座標系で描きます。
+- 描画メソッドは `renderView`・`renderZxy`・`renderLngLat`（Web Mercator）と、`renderer.projected(crs)` の `render`・`renderTile`（投影座標系）で、いずれも必要なタイル・画像・グリフを取得して、スタイルの全レイヤを描いた地図画像を `Promise<RenderedImage>` で返します。同じインスタンスで、異なる視点・メソッド・CRS を混在させて繰り返し描画でき、取得したリソースも共有します。
   - `renderer.renderView(view)`: Web Mercator のカメラ。`view.center: [lng, lat]`、`zoom`、`width`、`height` は必須で、`bearing`（時計回りの度数、既定 0）は省略できます。幅・高さは CSS ピクセル単位、ズームは MapLibre GL JS と同じ（ズーム 0 で世界全体が 512 CSS ピクセル）です。
   - `renderer.renderZxy(tile)`: Web Mercator の XYZ タイル。`tile.z`・`x`・`y`（整数）は必須で、`tileSize`（CSS ピクセル、既定 256）は省略できます。出力は `tileSize` 四方です。
   - `renderer.renderLngLat(view)`: 経緯度の範囲。`view.bbox: [west, south, east, north]`（度）と `size`（長辺の CSS ピクセル数、正の整数）は必須です。出力は範囲の（Web Mercator 上の）縦横比で長辺が `size`、短辺はそれに合わせて四捨五入した大きさになり、範囲がちょうど収まるズーム（小数）を自動で選びます。`west > east` は反子午線をまたぐ範囲、緯度は ±85.0511° に丸めます。
-  - `renderer.renderProjected(view)`: 投影座標系の範囲。`view.projjson`（PROJJSON オブジェクト）、`bbox: [minX, minY, maxX, maxY]`（CRS の単位、経緯度なら度）、`width`、`height` は必須です。bbox は出力の幅・高さにそのまま割り当てるので、縦横比を揃えてください。回転には対応していません。非対応の CRS は例外になります（[投影座標系](#投影座標系)）。
-- `renderer.renderProjectedSource(tile)`: スタイルの 1 ソースを、投影座標系のタイル格子の 1 タイルに再投影して `Promise<Uint8Array>` で返します。MapLibre GL JS がそのソースのタイルとしてそのまま読める形式です。`tile.projjson`（PROJJSON オブジェクト）、`tileMatrixSet`、`z`・`x`・`y`（整数）、ソース ID `source` は必須です。`tileMatrixSet` は GL JS の `addProjection` と同じ `{ origin: [minX, maxY], extentAtZoom0 }` で、タイル 0/0/0 は左上が `origin`・一辺 `extentAtZoom0` の正方形、ズームごとに 4 分割し、x は東、y は南に増えます。元ソースのズームは、そのタイルを 512 CSS ピクセルで描く場合のものです。
-  - vector / GeoJSON: ベクトルタイル（MVT、extent 4096、外側 128 単位まで）。スタイルのレイヤやフィルタに関係なく、ソースのレイヤ・地物・属性をそのまま出力します（GeoJSON ソースはソース ID のレイヤ名、null の属性は省き、配列・オブジェクトは JSON 文字列）。元タイルの境界で切られたポリゴンは、属性が同じ断片どうしを結合してから投影するので、境界で割れません（つながった部分ごとに 1 地物で、ID は断片の ID がそろうときだけ残します。接する同じ属性のポリゴンは一つになります）。線は元タイルの境界で分かれます。投影の定義域（静止衛星の見えない側など）から外れる部分は除き、線は定義域の縁で終わり、ポリゴンは縁に沿って閉じます。
-  - raster / image: 512px の PNG。既定の paint の raster レイヤでそのソースを描いたものです（image ソースもタイルになります）。
-  - raster-dem: 512px の PNG。各画素の位置の標高（元 DEM から双線形補間）を `terrarium` で符号化したものです。
-- `projectedStyle(style, { projection, tiles })`: `style` を、`addProjection` で登録した CRS `projection` の上で GL JS が `renderProjectedSource` のタイルから描くスタイルに書き換えます。`tiles(sourceId)` は各ソースのタイル URL テンプレート（その CRS の格子の `{z}/{x}/{y}`）を返す関数です。vector / GeoJSON ソースは vector に（GeoJSON ソースのレイヤには `source-layer` を補います）、raster / image は raster に、raster-dem は `terrarium` の raster-dem に、いずれも 512px タイルで置き換えます。それ以外（video）のソースのレイヤは除きます。GL JS は投影格子上の自分のズームでスタイルを評価し、hillshade の傾斜もタイルのズームから求めるので、本レンダラの描画とはズーム依存の見え方が少し違います。
-- `pixelRatio`: `renderProjectedSource` 以外の全メソッド共通。出力の画素数は CSS ピクセル × `pixelRatio`（既定 1）です。
+- `renderer.projected(crs)`: このレンダラで CRS `crs` に描く `ProjectedRenderer` を返します（[投影座標系](#投影座標系)）。`crs` は MapLibre GL JS の `addProjection` に登録する CRS と同じく `name`（GL JS での名前）・`tileMatrixSet` を持ち、CRS 自体は `projjson`（PROJJSON オブジェクト）で指定します。`tileMatrixSet` は `{ origin: [minX, maxY], extentAtZoom0 }` で、タイル 0/0/0 は左上が `origin`・一辺 `extentAtZoom0` の正方形、ズームごとに 4 分割し、x は東、y は南に増えます。非対応の CRS は描画時に例外になります。
+  - `render(view)`: CRS の範囲の地図画像。`bbox: [minX, minY, maxX, maxY]`（CRS の単位、経緯度なら度）、`width`、`height` は必須です。bbox は出力の幅・高さにそのまま割り当てるので、縦横比を揃えてください。回転には対応していません。
+  - `renderTile(tile)`: CRS の格子のタイル `z`/`x`/`y` の地図画像。`tileSize`（CSS ピクセル、既定 256）は省略できます。
+  - `renderSource(tile)`: 地図画像ではなく、スタイルの 1 ソース `source` のデータを格子のタイル `z`/`x`/`y` に再投影して `Promise<Uint8Array>` で返します。GL JS がそのソースのタイルとして読み、スタイルを当てて描くための材料です（`toStyle`）。元ソースのズームは、そのタイルを 512 CSS ピクセルで描く場合のものです。
+    - vector / GeoJSON: ベクトルタイル（MVT、extent 4096、外側 128 単位まで）。スタイルのレイヤやフィルタに関係なく、ソースのレイヤ・地物・属性をそのまま出力します（GeoJSON ソースはソース ID のレイヤ名、null の属性は省き、配列・オブジェクトは JSON 文字列）。元タイルの境界で切られたポリゴンは、属性が同じ断片どうしを結合してから投影するので、境界で割れません（つながった部分ごとに 1 地物で、ID は断片の ID がそろうときだけ残します。接する同じ属性のポリゴンは一つになります）。線は元タイルの境界で分かれます。投影の定義域（静止衛星の見えない側など）から外れる部分は除き、線は定義域の縁で終わり、ポリゴンは縁に沿って閉じます。
+    - raster / image: 512px の PNG。既定の paint の raster レイヤでそのソースを描いたものです（image ソースもタイルになります）。
+    - raster-dem: 512px の PNG。各画素の位置の標高（元 DEM から双線形補間）を `terrarium` で符号化したものです。
+  - `toStyle({ tiles })`: `init` に渡したスタイルを、GL JS が CRS `crs.name` の上で `renderSource` のタイルから描くスタイルに書き換えて返します。`tiles(sourceId)` は各ソースのタイル URL テンプレート（その CRS の格子の `{z}/{x}/{y}`）を返す関数です。vector / GeoJSON ソースは vector に（GeoJSON ソースのレイヤには `source-layer` を補います）、raster / image は raster に、raster-dem は `terrarium` の raster-dem に、いずれも 512px タイルで置き換えます。それ以外（video）のソースのレイヤは除きます。fill-extrusion レイヤはそのまま残ります。GL JS は投影格子上の自分のズームでスタイルを評価し、hillshade の傾斜もタイルのズームから求めるので、本レンダラの描画とはズーム依存の見え方が少し違います。
+- `pixelRatio`: 地図画像を返す全メソッド共通。出力の画素数は CSS ピクセル × `pixelRatio`（既定 1）です。
 - `margin`: 四辺に追加する描画余白（CSS ピクセル単位の非負整数、既定 0）。余白までタイル取得・symbol の衝突判定・描画を行い、中央の指定サイズを返します。出力サイズ・中心・ズームは変わりません。タイル境界の外側にアンカーを持つ symbol の欠落を軽減できますが、タイルごとの衝突判定の一致を保証するものではありません。余白を増やすほど取得量・描画時間・メモリ使用量も増えます。デモでは `64` CSS ピクセルを指定しています。大きな symbol には、より広い余白が必要になる場合があります。
 - `RenderedImage`: `width`、`height`、行優先の 8 bit RGBA 画素列 `data: Uint8ClampedArray` を持ちます。取得や描画の失敗は例外になります。
 - `image.toPng()`: `data` を WASM 内で PNG 化した `Uint8Array<ArrayBuffer>` を返します（同期）。RGBA8の可逆圧縮で、速度重視の圧縮設定です。返すバイト列は独立したコピーなので、続けて描画しても書き換わりません。
 - `image.toWebp()`: 同様に可逆（VP8L）WebP を返します。地図画像では PNG より小さくなります（bright スタイル 512×512 で約 3 割減）。非可逆 WebP には対応していません。
-- `loadProjection(projjson, options?)`: PROJJSON オブジェクトを受け取り、`renderProjected` と同じ解釈・同じ Rust の投影式を `Promise<Projection>` で返します。`projection.forward([lng, lat])` は CRS 座標（投影できない点は NaN）、`projection.inverse([x, y])` は経緯度（範囲外は NaN）を返します。タイル範囲の計算や、MapLibre GL JS の `addProjection` への登録に使うと、描画と位置が一致します。`options` は `wasm` を受け付け、WASM インスタンスはモジュールごとに共有します。
+- `loadProjection(projjson, options?)`: PROJJSON オブジェクトを受け取り、`renderer.projected` と同じ解釈・同じ Rust の投影式を `Promise<Projection>` で返します。`projection.forward([lng, lat])` は CRS 座標（投影できない点は NaN）、`projection.inverse([x, y])` は経緯度（範囲外は NaN）を返します。タイル範囲の計算や、MapLibre GL JS の `addProjection` への登録に使うと、描画と位置が一致します。`options` は `wasm` を受け付け、WASM インスタンスはモジュールごとに共有します。
 - `loadProjectionFactory(options?)`: WASM を読み込んだうえで、同期版の `loadProjection`（`(projjson) => Projection`）を返します。GL JS の Worker で `setProjectionHandler` に渡すなど、await できない場面向けです。
 
 ## 投影座標系
 
-`renderProjected` で、PROJJSON で指定した CRS の範囲を描画できます。CRS の指定は PROJJSON だけで、PROJ 文字列や WKT は受け付けません。PROJJSON は PROJ の `projinfo -o PROJJSON -q EPSG:32654` などで得られます。
+`renderer.projected(crs)` で、PROJJSON で指定した CRS に描画できます。CRS の指定は PROJJSON だけで、PROJ 文字列や WKT は受け付けません。PROJJSON は PROJ の `projinfo -o PROJJSON -q EPSG:32654` などで得られます。
 
 ```ts
-const image = await renderer.renderProjected({
+const utm = renderer.projected({
+  name: 'EPSG:32654', // GL JS の addProjection に登録する名前
   projjson: utm54n, // EPSG:32654 の PROJJSON オブジェクト
-  bbox: [300_000, 3_900_000, 500_000, 4_100_000], // [minX, minY, maxX, maxY]
-  width: 512,
-  height: 512,
+  tileMatrixSet: { origin: [-2_000_000, 6_000_000], extentAtZoom0: 4_000_000 },
 });
+const image = await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000], width: 512, height: 512 });
+const tile = await utm.renderTile({ z: 3, x: 4, y: 2 });
+
+// GL JS 自身に描かせる: 各ソースを再投影したタイルを配信し、書き換えたスタイルを渡す
+const mvt = await utm.renderSource({ source: 'openmaptiles', z: 3, x: 4, y: 2 });
+const style = utm.toStyle({ tiles: (source) => `https://tiles.example.com/${source}/{z}/{x}/{y}` });
 ```
 
 - 対応する投影: 経緯度、横メルカトル（UTM を含む）、メルカトル（Web Mercator を含む）、ランベルト正角円錐、極ステレオ、ランベルト正積方位、Equal Earth、静止衛星視（geos）。PROJJSON は `GeographicCRS` と `ProjectedCRS` を受け付け、楕円体は `semi_major_axis` と `inverse_flattening`/`semi_minor_axis`、または `radius` から読みます。単位はメートル、本初子午線はグリニッジのみです。
