@@ -333,9 +333,9 @@ pub fn glyph_dependencies(layer: &Layer, ctx: &Ctx, tf: &TileFeatures, raw: &ser
         for s in text.sections.iter().filter(|s| s.image.is_none()) {
             let stack = s.font_stack.clone().unwrap_or_else(|| ft.font_stack.clone());
             for c in s.text.chars() {
-                out.insert((stack.clone(), c as u32 / 256));
+                out.insert((stack.clone(), c as u32));
                 if let Some(v) = unicode::verticalized(c).filter(|_| vertical_forms) {
-                    out.insert((stack.clone(), v as u32 / 256));
+                    out.insert((stack.clone(), v as u32));
                 }
             }
         }

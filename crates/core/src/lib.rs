@@ -179,9 +179,11 @@ pub struct Renderer {
     /// The style's `sprite`, to pick the sheet again when the pixel ratio changes.
     sprite: J,
     glyphs: symbol::glyphs::Glyphs,
-    /// Glyph range URLs last returned by `needs()`, so `provide()` need not re-evaluate text.
-    glyph_urls: std::cell::RefCell<HashMap<String, (String, u32)>>,
-    /// Text dependencies depend on source data and camera, not on downloaded glyphs.
+    /// Glyph range URLs returned by `needs()`, with the code points to keep from each, so
+    /// `provide()` need not re-evaluate text.
+    glyph_urls: std::cell::RefCell<HashMap<String, symbol::glyphs::RangeNeed>>,
+    /// The (font stack, code point) pairs of the text. They depend on source data and camera,
+    /// not on downloaded glyphs.
     glyph_dependencies: std::cell::RefCell<Option<BTreeSet<(String, u32)>>>,
     /// Tile URLs returned by `needs()` and not yet provided, with the (source, tile) they fill.
     /// `provide` matches against these, so a view change in between does not lose them.
@@ -593,7 +595,10 @@ impl Renderer {
         }
         let glyphs = self.glyph_needs();
         out.extend(glyphs.iter().map(|(url, _)| url.clone()));
-        self.glyph_urls.borrow_mut().extend(glyphs);
+        let mut glyph_urls = self.glyph_urls.borrow_mut();
+        for (url, (key, cps)) in glyphs {
+            glyph_urls.entry(url).or_insert_with(|| (key, BTreeSet::new())).1.extend(cps);
+        }
         out.into_iter().map(|url| Resource { url }).collect()
     }
 
@@ -603,7 +608,7 @@ impl Renderer {
 
     /// Glyph ranges still to fetch for the text of the loaded tiles. Text is only known once
     /// its tiles are decoded, so this grows as tiles arrive.
-    fn glyph_needs(&self) -> Vec<(String, (String, u32))> {
+    fn glyph_needs(&self) -> Vec<(String, symbol::glyphs::RangeNeed)> {
         if self.glyphs.url.is_none() {
             return vec![];
         }
@@ -697,8 +702,8 @@ impl Renderer {
         let mut changed = self.sprites.images.len() != image_count;
         // Glyph ranges are recognized from the last `needs()` (evaluating text is costly).
         let glyph_key = self.glyph_urls.get_mut().remove(url);
-        if let Some(key) = glyph_key {
-            self.glyphs.provide(key, bytes);
+        if let Some((key, wanted)) = glyph_key {
+            self.glyphs.provide(key, &wanted, bytes);
         }
         let requested = self.requested.get_mut().remove(url).unwrap_or_default();
         for (id, src) in self.sources.iter_mut() {
@@ -1146,6 +1151,27 @@ mod tests {
         renderer.provide("/glyphs/Test Font/12288-12543", None);
         assert!(renderer.needs().is_empty());
         assert!(renderer.render().is_ok());
+    }
+
+    #[test]
+    fn glyph_ranges_are_requested_again_for_code_points_not_kept() {
+        // A range file with glyphs "A" and "B" (1x1 px).
+        let field = |n: u8, bytes: &[u8]| [&[n << 3 | 2, bytes.len() as u8][..], bytes].concat();
+        let glyph = |c: u8| field(3, &[&[1 << 3, c][..], &field(2, &[0; 49]), &[3 << 3, 1, 4 << 3, 1, 7 << 3, 2]].concat());
+        let range = field(1, &[glyph(b'A'), glyph(b'B')].concat());
+        let style = r#"{"version":8,"glyphs":"/glyphs/{fontstack}/{range}","sources":{"a":{"type":"geojson","data":{"type":"Point","coordinates":[0,0]}}},"layers":[{"id":"a","type":"symbol","source":"a","layout":{"text-field":["step",["zoom"],"A",1,"B"],"text-font":["Test Font"]}}]}"#;
+        let mut renderer = Renderer::new(style, View::tile(0, 0, 0, 512)).unwrap();
+        let urls = |r: &Renderer| r.needs().into_iter().map(|n| n.url).collect::<Vec<_>>();
+        assert_eq!(urls(&renderer), ["/glyphs/Test Font/0-255"]);
+        renderer.provide("/glyphs/Test Font/0-255", Some(&range));
+        assert!(renderer.needs().is_empty());
+        assert!(renderer.glyphs.get("Test Font", 'A').is_some());
+        assert!(renderer.glyphs.get("Test Font", 'B').is_none());
+        renderer.set_view(View::tile(2, 1, 1, 512));
+        assert_eq!(urls(&renderer), ["/glyphs/Test Font/0-255"]);
+        renderer.provide("/glyphs/Test Font/0-255", Some(&range));
+        assert!(renderer.needs().is_empty());
+        assert!(renderer.glyphs.get("Test Font", 'B').is_some());
     }
 
     #[test]
