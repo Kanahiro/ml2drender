@@ -8,7 +8,7 @@ import {asU8, roundAway, wrapI8} from '../util.ts';
 import * as raster from './raster.ts';
 import type {Rgba, Target} from './raster.ts';
 import * as pattern from './pattern.ts';
-import {type BucketFeature, Ctx, EXTENT, type TileFeatures, bent, color, drawnGeometry, num} from './mod.ts';
+import {type BucketFeature, Ctx, EXTENT, NO_GEOMETRY, type TileFeatures, bent, color, drawnGeometry, num, packed} from './mod.ts';
 
 const EXTRUDE_SCALE = 63;
 const COS_HALF_SHARP_CORNER = 0.7933533402912352; // cos(75° / 2)
@@ -22,19 +22,6 @@ const LINE_ATLAS_WIDTH = 256;
 const MAX_TEXTURE_SIZE = 16384;
 
 type P = [number, number];
-
-interface Vertex {
-    pos: P;
-    /** Extrude vector and offset normal, quantized like the byte attributes (`quantize`). */
-    extrude: P;
-    offset: P;
-    round: boolean;
-    up: boolean;
-    linesofar: number;
-    /** Gradient texture coordinates: progress within the clip, and its row (1-based). */
-    uvX: number;
-    split: number;
-}
 
 const sub = (a: P, b: P): P => [a[0] - b[0], a[1] - b[1]];
 const add = (a: P, b: P): P => [a[0] + b[0], a[1] + b[1]];
@@ -63,8 +50,31 @@ function quantize(v: number): number {
 /** Rust `x as i64 as f64` (truncating, saturating; NaN → 0). */
 const truncI64 = (x: number) => (x !== x ? 0 : Math.trunc(x));
 
+/** A built line feature (`Builder.compact`): the `Builder` fields it draws from. */
+interface LineGeometry {
+    x: ArrayLike<number>;
+    y: ArrayLike<number>;
+    ext: Int8Array;
+    flags: Uint8Array;
+    linesofar: Float64Array;
+    uvX: Float64Array;
+    split: Uint32Array;
+    lineStarts: number[];
+    triangles: Uint32Array;
+}
+
+/** Vertices are held field by field (dense tiles have millions): vertex `i` is at (`x[i]`, `y[i]`),
+ * with the extrude vector and offset normal `ext[4i .. 4i + 4]`, quantized like the byte attributes
+ * (`quantize`), `round` and `up` in `flags[i]` (bits 0, 1), `linesofar`, and the gradient texture
+ * coordinates: `uvX` (progress within the clip) and `split` (its row, 1-based). */
 class Builder {
-    vertices: Vertex[] = [];
+    x: number[] = [];
+    y: number[] = [];
+    ext: number[] = [];
+    flags: number[] = [];
+    linesofar: number[] = [];
+    uvX: number[] = [];
+    split: number[] = [];
     /** Index of each line's first vertex. */
     lineStarts: number[] = [];
     /** Triangles as vertex index triples, flattened. */
@@ -85,8 +95,14 @@ class Builder {
         const linesofar = truncI64(total * 0.5) * 2;
         const uvX = this.clip ? (this.scaledDistance - this.clip[0]) / (this.clip[1] - this.clip[0]) : 0;
         const split = this.clips.length;
-        this.vertices.push({pos: p, extrude: [quantize(ex), quantize(ey)], offset: [quantize(ox), quantize(oy)], round, up, linesofar, uvX, split});
-        const e = this.vertices.length - 1;
+        this.x.push(p[0]);
+        this.y.push(p[1]);
+        this.ext.push(quantize(ex), quantize(ey), quantize(ox), quantize(oy));
+        this.flags.push((round ? 1 : 0) | (up ? 2 : 0));
+        this.linesofar.push(linesofar);
+        this.uvX.push(uvX);
+        this.split.push(split);
+        const e = this.x.length - 1;
         if (this.e1 !== undefined && this.e2 !== undefined) this.triangles.push(this.e1, e, this.e2);
         if (up) this.e2 = e;
         else this.e1 = e;
@@ -110,6 +126,21 @@ class Builder {
         }
     }
 
+    /** The built vertices in exact-size typed arrays. */
+    compact(): LineGeometry {
+        return {
+            x: packed(this.x),
+            y: packed(this.y),
+            ext: Int8Array.from(this.ext),
+            flags: Uint8Array.from(this.flags),
+            linesofar: Float64Array.from(this.linesofar),
+            uvX: Float64Array.from(this.uvX),
+            split: Uint32Array.from(this.split),
+            lineStarts: this.lineStarts,
+            triangles: Uint32Array.from(this.triangles),
+        };
+    }
+
     updateScaledDistance(): void {
         this.scaledDistance = this.clip ? this.clip[0] + (this.clip[1] - this.clip[0]) * this.distance / this.totalDistance : this.distance;
     }
@@ -120,7 +151,7 @@ class Builder {
     }
 
     addLine(vertices: P[], isPolygon: boolean, join: string, cap: string, miterLimit: number, roundLimit: number, overscaling: number): void {
-        this.lineStarts.push(this.vertices.length);
+        this.lineStarts.push(this.x.length);
         this.distance = 0;
         this.scaledDistance = 0;
         this.totalDistance = 0;
@@ -432,7 +463,7 @@ function sampleGradient(g: Gradient, u: number, split: number): Rgba {
 interface LineBucket {
     features: BucketFeature[];
     /** Built lines, by index into `features`. */
-    lines: [number, Builder][];
+    lines: [number, LineGeometry][];
     /** `lineMetrics` clips of all lines; the gradient texture covers the whole tile bucket. */
     clips: [number, number][];
     maxLineLength: number;
@@ -443,7 +474,7 @@ function newLineBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): LineBucket {
     const overscaling = 2 ** (tf.tile.overscaledZ - tf.tile.canonical.z);
     let clips: [number, number][] = [];
     let maxLineLength = 0;
-    const lines: [number, Builder][] = [];
+    const lines: [number, LineGeometry][] = [];
     features.forEach((f, i) => {
         if (f.ty !== 2 && f.ty !== 3) return;
         const l = (name: string) => ctx.layout(layer, name, f, tf.tile);
@@ -468,9 +499,9 @@ function newLineBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): LineBucket {
         }
         clips = b.clips;
         maxLineLength = Math.max(maxLineLength, b.maxLineLength);
-        lines.push([i, b]);
+        lines.push([i, b.compact()]);
     });
-    for (const f of features) f.geometry = [];
+    for (const f of features) f.geometry = NO_GEOMETRY;
     return {features, lines, clips, maxLineLength};
 }
 
@@ -520,7 +551,7 @@ function drawFeature(
     ctx: Ctx,
     tf: TileFeatures,
     f: BucketFeature,
-    b: Builder,
+    b: LineGeometry,
     toWorld: (p: P) => P,
     tr: P,
     dpr: number,
@@ -580,13 +611,14 @@ function drawFeature(
     const starts: number[] = [];
     const pointOf: number[] = [];
     let ls = 0;
-    const screen: P[] = b.vertices.map((v, i): P => {
-        const normalY = v.up ? 1 : -1;
-        const w = toWorld(v.pos);
-        const ex = v.extrude[0] / EXTRUDE_SCALE;
-        const ey = v.extrude[1] / EXTRUDE_SCALE;
-        const nx = v.offset[0] / EXTRUDE_SCALE;
-        const ny = v.offset[1] / EXTRUDE_SCALE;
+    const screen: P[] = Array.from({length: b.x.length}, (_, i): P => {
+        const pos: P = [b.x[i], b.y[i]];
+        const normalY = b.flags[i] & 2 ? 1 : -1;
+        const w = toWorld(pos);
+        const ex = b.ext[4 * i] / EXTRUDE_SCALE;
+        const ey = b.ext[4 * i + 1] / EXTRUDE_SCALE;
+        const nx = b.ext[4 * i + 2] / EXTRUDE_SCALE;
+        const ny = b.ext[4 * i + 3] / EXTRUDE_SCALE;
         let ox = offset * nx * normalY + outset * ex;
         let oy = offset * ny * normalY + outset * ey;
         if (!rotations) return ctx.transform.worldToScreen([w[0] + ox + tr[0], w[1] + oy + tr[1]]);
@@ -599,10 +631,10 @@ function drawFeature(
             lineStart = true;
         }
         let fr: {pos: P; screen: P; rot: [number, number]};
-        if (frame && eq(frame.pos, v.pos) && !lineStart) {
+        if (frame && eq(frame.pos, pos) && !lineStart) {
             fr = frame;
         } else {
-            fr = {pos: v.pos, screen: ctx.transform.worldToScreen(w), rot: rotations.at(v.pos)};
+            fr = {pos, screen: ctx.transform.worldToScreen(w), rot: rotations.at(pos)};
             frame = fr;
             const last = points[points.length - 1];
             let d: number;
@@ -612,7 +644,7 @@ function drawFeature(
                 starts.push(points.length);
                 d = 0;
             }
-            points.push({pos: v.pos, screen: fr.screen, d});
+            points.push({pos, screen: fr.screen, d});
         }
         pointOf.push(points.length - 1);
         const [sin, cos] = fr.rot;
@@ -673,6 +705,7 @@ function drawFeature(
         if (gradient) return scaled(sampleGradient(gradient, v[3], split), alpha * opacity);
         return scaled(c, alpha);
     };
+    const plain = !dash && !pimg && !gradient;
     for (let k = 0; k + 2 < tris.length; k += 3) {
         const t: [number, number, number] = [tris[k], tris[k + 1], tris[k + 2]];
         if (rotations) {
@@ -681,13 +714,28 @@ function drawFeature(
             const hi = Math.max(kk[0], kk[1], kk[2]);
             if (hi > lo && broken[lo]) continue;
         }
-        split = b.vertices[t[0]].split;
+        split = b.split[t[0]];
         const vary = t.map((i) => {
-            const v = b.vertices[i];
-            const x = along ? along[pointOf[i]] : v.linesofar * scaleX;
-            return [v.round ? 1 : 0, v.up ? 1 : -1, x, v.uvX];
+            const x = along ? along[pointOf[i]] : b.linesofar[i] * scaleX;
+            return [b.flags[i] & 1, b.flags[i] & 2 ? 1 : -1, x, b.uvX[i]];
         });
-        raster.triangle(target, tf.mask, [screen[t[0]], screen[t[1]], screen[t[2]]], [vary[0], vary[1], vary[2]], shade);
+        const tri = [screen[t[0]], screen[t[1]], screen[t[2]]];
+        if (plain) {
+            // `shade` without dashes, patterns or gradients, inlined.
+            raster.triangleRuns(target, tf.mask, tri, vary, (i0, x0, x1, row, gx, p0x) => {
+                for (let x = x0; x < x1; x++) {
+                    const dx = x + 0.5 - p0x;
+                    const v0 = row[0] + gx[0] * dx;
+                    const v1 = row[1] + gx[1] * dx;
+                    const d = Math.sqrt(v0 * v0 + v1 * v1) * outset;
+                    const alpha = Math.min(Math.max(Math.min(d - (inset - blur2), outset - d) / blur2, 0), 1);
+                    for (let j = 0; j < 4; j++) out[j] = c[j] * alpha;
+                    target.blend(i0 + x, out);
+                }
+            });
+            continue;
+        }
+        raster.triangle(target, tf.mask, tri, vary, shade);
     }
 }
 

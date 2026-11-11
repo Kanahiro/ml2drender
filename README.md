@@ -49,7 +49,7 @@ canvas.getContext('2d')!.putImageData(
 
 - `MapRenderer.init(style, options?)`: 公式 `StyleSpecification` 型の Style オブジェクトを受け取ります。Style JSON の取得（`fetch` や `fs.readFile`）は呼び出し側で行ってください。呼び出し時点の内容をコピーして使用します。スタイル内のリソース URL は書かれたまま `loadResource` に渡します。Style Spec では `glyphs` と TileJSON の `url` は絶対 URL のため、絶対 URL を使ってください（ブラウザの既定 fetch では相対 URL はページ基準で解決されます）。
 - `options.loadResource`: タイル・TileJSON・sprite・glyph を取得する `(url: string) => Promise<Uint8Array<ArrayBuffer> | null>`。既定は HTTP fetch です。HTTP 404 は欠落リソース（`null`）として描画を続行します。それ以外の HTTP エラーや通信・本文読み取りの失敗は例外になります。空タイルを表す HTTP 204 は成功として扱います。ホスト側の同時数制限・再試行・タイムアウトを実装する場合に指定できます。
-- `options.cache.ttlMs`: レンダラを描画をまたいで再利用する期間（ミリ秒）。既定は 5 分。レンダラはデコード済みのタイルと線・塗りのジオメトリ（ソースごとに最近使った8タイル分）、GeoJSON・sprite・グリフなどを保持し、生成から `ttlMs` 経過後の描画で作り直します。`0` なら描画ごとに作り直し、`Infinity` なら作り直しません。密な低ズームのタイルではこの保持に数十 MiB を使うため、メモリが厳しい環境では `0` にしてください。
+- `options.cache.ttlMs`: レンダラを描画をまたいで再利用する期間（ミリ秒）。既定は 5 分。レンダラはデコード済みのタイルと線・塗りのジオメトリ（ソースごとに最近使った8タイル分）、GeoJSON・sprite・グリフなどを保持し、生成から `ttlMs` 経過後の描画で作り直します。`0` なら描画ごとに作り直し、描画中も線・塗りなどのジオメトリを使い終えたレイヤから捨てます。`Infinity` なら作り直しません。密な低ズームのタイルではこの保持に数十 MiB を使うため、メモリが厳しい環境では `0` にしてください。
 - 取得したバイト列はキャッシュしません。同じ URL を同時に要求した場合は取得を 1 回にまとめます。同じインスタンスで重なって走る描画は、互いにまだ描いていないタイルをレンダラのキャッシュから追い出しません。再取得を避けるには、ブラウザの HTTP キャッシュに任せるか、`loadResource` 内でキャッシュしてください（Cloudflare Workers なら Cache API など）。
 - `options.transformFillExtrusion`: Style JSON にある各 `fill-extrusion` レイヤを、対応する 2D レイヤ定義へ変換する関数です。省略時は `fill` に変換し、ID・metadata・source・source-layer・ズーム範囲・filter・visibility を維持します。色・不透明度・パターン・平行移動・移動の基準と、それらの式・transition を対応する fill プロパティへ引き継ぎます。高さ・底面の高さ・立体の陰影・角の丸みは反映しません。不透明度は fill のフィーチャ単位の合成に従うため、重なる地物の見え方は異なる場合があります。独自の関数を指定すると既定の変換を置き換えます。`init()` 時に適用されます。引数の `FillExtrusionLayer` は公式 [`@maplibre/maplibre-gl-style-spec`](https://github.com/maplibre/maplibre-style-spec) の `FillExtrusionLayerSpecification`、返り値の `StyleLayer` は公式 `LayerSpecification` から `fill-extrusion` を除いた型です。レイヤ種別ごとの必須項目・paint・layout を型チェックします。型定義は取得した JSON の実行時検証を行うものではありません。
 - 描画メソッドは 4 つあり、いずれも必要なタイル・画像・グリフを取得して `Promise<RenderedImage>` を返します。同じインスタンスで、異なる視点やメソッドを混在させて繰り返し描画できます。`renderView`・`renderZxy`・`renderLngLat` は Web Mercator で描き、`renderProjected` だけが投影座標系で描きます。
@@ -95,17 +95,16 @@ import { MapRenderer } from 'ml2drender';
 export default {
   async fetch() {
     const style = await (await fetch('https://demotiles.maplibre.org/style.json')).json();
-    const renderer = await MapRenderer.init(style);
+    const renderer = await MapRenderer.init(style, { cache: { ttlMs: 0 } });
     const image = await renderer.renderView({
       center: [0, 0], zoom: 0, width: 512, height: 512, margin: 64,
     });
-    const png = image.toPng();
-    return new Response(png, { headers: { 'Content-Type': 'image/png' } });
+    return new Response(image.toWebp(), { headers: { 'Content-Type': 'image/webp' } });
   },
 };
 ```
 
-描画は同期的に CPU を使います（Workers の CPU 時間制限に注意してください）。画像配信ではBitmap化せず、PNGバイト列をHTTPレスポンスにします。リソース取得はリクエスト内で行い、レンダラはリクエストごとに生成してください。
+描画は同期的に CPU を使います（Workers の CPU 時間制限に注意してください）。画像配信ではBitmap化せず、エンコードしたバイト列をHTTPレスポンスにします。`toWebp()`（可逆）は `toPng()` より速く小さくなります（512px のタイルで約 9ms・121KiB に対し約 32ms・141KiB）。リソース取得はリクエスト内で行い、isolate のメモリ上限（128MB）に収めるため、レンダラはリクエストごとに `ttlMs: 0` で生成してください。
 
 ## アーキテクチャ
 

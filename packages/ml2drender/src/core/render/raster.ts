@@ -91,6 +91,43 @@ export class Target {
         return Object.assign(one_, {run});
     }
 
+    /** `blend` of one color, where visible, for a pixel or (`run`) pixels `i0..i1`. With the color
+     * fixed, `blend` maps each destination byte through a per-channel table. */
+    blender(c: ArrayLike<number>): Coverer {
+        const key = `${c[0]},${c[1]},${c[2]},${c[3]}`;
+        let lut = this.luts.get(key);
+        if (!lut) {
+            lut = new Uint8Array(1024);
+            const one = new Target(1, 1);
+            for (let k = 0; k < 4; k++) {
+                for (let d = 0; d < 256; d++) {
+                    one.px[k] = d;
+                    one.blend(0, c);
+                    lut[k * 256 + d] = one.px[k];
+                }
+            }
+            // ponytail: one table per distinct color for the target's lifetime; bound it if styles
+            // with per-feature colors grow it too much.
+            this.luts.set(key, lut);
+        }
+        const t = lut;
+        const {px, occ, layer, cull} = this;
+        const run = (i0: number, i1: number) => {
+            for (let i = i0; i < i1; i++) {
+                if (cull && !(occ[i] <= layer)) continue;
+                const o = i * 4;
+                px[o] = t[px[o]];
+                px[o + 1] = t[256 + px[o + 1]];
+                px[o + 2] = t[512 + px[o + 2]];
+                px[o + 3] = t[768 + px[o + 3]];
+            }
+        };
+        const one_ = (i: number) => run(i, i + 1);
+        return Object.assign(one_, {run});
+    }
+
+    private luts = new Map<string, Uint8Array>();
+
     markOpaque(i: number): void {
         if (i < this.opaque.length) this.opaque[i] = 1;
     }
@@ -428,6 +465,28 @@ export function triangle(
     v: ArrayLike<ArrayLike<number>>,
     shade: (vary: number[]) => ArrayLike<number> | undefined,
 ): void {
+    const n = v[0].length;
+    const vary: number[] = new Array(n).fill(0);
+    triangleRuns(t, mask, p, v, (i0, x0, x1, row, gx, p0x) => {
+        for (let x = x0; x < x1; x++) {
+            const dx = x + 0.5 - p0x;
+            for (let k = 0; k < n; k++) vary[k] = row[k] + gx[k] * dx;
+            const c = shade(vary);
+            if (c) t.blend(i0 + x, c);
+        }
+    });
+}
+
+/** The fragments of `triangle` as runs, for callers that shade them themselves: `f(i0, x0, x1,
+ * row, gx, p0x)` for pixels `i0 + x0 .. i0 + x1` (all within the mask and not culled), whose
+ * varyings are `row[k] + gx[k] * (x + 0.5 - p0x)`. */
+export function triangleRuns(
+    t: Target,
+    mask: Mask | undefined,
+    p: ArrayLike<ArrayLike<number>>,
+    v: ArrayLike<ArrayLike<number>>,
+    f: (i0: number, x0: number, x1: number, row: number[], gx: number[], p0x: number) => void,
+): void {
     const w = t.w;
     const setup = Setup.create(w, t.h, p);
     if (!setup) return;
@@ -447,7 +506,6 @@ export function triangle(
         gy[k] = (d2 * e1x - d1 * e2x) / det;
     }
     const row: number[] = new Array(n).fill(0);
-    const vary: number[] = new Array(n).fill(0);
     const p0x = p[0][0];
     const p0y = p[0][1];
     // `mask.get` and `t.visible`, specialized: a rectangle mask clips the run, others test pixels.
@@ -460,17 +518,26 @@ export function triangle(
             if (y < rect.y[0] || y >= rect.y[1]) return;
             x0 = Math.max(x0, rect.x[0]);
             x1 = Math.min(x1, rect.x[1]);
+            if (x0 >= x1) return;
         }
         const dy = y + 0.5 - p0y;
         for (let k = 0; k < n; k++) row[k] = v[0][k] + gy[k] * dy;
         const base = y * w;
-        for (let x = x0; x < x1; x++) {
-            if ((pixelMask && !pixelMask.get(x, y)) || (cull && !(occ[base + x] <= layer))) continue;
-            const dx = x + 0.5 - p0x;
-            for (let k = 0; k < n; k++) vary[k] = row[k] + gx[k] * dx;
-            const c = shade(vary);
-            if (c) t.blend(base + x, c);
+        if (!pixelMask && !cull) {
+            f(base, x0, x1, row, gx, p0x);
+            return;
         }
+        let run = -1;
+        for (let x = x0; x < x1; x++) {
+            const pass = !((pixelMask && !pixelMask.get(x, y)) || (cull && !(occ[base + x] <= layer)));
+            if (pass) {
+                if (run < 0) run = x;
+            } else if (run >= 0) {
+                f(base, run, x, row, gx, p0x);
+                run = -1;
+            }
+        }
+        if (run >= 0) f(base, run, x1, row, gx, p0x);
     });
 }
 

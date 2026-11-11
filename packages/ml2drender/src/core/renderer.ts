@@ -275,17 +275,24 @@ export class Renderer {
     maxZoom = 22;
     /** MapLibre map option `crossSourceCollisions` (default true). */
     crossSourceCollisions = true;
+    /** Whether fill, line, circle and heatmap buckets stay cached after a render, for later views
+     * (`setView`). A host that renders once per renderer turns this off: each bucket is then dropped
+     * as soon as the last layer using it is drawn, so a render holds few at a time. */
+    keepBuckets = true;
     /** Set by `setProjectedView`: `view` is then the Mercator render of its rasters and DEMs,
      * warped into it. */
     projected: [ProjectedView, Warp] | undefined;
 
-    /** The style's own `center`/`zoom`/`bearing` are ignored; `view` decides the camera. */
-    constructor(styleJson: string, view: View) {
-        let json: any;
-        try {
-            json = JSON.parse(styleJson);
-        } catch (e) {
-            throw new RenderError('Style', e instanceof Error ? e.message : String(e));
+    /** The style's own `center`/`zoom`/`bearing` are ignored; `view` decides the camera. `style` is
+     * JSON text or a parsed style, which the renderer takes over (and modifies). */
+    constructor(style: string | object, view: View) {
+        let json: any = style;
+        if (typeof style === 'string') {
+            try {
+                json = JSON.parse(style);
+            } catch (e) {
+                throw new RenderError('Style', e instanceof Error ? e.message : String(e));
+            }
         }
         if (json === null || typeof json !== 'object' || Array.isArray(json)) json = {};
         this.sources = new Map();
@@ -563,7 +570,7 @@ export class Renderer {
     /** Calls `f` with the source's resolved tiles: their clip masks and `layer`'s features.
      * Each also gets its bucket cache. */
     private withTiles<R>(ctx: Ctx, src: Source, layer: StyleLayer, w: number, h: number, f: (tiles: TileFeatures[]) => R): R {
-        const empty: MvtLayer = {name: '', extent: 4096, features: []};
+        const empty: MvtLayer = {name: '', extent: 4096, features: [], xy: new Int32Array(0), ends: new Uint32Array(0)};
         const layersByTile = this.tileLayers(src);
         const masks = ctx.masks(layersByTile.map((r) => r[0]), w, h);
         const tiles = layersByTile.map(([rt, tl, buckets], i) => new TileFeatures(rt, masks[i], this.sourceLayer(src, layer, tl) ?? empty, buckets));
@@ -723,6 +730,9 @@ export class Renderer {
         // Rasters and DEMs are drawn in Mercator into `target`, which is warped into
         // `out` before the next layer drawn directly, and at the end.
         let warpedPending = false;
+        // The last layer drawing each layout group's buckets, when they are not kept.
+        const lastUse = new Map<string, number>();
+        if (!this.keepBuckets) layers.forEach((l, i) => visible[i] && ['fill', 'line', 'circle', 'heatmap'].includes(l.type) && lastUse.set(l.layoutGroup, i));
         for (const [i, layer] of layers.entries()) {
             if (!visible[i]) continue;
             const raw = layer.json;
@@ -788,6 +798,12 @@ export class Renderer {
                     }
                 }
             });
+            if (lastUse.get(layer.layoutGroup) === i) {
+                for (const {buckets} of src.buckets.values()) {
+                    buckets.delete(layer.layoutGroup);
+                    buckets.delete(`${layer.layoutGroup}\0projected`);
+                }
+            }
             if (offscreen && layerOpacity !== undefined) {
                 const px = offscreen.px;
                 for (let p = 0; p < lw * lh; p++) {
@@ -811,7 +827,7 @@ export class Renderer {
      * layer down. Layers with identical layout share their leader's buckets. */
     private placeSymbols(ctx: Ctx): [[StyleLayer, any, SymbolBucket[]][], Map<string, number>, InstancePlacement[][][]] {
         const t = ctx.transform;
-        const empty: MvtLayer = {name: '', extent: 4096, features: []};
+        const empty: MvtLayer = {name: '', extent: 4096, features: [], xy: new Int32Array(0), ends: new Uint32Array(0)};
         // Symbols are laid out and placed for all layers before drawing (placement runs from
         // the top layer down).
         const noMask = Mask.empty();

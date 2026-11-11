@@ -3,7 +3,7 @@
 import {Color} from '@maplibre/maplibre-gl-style-spec';
 import earcut from 'earcut';
 import {type CanonicalTileId, type Feature, type Layer, type Properties, type PropValue, type Value, layout as layoutProp, paint as paintProp} from '../style.ts';
-import {type GeomType, type Layer as MvtLayer, geomTypeName} from '../mvt.ts';
+import {type Feature as MvtFeature, type GeomType, type Layer as MvtLayer, geomTypeName} from '../mvt.ts';
 import {type RenderTile, TileId, type Transform, renderTileKey} from '../tile.ts';
 import type {StyleImage} from '../sprite.ts';
 import {roundAway} from '../util.ts';
@@ -45,28 +45,22 @@ function usize(x: number): number {
     return x !== x || x <= 0 ? 0 : Math.trunc(x);
 }
 
-/** Splits every triangle edge longer than `max` at its midpoint (appended to `points`) until none
+/** Splits every triangle edge longer than `max` at its midpoint (appended to `xy`) until none
  * is, for projections that curve them. An edge is split the same way in both of its triangles, so
  * the mesh stays free of T-junctions (and of cracks between triangles). */
-function subdivide(points: P[], triangles: number[], max: number): number[] {
+function subdivide(xy: number[], triangles: number[], max: number): number[] {
     const mids = new Map<number, number>();
     const out: number[] = [];
     const todo: [number, number, number][] = [];
     for (let i = 0; i + 2 < triangles.length; i += 3) todo.push([triangles[i], triangles[i + 1], triangles[i + 2]]);
-    const long = (a: number, b: number) => {
-        const p = points[a];
-        const q = points[b];
-        return (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 > max * max;
-    };
+    const long = (a: number, b: number) => (xy[2 * a] - xy[2 * b]) ** 2 + (xy[2 * a + 1] - xy[2 * b + 1]) ** 2 > max * max;
     const mid = (a: number, b: number) => {
         // ponytail: numeric key assumes < 2^26 points per polygon.
         const key = Math.min(a, b) * 67108864 + Math.max(a, b);
         let m = mids.get(key);
         if (m === undefined) {
-            const p = points[a];
-            const q = points[b];
-            points.push([(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]);
-            m = points.length - 1;
+            xy.push((xy[2 * a] + xy[2 * b]) / 2, (xy[2 * a + 1] + xy[2 * b + 1]) / 2);
+            m = xy.length / 2 - 1;
             mids.set(key, m);
         }
         return m;
@@ -116,6 +110,8 @@ export class Ctx {
     private demCache = new Map<string, (DemTile | undefined)[]>();
     /** `rotations` by tile. */
     private rotationCache = new Map<string, RotationGrid>();
+    /** The expression feature (without geometry) of each source feature, shared by the layers. */
+    private features = new Map<MvtFeature, Feature>();
 
     constructor(transform: Transform, globalState: Properties, images: Map<string, StyleImage>) {
         this.transform = transform;
@@ -227,13 +223,28 @@ export class Ctx {
         const sorted = sortProp !== undefined && !sortProp.isConstant();
         const out: BucketFeature[] = [];
         tf.layer.features.forEach((f, index) => {
-            const scaleGeometry = (): P[][] => f.geometry.map((l) => l.map((p): P => [roundAway(p[0] * scale), roundAway(p[1] * scale)]));
+            const scaleGeometry = (): P[][] => {
+                const {xy, ends} = tf.layer;
+                const out: P[][] = [];
+                let i = f.lineStart > 0 ? ends[f.lineStart - 1] : 0;
+                for (let k = f.lineStart; k < f.lineEnd; k++) {
+                    const line: P[] = [];
+                    for (; i < ends[k]; i++) line.push([roundAway(xy[2 * i] * scale), roundAway(xy[2 * i + 1] * scale)]);
+                    out.push(line);
+                }
+                return out;
+            };
             // Most filters only inspect properties. Avoid allocating and transforming
             // geometry for rejected features; geometry expressions still see EXTENT units.
             const geometry = layer.needsGeometry ? scaleGeometry() : undefined;
-            const feature: Feature = {id: f.id, geomType: geomTypeName(f.type), properties: f.properties, geometry};
+            // Without geometry, the layers of a tile share one feature (and its converted form).
+            let feature = geometry ? undefined : this.features.get(f);
+            if (!feature) {
+                feature = {id: f.id, geomType: geomTypeName(f.type), properties: f.properties, geometry};
+                if (!geometry) this.features.set(f, feature);
+            }
             if (layer.filter && !layer.filter(zoom, feature, canonical)) return;
-            const g = withGeometry ? (geometry ?? scaleGeometry()) : [];
+            const g = withGeometry ? (geometry ?? scaleGeometry()) : NO_GEOMETRY;
             const sortKey = sorted ? num(sortProp!.eval(zoom, feature, canonical)) : 0;
             out.push({feature, ty: f.type, geometry: g, sortKey, index});
         });
@@ -338,27 +349,42 @@ export class RotationGrid {
     }
 }
 
-/** A fill layer's polygons in one tile, triangulated. */
+/** A fill layer's polygons in one tile, triangulated. Packed (dense tiles have many small
+ * polygons): entry `e` is the polygon feature `features[feature[e]]`, with the polygons
+ * `first[e] .. first[e + 1]`. Polygon `p` has the points `pointStart[p] .. pointStart[p + 1]` of `xy`
+ * (x, y pairs in tile units; rings concatenated, exterior first), the ring lengths
+ * `ringStart[p] .. ringStart[p + 1]` of `ringLens`, and the `earcut` triangles
+ * `triStart[p] .. triStart[p + 1]` of `triangles` (indices from the polygon's first point). */
 interface FillBucket {
     features: BucketFeature[];
-    /** Per polygon feature (by index into `features`): its polygons. */
-    polygons: [number, FillPolygon[]][];
+    feature: Uint32Array;
+    first: Uint32Array;
+    xy: ArrayLike<number>;
+    pointStart: Uint32Array;
+    ringLens: Uint32Array;
+    ringStart: Uint32Array;
+    triangles: Uint32Array;
+    triStart: Uint32Array;
 }
 
-interface FillPolygon {
-    /** Ring vertices, concatenated (exterior first), in tile units. */
-    points: P[];
-    ringLens: number[];
-    /** `earcut` indices into `points`. */
-    triangles: number[];
+/** `xs` in an Int32Array if that keeps every value (-0 included), else a Float64Array. */
+export function packed(xs: number[]): Int32Array | Float64Array {
+    return xs.every((v) => (v | 0) === v && !Object.is(v, -0)) ? Int32Array.from(xs) : Float64Array.from(xs);
 }
 
 function newFillBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): FillBucket {
     const features = ctx.bucketFeatures(layer, tf, 'fill-sort-key');
-    const polygons: [number, FillPolygon[]][] = [];
+    const feature: number[] = [];
+    const first = [0];
+    const xy: number[] = [];
+    const pointStart = [0];
+    const ringLens: number[] = [];
+    const ringStart = [0];
+    const triangles: number[] = [];
+    const triStart = [0];
     features.forEach((f, i) => {
         if (f.ty !== 3) return;
-        const polys = classifyRings(drawnGeometry(ctx, f.geometry), 500).map((polygon): FillPolygon => {
+        for (const polygon of classifyRings(drawnGeometry(ctx, f.geometry), 500)) {
             const flat: number[] = [];
             const holes: number[] = [];
             polygon.forEach((ring, i) => {
@@ -367,18 +393,30 @@ function newFillBucket(layer: Layer, ctx: Ctx, tf: TileFeatures): FillBucket {
             });
             // npm `earcut` (v3, as MapLibre uses) where Rust used `earcutr` (a port of earcut 2.x):
             // triangulations can differ, their coverage of a valid polygon cannot.
-            let triangles = earcut(flat, holes, 2);
-            const points = polygon.flat();
+            let tris = earcut(flat, holes, 2);
             // Long interior edges curve in a projected output too (after the rings' points).
-            if (ctx.transform.isProjected()) triangles = subdivide(points, triangles, PROJECTED_SEGMENT);
-            return {points, ringLens: polygon.map((r) => r.length), triangles};
-        });
-        polygons.push([i, polys]);
+            if (ctx.transform.isProjected()) tris = subdivide(flat, tris, PROJECTED_SEGMENT);
+            for (const v of flat) xy.push(v);
+            pointStart.push(xy.length / 2);
+            for (const r of polygon) ringLens.push(r.length);
+            ringStart.push(ringLens.length);
+            for (const t of tris) triangles.push(t);
+            triStart.push(triangles.length);
+        }
+        feature.push(i);
+        first.push(pointStart.length - 1);
     });
     // Only the triangulated polygons are drawn.
-    for (const f of features) f.geometry = [];
-    return {features, polygons};
+    for (const f of features) f.geometry = NO_GEOMETRY;
+    const u32 = (xs: number[]) => Uint32Array.from(xs);
+    return {
+        features, feature: u32(feature), first: u32(first), xy: packed(xy), pointStart: u32(pointStart),
+        ringLens: u32(ringLens), ringStart: u32(ringStart), triangles: u32(triangles), triStart: u32(triStart),
+    };
 }
+
+/** `BucketFeature.geometry` once a bucket no longer needs it. Never modified. */
+export const NO_GEOMETRY = Object.freeze([]) as unknown as P[][];
 
 /** A feature ready for bucket building: geometry in EXTENT (8192) units. */
 export interface BucketFeature {
@@ -541,7 +579,9 @@ function shadeFill(paint: FillPaint, v: ArrayLike<number>, g: ArrayLike<ArrayLik
     return mul4(c, opacity);
 }
 
-type Outline = [P, P, [number, number], [number, number], FillPaint];
+/** A polygon whose outline is drawn after the fills: its index in the tile's bucket, the fill
+ * paint (for the pattern position) and the outline's paint. */
+type Outline = [number, FillPaint, FillPaint];
 
 /** Returns whether anything was drawn in `'Opaque'`. */
 export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeatures[], raw: any, pass: Pass): boolean {
@@ -565,7 +605,9 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
     const outlineHidden = constantOpaque && antialias && !hasOutlineColor;
     const covered = new Uint8Array(outlineHidden && pass === 'All' ? target.w * target.h : 0);
     const patternProp = paintProp(layer, 'fill-pattern');
-    const prepared: [TileFeatures, Outline[]][] = [];
+    // Per tile: the edges of a polygon's rings (screen positions and pattern positions), and the outlines to draw.
+    type Segments = (pg: number, paint: FillPaint, f: (a: P, b: P, va: [number, number], vb: [number, number]) => void) => void;
+    const prepared: [TileFeatures, Segments, Outline[]][] = [];
     const projected = ctx.transform.isProjected();
     for (const tf of tiles) {
         const bucket = tf.bucket(layer, ctx, () => newFillBucket(layer, ctx, tf));
@@ -577,11 +619,24 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
         };
         const tp = new pattern.TilePattern(ctx, tf.tile);
         const outlines: Outline[] = [];
-        for (const [i, polygons] of bucket.polygons) {
-            const f = bucket.features[i];
+        // Polygon `pg`'s points, their screen positions, and the varyings (only patterns read them).
+        const geometry = (pg: number, paint: FillPaint): [P[], P[], [number, number][]] => {
+            const points: P[] = [];
+            for (let k = bucket.pointStart[pg]; k < bucket.pointStart[pg + 1]; k++) points.push([bucket.xy[2 * k], bucket.xy[2 * k + 1]]);
+            const screen = points.map(toScreen);
+            const size: [number, number] = paint.kind === 'Pattern' ? pattern.displaySize(paint.img) : [1, 1];
+            const vary: [number, number][] =
+                paint.kind === 'Pattern'
+                    ? points.map((p, k) => tp.pos(size, p, screen[k]) as [number, number])
+                    : screen.map((): [number, number] => [0, 0]);
+            return [points, screen, vary];
+        };
+        for (let e = 0; e < bucket.feature.length; e++) {
+            const f = bucket.features[bucket.feature[e]];
             const opacity = num(ctx.paint(layer, 'fill-opacity', f, tf.tile));
             const fillColor = color(ctx.paint(layer, 'fill-color', f, tf.tile), opacity);
             let coverFill: raster.Coverer | undefined;
+            let blendFill: raster.Coverer | undefined;
             let paint: FillPaint;
             if (hasPattern) {
                 // Cross-faded "to" image: the integer zoom, or the tile zoom when data-driven.
@@ -595,19 +650,15 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
             } else {
                 paint = {kind: 'Color', c: fillColor};
             }
-            const size: [number, number] = paint.kind === 'Pattern' ? pattern.displaySize(paint.img) : [1, 1];
             const outlinePaint: FillPaint = hasOutlineColor
                 ? {kind: 'Color', c: color(ctx.paint(layer, 'fill-outline-color', f, tf.tile), opacity)}
                 : paint;
-            for (const polygon of polygons) {
-                const screen = polygon.points.map(toScreen);
-                // Only patterns read the varying (outlines too: theirs is a color or this pattern).
-                const vary: [number, number][] =
-                    paint.kind === 'Pattern'
-                        ? polygon.points.map((p, k) => tp.pos(size, p, screen[k]) as [number, number])
-                        : screen.map((): [number, number] => [0, 0]);
+            for (let pg = bucket.first[e]; pg < bucket.first[e + 1]; pg++) {
+                // Outlines are drawn from their color or this pattern.
+                if (antialias && opacity >= 0.01) outlines.push([pg, paint, outlinePaint]);
                 if (opacity >= 0.01 && pass !== 'Translucent') {
-                    const tris = polygon.triangles;
+                    const [points, screen, vary] = geometry(pg, paint);
+                    const tris = bucket.triangles.subarray(bucket.triStart[pg], bucket.triStart[pg + 1]);
                     for (let k = 0; k + 2 < tris.length; k += 3) {
                         const t0 = tris[k];
                         const t1 = tris[k + 1];
@@ -617,7 +668,7 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                         // singularity (e.g. near the antipode of an azimuthal projection, which spreads
                         // a triangle's corners around the rim): its chord triangle would cover the map.
                         if (projected) {
-                            const tri = [polygon.points[t0], polygon.points[t1], polygon.points[t2]];
+                            const tri = [points[t0], points[t1], points[t2]];
                             if ([0, 1, 2].some((j) => bent(toScreen, tri[j], tri[(j + 1) % 3], p[j], p[(j + 1) % 3]))) continue;
                         }
                         if (constantOpaque) {
@@ -639,27 +690,44 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
                             });
                             continue;
                         }
+                        if (paint.kind === 'Color') {
+                            // `triangle` with `shadeFill`, which returns the color whatever the varyings.
+                            const w = target.w;
+                            const fill = (blendFill ??= target.blender(paint.c));
+                            const mask = tf.mask;
+                            const rect = mask.coverage.kind === 'Rectangle' ? mask.coverage : undefined;
+                            raster.forEachRun(w, target.h, p, (y, x0, x1) => {
+                                if (rect) {
+                                    if (y >= rect.y[0] && y < rect.y[1]) fill.run(y * w + Math.max(x0, rect.x[0]), y * w + Math.min(x1, rect.x[1]));
+                                    return;
+                                }
+                                for (let x = x0; x < x1; x++) if (mask.get(x, y)) fill(y * w + x);
+                            });
+                            continue;
+                        }
                         const v: [number[], number[], number[]] = [vary[t0], vary[t1], vary[t2]];
                         const g = raster.varyingGradients(p, v);
                         const pt = paint;
                         raster.triangle(target, tf.mask, p, v, (vv: ArrayLike<number>) => shadeFill(pt, vv, g));
                     }
                 }
-                if (antialias && opacity >= 0.01) {
-                    let start = 0;
-                    for (const len of polygon.ringLens) {
-                        for (let i = 1; i < len; i++) {
-                            const a = start + i - 1;
-                            const b = start + i;
-                            if (projected && bent(toScreen, polygon.points[a], polygon.points[b], screen[a], screen[b])) continue;
-                            outlines.push([screen[a], screen[b], vary[a], vary[b], outlinePaint]);
-                        }
-                        start += len;
-                    }
-                }
             }
         }
-        prepared.push([tf, outlines]);
+        // Outline segments: each ring's edges.
+        const segments = (pg: number, paint: FillPaint, f: (a: P, b: P, va: [number, number], vb: [number, number]) => void) => {
+            const [points, screen, vary] = geometry(pg, paint);
+            let start = 0;
+            for (const len of bucket.ringLens.subarray(bucket.ringStart[pg], bucket.ringStart[pg + 1])) {
+                for (let i = 1; i < len; i++) {
+                    const a = start + i - 1;
+                    const b = start + i;
+                    if (projected && bent(toScreen, points[a], points[b], screen[a], screen[b])) continue;
+                    f(screen[a], screen[b], vary[a], vary[b]);
+                }
+                start += len;
+            }
+        };
+        prepared.push([tf, segments, outlines]);
     }
     // Outlines are drawn after all fills (MapLibre's separate outline pass). The occlusion buffer
     // is read here instead of by the target, so the target's culling is off while drawing them.
@@ -675,12 +743,14 @@ export function drawFill(target: Target, layer: Layer, ctx: Ctx, tiles: TileFeat
         return occ[i] < layerIndex || (!cull && occ[i] !== layerIndex);
     };
     const none = [[0, 0], [0, 0]];
-    for (const [tf, outlines] of prepared) {
-        for (const [a, b, va, vb, paint] of outlines) {
-            raster.line(target, (x: number, y: number) => tf.mask.get(x, y) && visible(y * w + x), a, b, (dist: number, t: number) => {
-                const alpha = 1 - raster.smoothstep(0, 1, dist);
-                const v = [va[0] + (vb[0] - va[0]) * t, va[1] + (vb[1] - va[1]) * t];
-                return mul4(shadeFill(paint, v, none), alpha);
+    for (const [tf, segments, outlines] of prepared) {
+        for (const [pg, fillPaint, paint] of outlines) {
+            segments(pg, fillPaint, (a, b, va, vb) => {
+                raster.line(target, (x: number, y: number) => tf.mask.get(x, y) && visible(y * w + x), a, b, (dist: number, t: number) => {
+                    const alpha = 1 - raster.smoothstep(0, 1, dist);
+                    const v = [va[0] + (vb[0] - va[0]) * t, va[1] + (vb[1] - va[1]) * t];
+                    return mul4(shadeFill(paint, v, none), alpha);
+                });
             });
         }
     }

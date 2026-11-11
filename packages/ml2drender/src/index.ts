@@ -242,7 +242,7 @@ function flattenFillExtrusion(layer: FillExtrusionLayer): FillLayerSpecification
   };
 }
 
-function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOptions['transformFillExtrusion']> = flattenFillExtrusion): string {
+function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOptions['transformFillExtrusion']> = flattenFillExtrusion): object {
   if (!style || typeof style !== 'object' || !Array.isArray(style.layers)) {
     throw new Error('Style must contain a layers array');
   }
@@ -254,7 +254,31 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
     }
     return replacement;
   });
-  return JSON.stringify({ ...style, layers });
+  return jsonClone({ ...style, layers }) as object;
+}
+
+/** `JSON.parse(JSON.stringify(v))` for the values a style holds, in one pass (a style can carry
+ * large inline GeoJSON). Throws on cycles, like `JSON.stringify`. */
+function jsonClone(v: unknown): unknown {
+  if (typeof v === 'number') return Number.isFinite(v) ? v + 0 : null; // -0 → 0
+  if (typeof v === 'bigint') throw new TypeError('BigInt is not JSON');
+  if (typeof v !== 'object' || v === null) return v;
+  const j = (v as { toJSON?: unknown }).toJSON;
+  if (typeof j === 'function') return jsonClone(j.call(v));
+  if (Array.isArray(v)) {
+    const out = new Array(v.length);
+    for (let i = 0; i < v.length; i++) {
+      const e = jsonClone(v[i]);
+      out[i] = e === undefined || typeof e === 'function' || typeof e === 'symbol' ? null : e;
+    }
+    return out;
+  }
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(v)) {
+    const e = jsonClone((v as Record<string, unknown>)[k]);
+    if (e !== undefined && typeof e !== 'function' && typeof e !== 'symbol') out[k] = e;
+  }
+  return out;
 }
 
 /** Render a MapLibre Style as a static 2D RGBA image. */
@@ -265,11 +289,12 @@ export class MapRenderer {
   /** Tickets of the renders in progress: the core keeps the tiles they need (`setTicket`). */
   private readonly tickets = new Set<number>();
   private lastTicket = 0;
-  private readonly style: string;
+  /** Snapshot of the style; each core renderer takes over a copy. */
+  private readonly style: object;
   private readonly loadResource: NonNullable<InitOptions['loadResource']>;
   private readonly ttlMs: number;
 
-  private constructor(style: string, loadResource: NonNullable<InitOptions['loadResource']>, ttlMs: number) {
+  private constructor(style: object, loadResource: NonNullable<InitOptions['loadResource']>, ttlMs: number) {
     this.style = style;
     this.loadResource = loadResource;
     this.ttlMs = ttlMs;
@@ -378,7 +403,10 @@ export class MapRenderer {
       this.core = undefined;
     }
     if (!this.core) {
-      this.core = { renderer: new Renderer(this.style, view), createdAt: now, active: 0, retired: false };
+      const renderer = new Renderer(jsonClone(this.style) as object, view);
+      // A renderer used for one render needs no buckets afterwards: dropping them as it goes bounds its memory.
+      renderer.keepBuckets = this.ttlMs > 0;
+      this.core = { renderer, createdAt: now, active: 0, retired: false };
     }
     this.core.active++;
     return this.core;

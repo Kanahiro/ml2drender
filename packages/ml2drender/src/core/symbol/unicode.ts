@@ -3,8 +3,13 @@
 
 const cpOf = (c: string): number => c.codePointAt(0)!;
 
+/** `ranges` are ascending and disjoint. */
 function inRanges(cp: number, ranges: readonly (readonly [number, number])[]): boolean {
-  return ranges.some(([a, b]) => cp >= a && cp <= b);
+  for (const [a, b] of ranges) {
+    if (cp < a) return false;
+    if (cp <= b) return true;
+  }
+  return false;
 }
 
 const WHITESPACE = /^[\p{White_Space}﻿]$/u;
