@@ -189,6 +189,42 @@ pub unsafe extern "C" fn renderer_render(r: *mut Renderer, oldest: f64) -> u32 {
     }
 }
 
+/// See `Renderer::set_export_source`; an empty name is `None`. Returns 1, or 0 with an error
+/// message in the output buffer.
+///
+/// # Safety
+/// `r` must be a live handle; `ptr`/`len` must describe readable memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn renderer_set_export_source(r: *mut Renderer, ptr: *const u8, len: usize) -> u32 {
+    let source = String::from_utf8_lossy(unsafe { bytes(ptr, len) });
+    match unsafe { &mut *r }.set_export_source(Some(&*source).filter(|s| !s.is_empty())) {
+        Ok(()) => 1,
+        Err(e) => {
+            set_out(e.to_string().into_bytes());
+            0
+        }
+    }
+}
+
+/// Returns 1 with a vector tile in the output buffer (see `Renderer::export_mvt`), or 0 with an
+/// error message.
+///
+/// # Safety
+/// `r` must be a live handle from `renderer_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn renderer_export_mvt(r: *mut Renderer, oldest: f64) -> u32 {
+    match unsafe { &mut *r }.export_mvt(oldest as u64) {
+        Ok(mvt) => {
+            set_out(mvt);
+            1
+        }
+        Err(e) => {
+            set_out(e.to_string().into_bytes());
+            0
+        }
+    }
+}
+
 /// Encodes RGBA8 pixels; returns 1 with PNG in the output buffer, or 0 with an error message.
 ///
 /// # Safety

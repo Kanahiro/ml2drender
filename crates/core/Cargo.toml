@@ -13,3 +13,4 @@ miniz_oxide = "0.8"
 png = "0.18"
 zune-jpeg = "0.4"
 image-webp = "0.2"
+i_overlay = { version = "9", default-features = false }

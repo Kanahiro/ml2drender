@@ -128,6 +128,8 @@ struct Source {
     /// The latest `Renderer::clock` each data tile (GeoJSON: canonical tile) was needed or
     /// provided at.
     last_used: std::cell::RefCell<HashMap<TileId, u64>>,
+    /// Whether tiles keep every source layer, not only the style's (once exported).
+    all_layers: bool,
 }
 
 /// Records that `id` is needed at `clock`: the latest clock wins, whatever the call order.
@@ -200,6 +202,8 @@ pub struct Renderer {
     projected: Option<(reproject::ProjectedView, Rc<reproject::Warp>)>,
     /// Whether fill and line buckets are kept for later renders (see `set_keep_buckets`).
     keep_buckets: bool,
+    /// Set by `set_export_source`: the source `needs` and `export_mvt` are about.
+    export: Option<String>,
 }
 
 fn tilejson_from(json: &J, overrides: &J) -> TileJson {
@@ -321,6 +325,27 @@ fn image_warp(c: &[[f64; 2]; 4]) -> [f64; 3] {
     [px, py, blend]
 }
 
+/// The union of polygon rings (MVT orientation: outer rings positive in y-down coordinates, holes
+/// negative): its polygons, each an outer ring and its holes, closed, in the same orientation.
+fn union(rings: Vec<Vec<[f64; 2]>>) -> Vec<Vec<Vec<[f64; 2]>>> {
+    use i_overlay::core::fill_rule::FillRule;
+    use i_overlay::float::simplify::SimplifyShape;
+    let open: Vec<Vec<[f64; 2]>> = rings
+        .into_iter()
+        .map(|mut r| {
+            if r.len() > 1 && r[0] == r[r.len() - 1] {
+                r.pop();
+            }
+            r
+        })
+        .collect();
+    let mut shapes = open.simplify_shape(FillRule::NonZero);
+    for r in shapes.iter_mut().flatten() {
+        r.push(r[0]);
+    }
+    shapes
+}
+
 impl Renderer {
     /// The style's own `center`/`zoom`/`bearing` are ignored; `view` decides the camera.
     pub fn new(style_json: &str, view: View) -> Result<Self, Error> {
@@ -350,7 +375,7 @@ impl Renderer {
                 }
                 _ => Data::Failed,
             };
-            sources.insert(id, Source { ty, json: src, data, tiles: HashMap::default(), vector_layers: Default::default(), buckets: Default::default(), last_used: Default::default() });
+            sources.insert(id, Source { ty, json: src, data, tiles: HashMap::default(), vector_layers: Default::default(), buckets: Default::default(), last_used: Default::default(), all_layers: false });
         }
         let sprites = sprite::Sprites::new(&json["sprite"], view.pixel_ratio);
         let glyphs = symbol::glyphs::Glyphs::new(json["glyphs"].as_str());
@@ -371,6 +396,7 @@ impl Renderer {
             cross_source_collisions: true,
             projected: None,
             keep_buckets: true,
+            export: None,
         };
         r.set_max_zoom(22.0);
         Ok(r)
@@ -435,6 +461,112 @@ impl Renderer {
         Ok(())
     }
 
+    /// With a source, `needs()` asks for the tiles (only) that `export_mvt` takes from it; with
+    /// `None`, for what `render` draws. The source's tiles keep all their layers from then on.
+    pub fn set_export_source(&mut self, source: Option<&str>) -> Result<(), Error> {
+        if let Some(id) = source {
+            let src = self.sources.get_mut(id).filter(|s| matches!(s.ty.as_str(), "vector" | "geojson"));
+            let src = src.ok_or_else(|| Error::Unsupported(format!("no vector or geojson source {id:?}")))?;
+            if !src.all_layers {
+                // Decoded with the style's layers only.
+                src.all_layers = true;
+                src.tiles.clear();
+                src.vector_layers.get_mut().clear();
+                *self.glyph_dependencies.get_mut() = None;
+            }
+        }
+        self.export = source.map(String::from);
+        Ok(())
+    }
+
+    /// The export source (`set_export_source`) in the projected view as a vector tile (MVT) of the
+    /// output box, extent 4096: its layers as they are (a GeoJSON source's named after it),
+    /// projected. Keeps the cached tiles of tickets `oldest` and later, like `render_retaining`.
+    pub fn export_mvt(&mut self, oldest: u64) -> Result<Vec<u8>, Error> {
+        const EXTENT: f64 = 4096.0;
+        const BUFFER: f64 = 128.0;
+        let Some(id) = self.export.clone() else { return Err(Error::Unsupported("no export source set".into())) };
+        let Some((_, warp)) = self.projected.clone() else { return Err(Error::Unsupported("MVT export needs a projected view".into())) };
+        if !self.needs().is_empty() {
+            return Err(Error::NotReady);
+        }
+        if warp.is_empty() {
+            return Ok(vec![]);
+        }
+        self.evict(oldest.min(self.clock));
+        let src = &self.sources[&id];
+        let mut layers: Vec<mvt::Layer> = Vec::new();
+        // The pieces of polygons the source tiles cut, by layer and properties (ids need not be the
+        // same in each tile), with the longest segment of their tiles and their id if they share it.
+        let mut cut: hash::IndexMap<(String, String), (mvt::Feature, Vec<Vec<[f64; 2]>>, f64, Option<J>)> = Default::default();
+        for (rt, tl, _) in self.tile_layers(src) {
+            let n = (1u64 << rt.canonical.z) as f64;
+            let (ox, oy) = (rt.wrap as f64 * n + rt.canonical.x as f64, rt.canonical.y as f64);
+            for l in tl.iter().flat_map(|ls| ls.iter()) {
+                let name = if src.ty == "geojson" { &id } else { &l.name };
+                let e = l.extent as f64;
+                let to_world = |g: &[Vec<[f64; 2]>]| -> Vec<Vec<[f64; 2]>> { g.iter().map(|r| r.iter().map(|p| [(ox + p[0] / e) / n, (oy + p[1] / e) / n]).collect()).collect() };
+                let index = match layers.iter().position(|o| &o.name == name) {
+                    Some(i) => i,
+                    None => {
+                        layers.push(mvt::Layer { name: name.clone(), extent: EXTENT as u32, features: vec![] });
+                        layers.len() - 1
+                    }
+                };
+                for f in &l.features {
+                    let geom: Vec<Vec<[f64; 2]>> = f.geometry.iter().map(|r| r.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()).collect();
+                    if f.ty == mvt::GeomType::Polygon {
+                        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+                        for p in geom.iter().flatten() {
+                            (lo, hi) = ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]);
+                        }
+                        // In the buffer only: the neighbor the polygon is in draws it.
+                        if hi[0] <= 0.0 || hi[1] <= 0.0 || lo[0] >= e || lo[1] >= e {
+                            continue;
+                        }
+                        // Cut by the tile's edge: merged below with its other pieces, so that the
+                        // cuts add no edges.
+                        if lo[0] < 0.0 || lo[1] < 0.0 || hi[0] > e || hi[1] > e {
+                            let props = f.properties.to_object().iter().map(|(k, v)| (k.to_string(), v.to_json())).collect::<serde_json::Map<_, _>>();
+                            let id = f.id.as_ref().map(|v| v.to_json());
+                            let entry = cut.entry((name.clone(), J::Object(props).to_string())).or_insert_with(|| (mvt::Feature { geometry: vec![], ..f.clone() }, vec![], 0.0, id.clone()));
+                            entry.1.extend(to_world(&geom));
+                            entry.2 = f64::max(entry.2, 1.0 / n / 32.0);
+                            if entry.3 != id {
+                                entry.3 = None;
+                            }
+                            continue;
+                        }
+                        // Whole, unclipped.
+                        let geometry = warp.project(f.ty, to_world(&geom), 1.0 / n / 32.0, EXTENT, BUFFER);
+                        if !geometry.is_empty() {
+                            layers[index].features.push(mvt::Feature { geometry, ..f.clone() });
+                        }
+                        continue;
+                    }
+                    // Clipped to the tile, so that neighbors do not overlap.
+                    let geom = mvt::clip_axis(&mvt::clip_axis(&geom, f.ty, 0.0, e, 0), f.ty, 0.0, e, 1);
+                    let geometry = warp.project(f.ty, to_world(&geom), 1.0 / n / 32.0, EXTENT, BUFFER);
+                    if !geometry.is_empty() {
+                        layers[index].features.push(mvt::Feature { geometry, ..f.clone() });
+                    }
+                }
+            }
+        }
+        for ((name, _), (feature, rings, segment, id)) in cut {
+            let layer = layers.iter_mut().find(|l| l.name == name).unwrap();
+            // A feature for each polygon of the union, so that separate features stay apart.
+            for shape in union(rings) {
+                let geometry = warp.project(mvt::GeomType::Polygon, shape, segment, EXTENT, BUFFER);
+                if !geometry.is_empty() {
+                    let id = id.as_ref().and_then(J::as_f64).map(expression::Value::Number);
+                    layer.features.push(mvt::Feature { geometry, id, ..feature.clone() });
+                }
+            }
+        }
+        Ok(mvt::encode(&layers))
+    }
+
     /// Drops the least recently needed tiles of each source beyond `MAX_CACHED_TILES`, with
     /// everything built from them. Tiles needed at `keep_since` or later stay.
     fn evict(&mut self, keep_since: u64) {
@@ -459,6 +591,9 @@ impl Renderer {
 
     /// Sources referenced by layers visible at the current zoom.
     fn used_sources(&self) -> BTreeSet<&str> {
+        if let Some(id) = &self.export {
+            return BTreeSet::from([id.as_str()]);
+        }
         self.style
             .layers
             .iter()
@@ -569,7 +704,10 @@ impl Renderer {
         if self.projected.as_ref().is_some_and(|(_, w)| w.is_empty()) {
             return vec![];
         }
-        let mut out: BTreeSet<String> = self.sprites.needs().into_iter().collect();
+        let mut out: BTreeSet<String> = match self.export {
+            Some(_) => BTreeSet::new(),
+            None => self.sprites.needs().into_iter().collect(),
+        };
         for id in self.used_sources() {
             let Some(src) = self.sources.get(id) else { continue };
             match &src.data {
@@ -593,7 +731,7 @@ impl Renderer {
                 _ => {}
             }
         }
-        let glyphs = self.glyph_needs();
+        let glyphs = if self.export.is_some() { vec![] } else { self.glyph_needs() };
         out.extend(glyphs.iter().map(|(url, _)| url.clone()));
         let mut glyph_urls = self.glyph_urls.borrow_mut();
         for (url, (key, cps)) in glyphs {
@@ -734,9 +872,10 @@ impl Renderer {
                             ("raster-dem", Some(b)) => image::Image::decode(b).and_then(|i| dem_from(&i, &src.json, tj.encoding.as_deref())).map(|d| TileData::Dem(Rc::new(d))),
                             _ if raster => None,
                             _ => {
+                                let all = src.all_layers;
                                 let used = |name: &[u8]| {
                                     let name = String::from_utf8_lossy(name);
-                                    self.style.layers.iter().any(|l| l.source.as_deref() == Some(id) && l.source_layer.as_deref() == Some(&*name))
+                                    all || self.style.layers.iter().any(|l| l.source.as_deref() == Some(id) && l.source_layer.as_deref() == Some(&*name))
                                 };
                                 Some(TileData::Vector(Rc::new(bytes.and_then(|b| mvt::decode(b, used)).unwrap_or_default())))
                             }
@@ -1474,6 +1613,126 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn exports_sources_as_projected_vector_tiles() {
+        use expression::Value;
+        // Longlat 0°–10° on 4096 units: (x°, y°) is at (409.6 x, 409.6 (10 - y)).
+        let view = reproject::ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
+        let near = |p: [i32; 2], lng: f64, lat: f64| (p[0] as f64 - 409.6 * lng).abs() < 2.0 && (p[1] as f64 - 409.6 * (10.0 - lat)).abs() < 2.0;
+        let style = r#"{"version":8,"sources":{
+            "g":{"type":"geojson","data":{"type":"FeatureCollection","features":[
+                {"type":"Feature","properties":{"k":"square"},"geometry":{"type":"Polygon","coordinates":[[[2,2],[8,2],[8,8],[2,8],[2,2]]]}}]}},
+            "v":{"type":"vector","tiles":["t/{z}/{x}/{y}"]}},
+            "layers":[{"id":"l","type":"line","source":"v","source-layer":"used"}]}"#;
+        let mut r = Renderer::new(style, View::tile(0, 0, 0, 512)).unwrap();
+        r.set_projected_view(&view).unwrap();
+        assert!(r.set_export_source(Some("nope")).is_err());
+
+        r.set_export_source(Some("g")).unwrap();
+        assert!(r.needs().is_empty());
+        let layers = mvt::decode(&r.export_mvt(0).unwrap(), |_| true).unwrap();
+        assert_eq!(layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["g"]);
+        let f = &layers[0].features[0];
+        assert!(matches!(f.properties.get("k"), Some(Value::String(s)) if &**s == "square"));
+        let ring = &f.geometry[0];
+        for (lng, lat) in [(2.0, 2.0), (8.0, 2.0), (8.0, 8.0), (2.0, 8.0)] {
+            assert!(ring.iter().any(|&p| near(p, lng, lat)), "corner ({lng}, {lat}) in {ring:?}");
+        }
+        assert!(ring.iter().all(|&p| (800..=3280).contains(&p[0]) && (800..=3280).contains(&p[1])));
+
+        // A vector source keeps the layers no style layer uses, and only its own tiles are needed.
+        r.set_export_source(Some("v")).unwrap();
+        let needs = r.needs();
+        assert!(!needs.is_empty() && needs.iter().all(|n| n.url.starts_with("t/")));
+        for n in needs {
+            let zxy: Vec<u32> = n.url[2..].split('/').map(|v| v.parse().unwrap()).collect();
+            let (z, x, y) = (2f64.powi(zxy[0] as i32), zxy[1] as f64, zxy[2] as f64);
+            let at = |lng: f64, lat: f64| [((tile::mercator_x(lng) * z - x) * 4096.0).round() as i32, ((tile::mercator_y(lat) * z - y) * 4096.0).round() as i32];
+            let feature = |ty, geometry| mvt::Feature { id: None, ty, properties: Default::default(), geometry };
+            let layer = |name: &str, f| mvt::Layer { name: name.into(), extent: 4096, features: vec![f] };
+            // A square across 0°, a tile boundary at every zoom: each tile has its part, with a buffer,
+            // and an id of its own (like OpenMapTiles' oceans).
+            let square = vec![vec![at(-3.0, 2.0), at(-3.0, 8.0), at(3.0, 8.0), at(3.0, 2.0), at(-3.0, 2.0)]];
+            let square: Vec<Vec<[f64; 2]>> = square.iter().map(|r| r.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()).collect();
+            let clip = |axis| mvt::clip_axis(&square, mvt::GeomType::Polygon, -128.0, 4224.0, axis);
+            let square: Vec<Vec<[i32; 2]>> = mvt::clip_axis(&clip(0), mvt::GeomType::Polygon, -128.0, 4224.0, 1)
+                .iter().map(|r| r.iter().map(|p| [p[0].round() as i32, p[1].round() as i32]).collect()).collect();
+            let tile = mvt::encode(&[
+                layer("used", feature(mvt::GeomType::LineString, vec![vec![at(1.0, 5.0), at(9.0, 5.0)]])),
+                layer("other", feature(mvt::GeomType::Point, vec![vec![at(5.0, 5.0)]])),
+                layer("polygon", mvt::Feature { id: Some(expression::Value::Number(zxy[1] as f64)), ..feature(mvt::GeomType::Polygon, square) }),
+            ]);
+            r.provide(&n.url, Some(&tile));
+        }
+        assert!(r.needs().is_empty());
+        let layers = mvt::decode(&r.export_mvt(0).unwrap(), |_| true).unwrap();
+        let get = |name: &str| layers.iter().find(|l| l.name == name).unwrap();
+        assert!(get("other").features.iter().flat_map(|f| f.geometry.iter().flatten()).all(|&p| near(p, 5.0, 5.0)));
+        // Cut at the source's tile seams; together the line still runs from 1° to 9°.
+        let line: Vec<[i32; 2]> = get("used").features.iter().flat_map(|f| f.geometry.iter().flatten().copied()).collect();
+        assert!(line.iter().all(|&p| (p[1] as f64 - 409.6 * 5.0).abs() < 3.0));
+        let xs = line.iter().map(|p| p[0]);
+        assert!(near([xs.clone().min().unwrap(), 2048], 1.0, 5.0) && near([xs.max().unwrap(), 2048], 9.0, 5.0));
+        // The square's parts are merged back: one ring, no edge along the tile boundary, and the
+        // orientation of an MVT outer ring (positive area in y-down coordinates).
+        let polygon = &get("polygon").features;
+        assert_eq!((polygon.len(), polygon[0].geometry.len()), (1, 1), "{polygon:?}");
+        assert!(polygon[0].id.is_none(), "the pieces' ids differ");
+        let ring = &polygon[0].geometry[0];
+        assert!(!ring.windows(2).any(|w| w[0][0] == 0 && w[1][0] == 0), "{ring:?}");
+        assert!(ring.iter().any(|&p| near(p, 3.0, 8.0)) && ring.iter().any(|&p| near(p, 3.0, 2.0)));
+        let area: i64 = ring.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum();
+        assert!(area > 0, "{ring:?}");
+
+        // Rendering again needs the style's resources, not the export's.
+        r.set_export_source(None).unwrap();
+        r.render().unwrap();
+    }
+
+    #[test]
+    fn exports_follow_the_edge_of_a_geostationary_view() {
+        let polygon = |w: f64, s: f64, e: f64, n: f64| format!(r#"{{"type":"geojson","data":{{"type":"Polygon","coordinates":[[[{w},{s}],[{e},{s}],[{e},{n}],[{w},{n}],[{w},{s}]]]}}}}"#);
+        let style = format!(
+            r#"{{"version":8,"sources":{{"band":{},"world":{},"line":{{"type":"geojson","data":{{"type":"LineString","coordinates":[[30,0],[100,0]]}}}}}},"layers":[]}}"#,
+            polygon(30.0, -10.0, 100.0, 10.0),
+            r#"{"type":"geojson","data":{"type":"Polygon","coordinates":[[[-180,-85],[180,-85],[180,85],[-180,85],[-180,-85]],[[130,-10],[130,10],[150,10],[150,-10],[130,-10]]]}}"#,
+        );
+        let r = 5_500_000.0;
+        let view = reproject::ProjectedView { projjson: test_crs::himawari(), bbox: [-r, -r, r, r], width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
+        let mut renderer = Renderer::new(&style, View::tile(0, 0, 0, 512)).unwrap();
+        renderer.set_projected_view(&view).unwrap();
+        let mut export = |source: &str| {
+            renderer.set_export_source(Some(source)).unwrap();
+            assert!(renderer.needs().is_empty());
+            let layers = mvt::decode(&renderer.export_mvt(0).unwrap(), |_| true).unwrap();
+            layers.into_iter().flat_map(|l| l.features).flat_map(|f| f.geometry).collect::<Vec<_>>()
+        };
+        let dist = |p: [i32; 2]| ((p[0] as f64 - 2048.0).powi(2) + (p[1] as f64 - 2048.0).powi(2)).sqrt();
+        let area = |ring: &[[i32; 2]]| ring.windows(2).map(|w| w[0][0] as f64 * w[1][1] as f64 - w[1][0] as f64 * w[0][1] as f64).sum::<f64>() / 2.0;
+        // The world, all of it off the map but around it, is the disk the satellite sees, with its
+        // hole after it (readers take the first ring's orientation for outer rings).
+        let world = export("world");
+        assert_eq!(world.len(), 2);
+        assert!(area(&world[0]) > 0.0 && area(&world[1]) < 0.0, "{world:?}");
+        let limb = world[0].iter().map(|&p| dist(p)).fold(0.0, f64::max);
+        assert!((1900.0..2048.0).contains(&limb), "{limb}");
+        assert!(world[0].iter().all(|&p| dist(p) > 0.99 * limb), "{:?}", world[0]);
+        let disk = std::f64::consts::PI * limb * limb;
+        assert!((area(&world[0]) / disk - 1.0).abs() < 0.01, "{} vs {disk}", area(&world[0]));
+        // A band across the west limb follows it between its edges, inside the disk.
+        let band = export("band");
+        assert_eq!(band.len(), 1, "{band:?}");
+        assert!(band[0].iter().all(|&p| dist(p) <= limb + 2.0));
+        assert!(band[0].iter().filter(|&&p| dist(p) > limb - 2.0).count() >= 3, "{:?}", band[0]);
+        // Around the equator on the west limb (vertices half a pixel off the edge apart).
+        assert!(band[0].iter().any(|&p| dist(p) > limb - 5.0 && p[0] < 2048 && (p[1] - 2048).abs() < 150), "{:?}", band[0]);
+        assert!(area(&band[0]) > 0.0);
+        // A line ends at the limb (its parts in each source tile).
+        let line = export("line");
+        let west = line.iter().flatten().map(|p| p[0]).min().unwrap() as f64;
+        assert!((west - (2048.0 - limb)).abs() < 3.0, "{west} vs {limb}");
     }
 
     #[test]

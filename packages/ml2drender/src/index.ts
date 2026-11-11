@@ -58,6 +58,31 @@ export interface ProjectedView {
   margin?: number;
 }
 
+/**
+ * MapLibre GL JS's `TileMatrixSet` (`addProjection`): tile 0/0/0 is the square of side `extentAtZoom0` whose
+ * top-left corner is `origin`, and each zoom splits every tile in four; x grows east, y south.
+ */
+export interface TileMatrixSet {
+  /** CRS coordinates of the top-left corner of tile 0/0/0: [min x, max y]. */
+  origin: [number, number];
+  /** Width (= height) of tile 0/0/0 in CRS units. */
+  extentAtZoom0: number;
+}
+
+/** A tile of a projected CRS's grid to export as a vector tile (see `renderProjectedMvt`). */
+export interface ProjectedTile {
+  /** PROJJSON, as in `ProjectedView`. */
+  projjson: object;
+  tileMatrixSet: TileMatrixSet;
+  z: number;
+  x: number;
+  y: number;
+  /** CSS pixels the tile is drawn at, which picks the source zoom. Default: 512, GL JS's for vector tiles. */
+  tileSize?: number;
+  /** A vector or GeoJSON source of the style. */
+  source: string;
+}
+
 export interface RenderedImage {
   width: number;
   height: number;
@@ -116,6 +141,8 @@ interface WasmExports {
   renderer_needs(handle: number): number;
   renderer_provide(handle: number, urlPtr: number, urlLen: number, dataPtr: number, dataLen: number, found: number): void;
   renderer_render(handle: number, oldest: number): number;
+  renderer_set_export_source(handle: number, ptr: number, len: number): number;
+  renderer_export_mvt(handle: number, oldest: number): number;
   encode_png(ptr: number, len: number, width: number, height: number): number;
   encode_webp(ptr: number, len: number, width: number, height: number): number;
   renderer_free(handle: number): void;
@@ -425,22 +452,71 @@ export class MapRenderer {
 
   /** Fetch required resources and return a new RGBA image of `view.bbox` in the CRS `view.projjson`. */
   async renderProjected(view: ProjectedView): Promise<RenderedImage> {
+    return this.draw(view, ...this.projected(view));
+  }
+
+  /**
+   * Fetch the tiles of `tile.source` and return them as tile `z/x/y` of `tile.tileMatrixSet` in the CRS
+   * `tile.projjson`: a vector tile (MVT, extent 4096), for MapLibre GL JS to draw in that CRS (`addProjection`).
+   * Layers, features and properties are kept as they are (a GeoJSON source's layer is named after the source);
+   * geometry is clipped to each source tile, then projected.
+   */
+  async renderProjectedMvt(tile: ProjectedTile): Promise<Uint8Array<ArrayBuffer>> {
+    if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
+    const { z, x, y, tileSize = 512, tileMatrixSet: { origin, extentAtZoom0 } } = tile;
+    const n = 2 ** z;
+    if (!Number.isInteger(z) || z < 0 || z > 30) throw new RangeError('z must be an integer in 0..=30');
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) throw new RangeError('x and y must be integers in 0..2^z');
+    if (!origin.every(Number.isFinite) || !(extentAtZoom0 > 0 && Number.isFinite(extentAtZoom0))) {
+      throw new RangeError('tileMatrixSet must have a finite origin and a finite, positive extentAtZoom0');
+    }
+    const s = extentAtZoom0 / n;
+    const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
+    const view = { projjson: tile.projjson, bbox: [minX, maxY - s, minX + s, maxY] as ProjectedView['bbox'], width: tileSize, height: tileSize };
+    return this.run(...this.projected(view), encoder.encode(tile.source), this.wasm.renderer_export_mvt);
+  }
+
+  /** The core arguments and `setView` of a projected view. */
+  private projected(view: ProjectedView): [ViewArgs, (handle: number) => void] {
     if (!view.projjson || typeof view.projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
     const margin = marginArg(view.margin);
     const size = sizeArgs(view);
     if (!view.bbox.every(Number.isFinite)) throw new RangeError('bbox must be finite');
     const crs = encoder.encode(JSON.stringify(view.projjson));
     // The initial camera is replaced before the first `needs`.
-    const args: ViewArgs = [0, 0, 0, 0, ...size, 0];
-    return this.draw(view, args, (handle) => {
+    return [[0, 0, 0, 0, ...size, 0], (handle) => {
       const ok = this.withBytes(crs, (ptr, len) =>
         this.wasm.renderer_set_projected_view(handle, ptr, len, ...view.bbox, ...size, margin));
       if (!ok) throw new Error(decoder.decode(this.output()));
-    });
+    }];
   }
 
-  /** The fetch-and-render loop of Mercator and projected views; `setView` points a core at the view. */
+  /** The fetch-and-render loop of images; `setView` points a core at the view. */
   private async draw(view: View | ProjectedView, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
+    const w = this.wasm;
+    const bytes = await this.run(args, setView, new Uint8Array(), w.renderer_render);
+    const width = Math.round(view.width * (view.pixelRatio ?? 1));
+    const height = Math.round(view.height * (view.pixelRatio ?? 1));
+    const data = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const encode = (format: typeof w.encode_png) => () => {
+      if (!this.withBytes(bytes, (ptr, len) => format(ptr, len, width, height))) {
+        throw new Error(decoder.decode(this.output()));
+      }
+      return this.output();
+    };
+    return { width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp) };
+  }
+
+  /**
+   * The fetch loop of the view `setView` points a core at, for the export source `source` (empty: none), then
+   * `finish(handle, oldest)`'s output.
+   */
+  private async run(
+    args: ViewArgs,
+    setView: (handle: number) => void,
+    source: Uint8Array,
+    finish: (handle: number, oldest: number) => number,
+  ): Promise<Uint8Array<ArrayBuffer>> {
     let done = () => {};
     if (this.exclusive) {
       const previous = exclusiveRenders.get(this.wasm);
@@ -449,7 +525,7 @@ export class MapRenderer {
       await previous;
     }
     try {
-      return await this.drawOnce(view, args, setView);
+      return await this.runOnce(args, setView, source, finish);
     } catch (error) {
       if (error instanceof WebAssembly.RuntimeError) {
         this.broken = error;
@@ -461,16 +537,23 @@ export class MapRenderer {
     }
   }
 
-  private async drawOnce(view: View | ProjectedView, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
+  private async runOnce(
+    args: ViewArgs,
+    setView: (handle: number) => void,
+    source: Uint8Array,
+    finish: (handle: number, oldest: number) => number,
+  ): Promise<Uint8Array<ArrayBuffer>> {
     const w = this.wasm;
     const core = this.acquire(args);
     const ticket = ++this.lastTicket;
     this.tickets.add(ticket);
-    let bytes: Uint8Array<ArrayBuffer>;
     try {
       // Other renders may move the camera while this one awaits resources.
       for (let round = 0; ; round++) {
         setView(core.handle);
+        if (!this.withBytes(source, (ptr, len) => w.renderer_set_export_source(core.handle, ptr, len))) {
+          throw new Error(decoder.decode(this.output()));
+        }
         w.renderer_set_ticket(core.handle, ticket);
         const count = w.renderer_needs(core.handle);
         if (count === 0) break;
@@ -480,23 +563,13 @@ export class MapRenderer {
       }
       // Tickets increase, so the first in the set is the oldest in progress.
       const oldest = this.tickets.values().next().value!;
-      if (!w.renderer_render(core.handle, oldest)) throw new Error(decoder.decode(this.output()));
+      if (!finish(core.handle, oldest)) throw new Error(decoder.decode(this.output()));
       // Own the bytes before another render can overwrite or grow WASM memory.
-      bytes = this.output();
+      return this.output();
     } finally {
       this.tickets.delete(ticket);
       this.release(core);
     }
-    const width = Math.round(view.width * (view.pixelRatio ?? 1));
-    const height = Math.round(view.height * (view.pixelRatio ?? 1));
-    const data = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const encode = (format: typeof w.encode_png) => () => {
-      if (!this.withBytes(bytes, (ptr, len) => format(ptr, len, width, height))) {
-        throw new Error(decoder.decode(this.output()));
-      }
-      return this.output();
-    };
-    return { width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp) };
   }
 
   /**

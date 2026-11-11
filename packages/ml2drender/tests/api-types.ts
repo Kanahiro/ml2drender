@@ -15,6 +15,15 @@ async function projectedPng(renderer: MapRenderer): Promise<Uint8Array<ArrayBuff
   return (await renderer.renderProjected({ projjson: utm, bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 })).toPng();
 }
 
+async function projectedMvt(renderer: MapRenderer): Promise<Response> {
+  // A tile of the grid registered with GL JS's `addProjection({ tileMatrixSet })`.
+  const tileMatrixSet = { origin: [-2000000, 6000000] as [number, number], extentAtZoom0: 4000000 };
+  const mvt = await renderer.renderProjectedMvt({ projjson: utm, tileMatrixSet, z: 3, x: 4, y: 2, source: 'openmaptiles' });
+  // @ts-expect-error A vector tile is addressed by its tile index, not a box.
+  await renderer.renderProjectedMvt({ projjson: utm, bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512, source: 'openmaptiles' });
+  return new Response(mvt, { headers: { 'Content-Type': 'application/vnd.mapbox-vector-tile' } });
+}
+
 async function mercatorPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>[]> {
   const tile = await renderer.renderZxy({ z: 3, x: 7, y: 3 });
   const tokyo = await renderer.renderLngLat({ bbox: [139.5, 35.5, 140, 36], size: 1024 });
