@@ -189,8 +189,34 @@ function withBytes<T>(w: WasmExports, bytes: Uint8Array, call: (ptr: number, len
   }
 }
 
-/** One WASM instance per module for all projections (the bundled one under `undefined`). */
-const projectionWasm = new Map<WebAssembly.Module | undefined, Promise<WasmExports>>();
+/**
+ * One WASM instance per module (the bundled one under `undefined`), shared by all renderers and
+ * projections: memory freed by one render is reused by the next. (WASM memory never shrinks, and
+ * an instance per renderer would hold its own until collected; on Cloudflare Workers all of it
+ * counts towards the isolate's 128 MB.)
+ */
+const instances = new Map<WebAssembly.Module | undefined, Promise<WasmExports>>();
+/** Instances a trap (Rust panic or out of memory) left in an unknown state. */
+const brokenInstances = new WeakSet<WasmExports>();
+
+function sharedWasm(module: WebAssembly.Module | undefined): Promise<WasmExports> {
+  let instance = instances.get(module);
+  if (!instance) {
+    const loading = loadWasm(module);
+    instances.set(module, loading);
+    // A failed load is retried by the next call.
+    loading.catch(() => { if (instances.get(module) === loading) instances.delete(module); });
+    instance = loading;
+  }
+  return instance;
+}
+
+/** Later loads get a new instance. */
+function discardInstance(module: WebAssembly.Module | undefined, instance: Promise<WasmExports>, w: WasmExports) {
+  brokenInstances.add(w);
+  if (instances.get(module) === instance) instances.delete(module);
+}
+
 const freeProjection = new FinalizationRegistry<{ w: WasmExports; handle: number }>(({ w, handle }) => w.projection_free(handle));
 
 /**
@@ -207,14 +233,7 @@ export async function loadProjection(projjson: object, options: Pick<InitOptions
  * projection without awaiting, such as MapLibre's worker `setProjectionHandler`.
  */
 export async function loadProjectionFactory(options: Pick<InitOptions, 'wasm'> = {}): Promise<(projjson: object) => Projection> {
-  let instance = projectionWasm.get(options.wasm);
-  if (!instance) {
-    instance = loadWasm(options.wasm);
-    projectionWasm.set(options.wasm, instance);
-    // A failed load is retried by the next call.
-    instance.catch(() => projectionWasm.delete(options.wasm));
-  }
-  const w = await instance;
+  const w = await sharedWasm(options.wasm);
   return (projjson) => {
     if (!projjson || typeof projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
     const handle = withBytes(w, encoder.encode(JSON.stringify(projjson)), (ptr, len) => w.projection_new(ptr, len));
@@ -343,9 +362,15 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
   return encoder.encode(JSON.stringify({ ...style, layers }));
 }
 
+/** Frees the core of a collected renderer (an idle one: a render in progress holds its renderer). */
+const freeRenderer = new FinalizationRegistry<{ w: WasmExports; state: { core?: Core } }>(({ w, state }) => {
+  if (state.core && state.core.active === 0 && !brokenInstances.has(w)) w.renderer_free(state.core.handle);
+});
+
 /** Render a MapLibre Style as a static 2D RGBA image. */
 export class MapRenderer {
-  private core?: Core;
+  /** The reused core, shared with `freeRenderer`. */
+  private readonly state: { core?: Core } = {};
   /** A trap (Rust panic or out of memory) left the WASM instance in an unknown state. */
   private broken?: unknown;
   /** Fetches in flight, shared by overlapping renders, with the newest ticket that awaits each. */
@@ -355,11 +380,15 @@ export class MapRenderer {
   private lastTicket = 0;
 
   private constructor(
+    private readonly module: WebAssembly.Module | undefined,
+    private readonly instance: Promise<WasmExports>,
     private readonly wasm: WasmExports,
     private readonly style: Uint8Array,
     private readonly loadResource: NonNullable<InitOptions['loadResource']>,
     private readonly ttlMs: number,
-  ) {}
+  ) {
+    freeRenderer.register(this, { w: wasm, state: this.state });
+  }
 
   /** Snapshot a style object and load the renderer. Resource URLs are passed to `loadResource` as written. */
   static async init(style: StyleSpecification, options: InitOptions = {}): Promise<MapRenderer> {
@@ -367,7 +396,8 @@ export class MapRenderer {
     if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
     const loadResource = options.loadResource ?? fetchResource;
     const prepared = prepareStyle(style, options.transformFillExtrusion);
-    return new MapRenderer(await loadWasm(options.wasm), prepared, loadResource, ttlMs);
+    const instance = sharedWasm(options.wasm);
+    return new MapRenderer(options.wasm, instance, await instance, prepared, loadResource, ttlMs);
   }
 
   /** Fetch required resources and return a new RGBA image of a Web Mercator camera. */
@@ -407,7 +437,10 @@ export class MapRenderer {
     try {
       return await this.drawOnce(view, args, setView);
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) this.broken = error;
+      if (error instanceof WebAssembly.RuntimeError) {
+        this.broken = error;
+        discardInstance(this.module, this.instance, this.wasm);
+      }
       throw error;
     }
   }
@@ -474,24 +507,32 @@ export class MapRenderer {
     return entry.request;
   }
 
-  /** The current WASM renderer, replaced once older than the cache TTL. */
+  /**
+   * The current WASM renderer, replaced once older than the cache TTL. With a TTL of 0, each
+   * render gets its own, freed when the render ends.
+   */
   private acquire(args: ViewArgs): Core {
-    if (this.broken) throw new Error('The renderer crashed earlier; create a new one', { cause: this.broken });
-    const now = performance.now();
-    if (this.core && now - this.core.createdAt >= this.ttlMs) {
-      this.core.retired = true;
-      if (this.core.active === 0) this.wasm.renderer_free(this.core.handle);
-      this.core = undefined;
+    if (this.broken || brokenInstances.has(this.wasm)) {
+      throw new Error('The renderer crashed earlier; create a new one', { cause: this.broken });
     }
-    if (!this.core) {
+    const now = performance.now();
+    const state = this.state;
+    if (state.core && now - state.core.createdAt >= this.ttlMs) {
+      state.core.retired = true;
+      if (state.core.active === 0) this.wasm.renderer_free(state.core.handle);
+      state.core = undefined;
+    }
+    let core = state.core;
+    if (!core) {
       const handle = this.withBytes(this.style, (ptr, len) => this.wasm.renderer_new(ptr, len, ...args));
       if (!handle) throw new Error(decoder.decode(this.output()));
       // A core that is not reused drops buckets as soon as they are drawn.
       if (this.ttlMs === 0) this.wasm.renderer_set_keep_buckets(handle, 0);
-      this.core = { handle, createdAt: now, active: 0, retired: false };
+      core = { handle, createdAt: now, active: 0, retired: this.ttlMs === 0 };
+      if (!core.retired) state.core = core;
     }
-    this.core.active++;
-    return this.core;
+    core.active++;
+    return core;
   }
 
   private release(core: Core) {
