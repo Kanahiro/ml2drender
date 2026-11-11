@@ -279,13 +279,16 @@ export class Renderer {
      * warped into it. */
     projected: [ProjectedView, Warp] | undefined;
 
-    /** The style's own `center`/`zoom`/`bearing` are ignored; `view` decides the camera. */
-    constructor(styleJson: string, view: View) {
-        let json: any;
-        try {
-            json = JSON.parse(styleJson);
-        } catch (e) {
-            throw new RenderError('Style', e instanceof Error ? e.message : String(e));
+    /** The style's own `center`/`zoom`/`bearing` are ignored; `view` decides the camera. `style` is
+     * JSON text or a parsed style, which the renderer takes over (and modifies). */
+    constructor(style: string | object, view: View) {
+        let json: any = style;
+        if (typeof style === 'string') {
+            try {
+                json = JSON.parse(style);
+            } catch (e) {
+                throw new RenderError('Style', e instanceof Error ? e.message : String(e));
+            }
         }
         if (json === null || typeof json !== 'object' || Array.isArray(json)) json = {};
         this.sources = new Map();
