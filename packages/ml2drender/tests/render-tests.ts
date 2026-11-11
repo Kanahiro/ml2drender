@@ -1,6 +1,7 @@
 // Runs maplibre-gl-js render tests (fixtures/render) and reports pass rates.
 // Usage: node packages/ml2drender/tests/render-tests.ts [id-substring-filter]
 //   → target/test-report/render/{summary.md,results.json,<id>/{actual,expected,diff}.png}
+import {createHash} from 'node:crypto';
 import {existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {join, relative, resolve, sep} from 'node:path';
 import {convertIndexedToRgb, decode} from 'fast-png';
@@ -95,6 +96,7 @@ function run() {
         if (filter !== undefined && !id.includes(filter)) continue;
         let outcome: Outcome;
         let layerTypes: string[] = [];
+        lastHash = undefined;
         // Each test is isolated: anything it throws is its failure.
         try {
             const style = readJson(stylePath);
@@ -108,7 +110,8 @@ function run() {
             outcome = {status: 'fail', error: e instanceof RenderError || !(e instanceof Error) ? message : `${message}\n${e.stack ?? ''}`};
         }
         const detail = outcome.status === 'pass' ? outcome.diff : outcome.status === 'fail' ? outcome.error : outcome.reason;
-        results.push({id, status: outcome.status, detail, layers: layerTypes});
+        // `hash`: SHA-256 of the compared RGBA, to check that an optimization leaves output bit-identical.
+        results.push({id, status: outcome.status, detail, layers: layerTypes, ...(lastHash ? {hash: lastHash} : {})});
         if (outcome.status === 'skip') {
             skipReasons.set(outcome.reason, (skipReasons.get(outcome.reason) ?? 0) + 1);
         } else if (outcome.status === 'fail') {
@@ -136,6 +139,8 @@ function run() {
     console.error(`report: ${outDir}`);
 }
 
+let lastHash: string | undefined;
+
 function runOne(dir: string, style: any, outDir: string): Outcome {
     const t = style?.metadata?.test ?? {};
     const width = u64(t.width) ?? 512;
@@ -161,6 +166,7 @@ function runOne(dir: string, style: any, outDir: string): Outcome {
     const h = Math.min(u64(t.reportHeight) ?? ch, ch);
     const rgba = new Uint8Array(w * h * 4);
     for (let y = ch - h; y < ch; y++) rgba.set(rendered.subarray(y * cw * 4, (y * cw + w) * 4), (y - (ch - h)) * w * 4);
+    lastHash = createHash('sha256').update(rgba).digest('hex');
 
     // Like upstream: compare against every expected*.png, keep the closest.
     let best: {diff: number; diffImg: Uint8Array; expected: Uint8Array} | undefined;

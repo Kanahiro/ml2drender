@@ -448,9 +448,10 @@ export function drawBackground(target: Target, layer: Layer, ctx: Ctx, raw: any,
         // In a projected output: wherever the projection has Mercator coordinates.
         const world = t.pixelWorld();
         if (world && world.length === target.w * target.h) {
+            const cover = c[3] === 1 ? target.coverer(c) : undefined;
             for (let i = 0; i < world.length; i++) {
                 if (Number.isFinite(world[i][0])) {
-                    if (c[3] === 1) target.cover(i, c);
+                    if (cover) cover(i);
                     else if (target.visible(i)) target.blend(i, c);
                 }
             }
@@ -459,13 +460,14 @@ export function drawBackground(target: Target, layer: Layer, ctx: Ctx, raw: any,
         // Drawn over the covering tiles, i.e. only within the world's vertical extent.
         // `t.screenToWorld([x + 0.5, y + 0.5])[1]`, inlined: one call per pixel dominated large views.
         const [s, co] = t.rot[1];
+        const cover = c[3] === 1 ? target.coverer(c) : undefined;
         for (let y = 0; y < target.h; y++) {
             const sy = (y + 0.5) / t.pixelRatio - t.height / 2;
             for (let x = 0; x < target.w; x++) {
                 const wy = ((x + 0.5) / t.pixelRatio - t.width / 2) * s + sy * co + t.center[1];
                 if (wy >= 0 && wy < t.worldSize) {
                     const i = y * target.w + x;
-                    if (c[3] === 1) target.cover(i, c);
+                    if (cover) cover(i);
                     else if (target.visible(i)) target.blend(i, c);
                 }
             }

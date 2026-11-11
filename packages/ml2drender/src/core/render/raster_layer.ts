@@ -39,25 +39,34 @@ export class RasterParams {
         this.mag = nearest ? 'Nearest' : 'Linear';
     }
 
-    /** Fragment shader on a premultiplied texel. */
+    private readonly out: Rgba = [0, 0, 0, 0];
+
+    /** Fragment shader on a premultiplied texel. The result is reused by the next call. */
     shade(texel: ArrayLike<number>): Rgba {
         const a = texel[3];
-        let c = [texel[0], texel[1], texel[2]];
-        if (a > 0) c = c.map((v) => v / a);
+        let c0 = texel[0];
+        let c1 = texel[1];
+        let c2 = texel[2];
+        if (a > 0) {
+            c0 = c0 / a;
+            c1 = c1 / a;
+            c2 = c2 / a;
+        }
         const alpha = a * this.opacity;
         const w = this.spin;
-        const rgb = [
-            c[0] * w[0] + c[1] * w[1] + c[2] * w[2],
-            c[0] * w[2] + c[1] * w[0] + c[2] * w[1],
-            c[0] * w[1] + c[1] * w[2] + c[2] * w[0],
-        ];
-        const average = (c[0] + c[1] + c[2]) / 3;
-        const out = rgb.map((v) => {
-            v = v + (average - v) * this.saturation;
-            v = (v - 0.5) * this.contrast + 0.5;
-            return (this.brightnessLow + (this.brightnessHigh - this.brightnessLow) * v) * alpha;
-        });
-        return [out[0], out[1], out[2], alpha];
+        const average = (c0 + c1 + c2) / 3;
+        const out = this.out;
+        out[0] = this.adjust(c0 * w[0] + c1 * w[1] + c2 * w[2], average, alpha);
+        out[1] = this.adjust(c0 * w[2] + c1 * w[0] + c2 * w[1], average, alpha);
+        out[2] = this.adjust(c0 * w[1] + c1 * w[2] + c2 * w[0], average, alpha);
+        out[3] = alpha;
+        return out;
+    }
+
+    private adjust(v: number, average: number, alpha: number): number {
+        v = v + (average - v) * this.saturation;
+        v = (v - 0.5) * this.contrast + 0.5;
+        return (this.brightnessLow + (this.brightnessHigh - this.brightnessLow) * v) * alpha;
     }
 }
 
@@ -107,7 +116,8 @@ export function drawQuad(target: Target, ctx: Ctx, q: Quad, tex: Texture, params
     }
     const [tw, th] = tex.size();
     let lambda = 0;
-    const shade = (t: ArrayLike<number>) => params.shade(tex.sample(t[0] / t[2], t[1] / t[2], params.mag, 'Linear', lambda));
+    const texel = [0, 0, 0, 0];
+    const shade = (t: ArrayLike<number>) => params.shade(tex.sample(t[0] / t[2], t[1] / t[2], params.mag, 'Linear', lambda, texel));
     for (let y = 0; y < g; y++) {
         for (let x = 0; x < g; x++) {
             const v0 = y * (g + 1) + x;

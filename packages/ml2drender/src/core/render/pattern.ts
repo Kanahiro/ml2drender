@@ -81,7 +81,7 @@ export function displaySize(img: StyleImage): [number, number] {
 }
 
 /** `texture(u_image, mix(tl / texsize, br / texsize, mod(v_pos, 1)))` on the padded image. */
-export function sampleFill(img: StyleImage, vPos: ArrayLike<number>): [number, number, number, number] {
+export function sampleFill(img: StyleImage, vPos: ArrayLike<number>): number[] {
     const [pw, ph] = img.pattern.size();
     const u = (1 + gmod(vPos[0], 1) * img.image.w) / pw;
     const v = (1 + gmod(vPos[1], 1) * img.image.h) / ph;
@@ -89,6 +89,6 @@ export function sampleFill(img: StyleImage, vPos: ArrayLike<number>): [number, n
 }
 
 /** The line pattern lookup spans the padding: normalized `(x, y)` over the padded image. */
-export function sampleLine(img: StyleImage, x: number, y: number): [number, number, number, number] {
+export function sampleLine(img: StyleImage, x: number, y: number): number[] {
     return img.pattern.sample(x, y, 'Linear', 'Linear', 0);
 }

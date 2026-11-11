@@ -254,7 +254,7 @@ export class Texture {
 
     /** Sample at normalized `(u, v)`. `lambda` is log2 of texels per pixel: `> 0` minifies with
      * `min` (and picks the nearest mip level, `*_MIPMAP_NEAREST`), otherwise `mag` applies. */
-    sample(u: number, v: number, mag: Filter, min: Filter, lambda: number): [number, number, number, number] {
+    sample(u: number, v: number, mag: Filter, min: Filter, lambda: number, out: number[] = [0, 0, 0, 0]): number[] {
         const n = this.levels.length;
         let level = 0;
         if (!(lambda <= 0.5 || n === 1)) {
@@ -269,7 +269,11 @@ export class Texture {
         const ty = v * l.h;
         if (filter === 'Nearest') {
             const i = texelIndex(l, Math.floor(tx), Math.floor(ty));
-            return [p[i] / 255, p[i + 1] / 255, p[i + 2] / 255, p[i + 3] / 255];
+            out[0] = p[i] / 255;
+            out[1] = p[i + 1] / 255;
+            out[2] = p[i + 2] / 255;
+            out[3] = p[i + 3] / 255;
+            return out;
         }
         const x = tx - 0.5;
         const y = ty - 0.5;
@@ -283,7 +287,6 @@ export class Texture {
         const d = texelIndex(l, x0 + 1, y0 + 1);
         const gx = 1 - fx;
         const gy = 1 - fy;
-        const out: [number, number, number, number] = [0, 0, 0, 0];
         for (let k = 0; k < 4; k++) {
             out[k] = ((p[a + k] / 255) * gx + (p[b + k] / 255) * fx) * gy + ((p[c + k] / 255) * gx + (p[d + k] / 255) * fx) * fy;
         }

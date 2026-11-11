@@ -202,7 +202,9 @@ export class HillshadeParams {
         this.filter = p('resampling') === 'nearest' ? 'Nearest' : 'Linear';
     }
 
-    /** The fragment shader for slopes `deriv`. */
+    private readonly out: Rgba = [0, 0, 0, 0];
+
+    /** The fragment shader for slopes `deriv`. The standard method's result is reused by the next call. */
     shade(deriv: [number, number]): Rgba {
         const mix = (a: Rgba, b: Rgba, t: number): Rgba => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t];
         const scale = (c: Rgba, s: number): Rgba => [c[0] * s, c[1] * s, c[2] * s, c[3] * s];
@@ -252,10 +254,20 @@ export class HillshadeParams {
                 const max = 0.5 * PI;
                 const scaled = intensity !== 0.5 ? ((this.base ** slope - 1) / this.baseMax) * max : slope;
                 const k = clamp01(intensity * 2);
-                const accent = scale(this.accent, (1 - Math.cos(scaled)) * k);
+                const accentScale = (1 - Math.cos(scaled)) * k;
                 const shade = Math.abs(gmod((aspect(deriv) + this.azimuth) / PI + 0.5, 2) - 1);
-                const shadeColor = scale(mix(this.shadows[0], this.highlights[0], shade), Math.sin(scaled) * k);
-                return add(scale(accent, 1 - shadeColor[3]), shadeColor);
+                const shadeScale = Math.sin(scaled) * k;
+                const sh = this.shadows[0];
+                const hi = this.highlights[0];
+                // `add(scale(accent, 1 - shadeColor.a), shadeColor)` with
+                // `shadeColor = mix(shadows, highlights, shade) * sin(scaled) * k`, per channel.
+                const shadeA = (sh[3] + (hi[3] - sh[3]) * shade) * shadeScale;
+                const out = this.out;
+                for (let i = 0; i < 4; i++) {
+                    const shadeC = i === 3 ? shadeA : (sh[i] + (hi[i] - sh[i]) * shade) * shadeScale;
+                    out[i] = this.accent[i] * accentScale * (1 - shadeA) + shadeC;
+                }
+                return out;
             }
         }
     }
@@ -285,11 +297,13 @@ export function drawHillshadeTile(target: Target, ctx: Ctx, tile: RenderTile, te
     const lat0 = lat(tile.canonical.y);
     const lat1 = lat(tile.canonical.y + 1);
     const [sw, sh] = tex.size();
+    const px = [0, 0, 0, 0];
+    const deriv: [number, number] = [0, 0];
     drawQuad(target, ctx, tile, mask, (v) => {
-        const tp = [(v[0] * (sw - 2) + 1) / sw, (v[1] * (sh - 2) + 1) / sh];
-        const px = tex.sample(tp[0], tp[1], params.filter, params.filter, 0);
+        tex.sample((v[0] * (sw - 2) + 1) / sw, (v[1] * (sh - 2) + 1) / sh, params.filter, params.filter, 0, px);
         const scaleFactor = Math.cos(toRadians((lat0 - lat1) * (1 - v[1]) + lat1));
-        const deriv: [number, number] = [(px[0] - 128 / 255) * 8 / scaleFactor, (px[1] - 128 / 255) * 8 / scaleFactor];
+        deriv[0] = (px[0] - 128 / 255) * 8 / scaleFactor;
+        deriv[1] = (px[1] - 128 / 255) * 8 / scaleFactor;
         return params.shade(deriv);
     });
 }
@@ -361,14 +375,17 @@ export function drawColorReliefTile(target: Target, ctx: Ctx, tile: RenderTile, 
     const n = stops.length;
     const stride = dem.stride;
     // The DEM texture (`premultiply: false`), filtered on the encoded bytes.
-    const texel = (x: number, y: number): [number, number, number] => {
-        const i = (Math.min(Math.max(y, 0), stride - 1) * stride + Math.min(Math.max(x, 0), stride - 1)) * 4;
-        return [dem.data[i] / 255, dem.data[i + 1] / 255, dem.data[i + 2] / 255];
-    };
-    const sample = (s: number, t: number): [number, number, number] => {
+    const data = dem.data;
+    const texel = (x: number, y: number): number => (Math.min(Math.max(y, 0), stride - 1) * stride + Math.min(Math.max(x, 0), stride - 1)) * 4;
+    const sampled = [0, 0, 0];
+    const sample = (s: number, t: number): number[] => {
         const x = s * stride;
         const y = t * stride;
-        if (ramp.filter === 'Nearest') return texel(Math.floor(x), Math.floor(y));
+        if (ramp.filter === 'Nearest') {
+            const i = texel(Math.floor(x), Math.floor(y));
+            for (let k = 0; k < 3; k++) sampled[k] = data[i + k] / 255;
+            return sampled;
+        }
         const xs = x - 0.5;
         const ys = y - 0.5;
         const x0 = Math.floor(xs);
@@ -376,19 +393,23 @@ export function drawColorReliefTile(target: Target, ctx: Ctx, tile: RenderTile, 
         const fx = xs - x0;
         const fy = ys - y0;
         const a = texel(x0, y0), b = texel(x0 + 1, y0), c = texel(x0, y0 + 1), d = texel(x0 + 1, y0 + 1);
-        const lerp = (k: number) => (a[k] * (1 - fx) + b[k] * fx) * (1 - fy) + (c[k] * (1 - fx) + d[k] * fx) * fy;
-        return [lerp(0), lerp(1), lerp(2)];
+        for (let k = 0; k < 3; k++) {
+            sampled[k] = ((data[a + k] / 255) * (1 - fx) + (data[b + k] / 255) * fx) * (1 - fy) + ((data[c + k] / 255) * (1 - fx) + (data[d + k] / 255) * fx) * fy;
+        }
+        return sampled;
     };
+    const color: Rgba = [0, 0, 0, 0];
+    // The ramp color at `x`, times the layer opacity.
     const colorAt = (x: number): Rgba => {
         // GPUs sample a NaN coordinate (equal stops: 0 / 0) as 0.
         if (x !== x) x = 0;
         const t = x * n - 0.5;
         const i0 = Math.floor(t);
         const f = t - i0;
-        const c = (i: number) => ramp.colors[Math.min(Math.max(i, 0), n - 1)];
-        const a = c(i0);
-        const b = c(i0 + 1);
-        return [0, 1, 2, 3].map((k) => (a[k] / 255) * (1 - f) + (b[k] / 255) * f) as Rgba;
+        const a = ramp.colors[Math.min(Math.max(i0, 0), n - 1)];
+        const b = ramp.colors[Math.min(Math.max(i0 + 1, 0), n - 1)];
+        for (let k = 0; k < 4; k++) color[k] = ((a[k] / 255) * (1 - f) + (b[k] / 255) * f) * ramp.opacity;
+        return color;
     };
     const scale = (stride - 4) / stride;
     const eps = 2 / stride;
@@ -409,8 +430,6 @@ export function drawColorReliefTile(target: Target, ctx: Ctx, tile: RenderTile, 
                 elL = stops[m];
             }
         }
-        const x = (l + (el - elL) / (elR - elL) + 0.5) / n;
-        const c = colorAt(x);
-        return [c[0] * ramp.opacity, c[1] * ramp.opacity, c[2] * ramp.opacity, c[3] * ramp.opacity];
+        return colorAt((l + (el - elL) / (elR - elL) + 0.5) / n);
     });
 }

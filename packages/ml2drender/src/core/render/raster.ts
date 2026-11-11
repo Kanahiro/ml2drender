@@ -61,6 +61,25 @@ export class Target {
         }
     }
 
+    /** `cover` for many pixels of one opaque color: `blend` with alpha 1 ignores what is below,
+     * so the bytes are computed once. */
+    coverer(c: ArrayLike<number>): (i: number) => void {
+        const one = new Target(1, 1);
+        one.blend(0, c);
+        const [r, g, b, a] = one.px;
+        const px = this.px;
+        return (i) => {
+            if (!this.visible(i)) return;
+            const o = i * 4;
+            px[o] = r;
+            px[o + 1] = g;
+            px[o + 2] = b;
+            px[o + 3] = a;
+            if (i < this.occ.length) this.occ[i] = this.layer;
+            this.markOpaque(i);
+        };
+    }
+
     markOpaque(i: number): void {
         if (i < this.opaque.length) this.opaque[i] = 1;
     }
@@ -228,6 +247,13 @@ export function forEachPixel(w: number, h: number, p: ArrayLike<ArrayLike<number
     });
 }
 
+/** The edge function at the center of pixel `x` in the row whose center is `cy`. */
+function edgeValue(e: Edge, cy: number, x: number): number {
+    return e.sign * (e.dx * (cy - e.ay) - e.dy * (x + 0.5 - e.ax));
+}
+
+const outside = (e: number, include: boolean): boolean => e < 0 || (e === 0 && !include);
+
 /** An edge from its lexicographically smaller endpoint. */
 interface Edge {
     ax: number;
@@ -308,18 +334,18 @@ class Setup {
                 // Each edge is monotone along a scanline. An intersection suggests its pixel
                 // boundary, but only the original edge predicate can confirm it. Binary search
                 // handles rounding/cancellation without changing coverage or shared-edge rules.
-                for (const {ax, ay, dx, dy, sign, include} of edges) {
-                    const value = (x: number) => sign * (dx * (cy - ay) - dy * (x + 0.5 - ax));
-                    const outside = (e: number) => e < 0 || (e === 0 && !include);
-                    const left = value(rowX0);
-                    const right = value(rowX1);
+                for (let k = 0; k < 3; k++) {
+                    const edge = edges[k];
+                    const {ax, ay, dx, dy, include} = edge;
+                    const left = edgeValue(edge, cy, rowX0);
+                    const right = edgeValue(edge, cy, rowX1);
                     // Non-finite edge intermediates need the original per-pixel behavior.
                     if (!Number.isFinite(left) || !Number.isFinite(right)) {
                         exact = false;
                         continue;
                     }
-                    const leftOut = outside(left);
-                    const rightOut = outside(right);
+                    const leftOut = outside(left, include);
+                    const rightOut = outside(right, include);
                     if (leftOut === rightOut) {
                         if (leftOut) continue rows;
                         continue;
@@ -329,13 +355,13 @@ class Setup {
                     const crossing = ax + (dx * (cy - ay)) / dy - 0.5;
                     // Non-finite hints fail the range test, as Rust's saturating cast does.
                     const hint = leftOut ? Math.ceil(crossing) : Math.floor(crossing) + 1;
-                    if (hint > lo && hint <= hi && outside(value(hint - 1)) === leftOut && outside(value(hint)) !== leftOut) {
+                    if (hint > lo && hint <= hi && outside(edgeValue(edge, cy, hint - 1), include) === leftOut && outside(edgeValue(edge, cy, hint), include) !== leftOut) {
                         lo = hint - 1;
                         hi = hint;
                     }
                     while (hi - lo > 1) {
                         const mid = lo + Math.floor((hi - lo) / 2);
-                        if (outside(value(mid)) === leftOut) lo = mid;
+                        if (outside(edgeValue(edge, cy, mid), include) === leftOut) lo = mid;
                         else hi = mid;
                     }
                     if (leftOut) rowX0 = hi;
@@ -405,12 +431,13 @@ export function triangle(
     setup.runs((y, x0, x1) => {
         const dy = y + 0.5 - p0y;
         for (let k = 0; k < n; k++) row[k] = v[0][k] + gy[k] * dy;
+        const base = y * w;
         for (let x = x0; x < x1; x++) {
-            if ((mask && !mask.get(x, y)) || !t.visible(y * w + x)) continue;
+            if ((mask && !mask.get(x, y)) || !t.visible(base + x)) continue;
             const dx = x + 0.5 - p0x;
             for (let k = 0; k < n; k++) vary[k] = row[k] + gx[k] * dx;
             const c = shade(vary);
-            if (c) t.blend(y * w + x, c);
+            if (c) t.blend(base + x, c);
         }
     });
 }
