@@ -14,7 +14,7 @@ import type {Layer as MvtLayer} from './mvt.ts';
 import {TileId, Transform, type RenderTile, renderTileKey, mercatorX, mercatorY, mercatorLat, MAX_LAT, MIN_ZOOM, tileUrl} from './tile.ts';
 import {Warp, type ProjectedView} from './reproject.ts';
 import {Ctx, TileFeatures, type TileBuckets, EXTENT, num, drawBackground, drawFill, drawLine, drawCircle} from './render/mod.ts';
-import {Target, Mask, type Rgba} from './render/raster.ts';
+import {Target, Mask} from './render/raster.ts';
 import {Dem, DemTile, HillshadeParams, ColorRamp, drawHillshadeTile, drawColorReliefTile} from './render/dem.ts';
 import {drawHeatmap, blend as blendHeatmap, reapply as reapplyHeatmaps} from './render/heatmap.ts';
 import {RasterParams, Quad, drawQuad} from './render/raster_layer.ts';
@@ -715,7 +715,7 @@ export class Renderer {
         const [symbolLayers, leaderOf, placements] = this.placeSymbols(outCtx);
         // Heatmaps drawn so far: MapLibre draws them without depth test, so they stay on top of
         // the opaque-pass pixels (opaque backgrounds and fill interiors) of layers above them.
-        const heatmaps: Rgba[][] = [];
+        const heatmaps: Float32Array[] = [];
         // Opaque pass, top-down (see `Pass`). Not for a projected view: the warp blends
         // neighboring pixels, so occluded ones must still be drawn.
         const opaqueDrawn = warp ? layers.map(() => false) : this.opaquePass(target, ctx, visible);
@@ -913,7 +913,7 @@ export class Renderer {
             const x1 = Math.max(...cornersWorld.map((p) => p[0]));
             for (let wrap = asI32(Math.floor(x0 / ws)) - 1; wrap <= asI32(Math.floor(x1 / ws)) + 1; wrap++) {
                 const tile: RenderTile = {overscaledZ: id.z, wrap, canonical: id};
-                const q: Quad = {tile, corners, warp, subdivided: warp[2] > 0 && !parallelogram};
+                const q = new Quad(tile, corners, warp, warp[2] > 0 && !parallelogram);
                 drawQuad(target, ctx, q, tex, params, undefined);
             }
             return;

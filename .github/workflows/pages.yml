@@ -28,12 +28,7 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build:wasm
       - run: pnpm --filter demo-browser build
       - uses: actions/upload-pages-artifact@v4
         with:

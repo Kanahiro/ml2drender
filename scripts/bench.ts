@@ -1,15 +1,16 @@
-// Compare rendering performance of WASM builds on upstream fixtures (`pnpm fixtures`), offline.
-// Each variant is a checkout whose own JS API (packages/ml2drender/src/index.ts) drives its WASM, so
-// ABI changes between them are fine. The first variant is the baseline; renders alternate between
-// variants. Prints a Markdown report; exits 1 if a case is slower than the baseline by > threshold.
+// Compare rendering performance of checkouts on upstream fixtures (`pnpm fixtures`), offline.
+// Each variant is a checkout driven through its own JS API (packages/ml2drender/src/index.ts), so API
+// changes between them are fine. Checkouts from before the TypeScript port render with their WASM. The
+// first variant is the baseline; renders alternate between variants. Prints a Markdown report; exits 1
+// if a case is slower than the baseline by > threshold.
 //
 // Usage: pnpm bench <name>=<checkout>[:<wasm>] ... [--samples 15] [--threshold 0.1] [--png <dir>]
-//   <wasm> (relative to the current directory) defaults to <checkout>/target/wasm32-unknown-unknown/wasm/ml2drender_wasm.wasm (`pnpm build:wasm`).
-// Example, working tree vs main: git worktree add ../main main && (cd ../main && pnpm build:wasm) && pnpm build:wasm
-//   && pnpm bench main=../main head=.
+//   TypeScript checkouts need `pnpm install`. For WASM checkouts, <wasm> (relative to the current directory)
+//   defaults to <checkout>/target/wasm32-unknown-unknown/wasm/ml2drender_wasm.wasm (`pnpm build:wasm` there).
+// Example, working tree vs main: git worktree add ../main main && (cd ../main && pnpm install) && pnpm bench main=../main head=.
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -27,7 +28,8 @@ const pngDir = option('png', '');
 const variants = args.map((arg) => {
   const [name, spec] = arg.split('=');
   const [dir, wasm] = spec.split(':');
-  return {name, dir: resolve(dir), wasm: resolve(wasm ?? join(dir, 'target/wasm32-unknown-unknown/wasm/ml2drender_wasm.wasm'))};
+  const ts = existsSync(join(dir, 'packages/ml2drender/src/core/renderer.ts'));
+  return {name, dir: resolve(dir), wasm: ts ? undefined : resolve(wasm ?? join(dir, 'target/wasm32-unknown-unknown/wasm/ml2drender_wasm.wasm'))};
 });
 if (variants.length < 2) throw new Error('usage: node scripts/bench.ts base=<checkout>[:<wasm>] head=<checkout>[:<wasm>] [--samples N] [--threshold R] [--png dir]');
 
@@ -107,9 +109,11 @@ globalThis.fetch = async (input: RequestInfo | URL) => {
   }
 };
 
-// Transpile each checkout's API with this checkout's TypeScript (no type check: its node_modules may be absent).
+// TypeScript checkouts run as is. WASM checkouts: transpile the API with this checkout's TypeScript (no
+// type check: its node_modules may be absent).
 const tsc = join(root, 'packages/ml2drender/node_modules/.bin/tsc');
 const loaded = await Promise.all(variants.map(async (v) => {
+  if (!v.wasm) return {...v, api: (await import(pathToFileURL(join(v.dir, 'packages/ml2drender/src/index.ts')).href)) as Api, module: undefined};
   const out = mkdtempSync(join(tmpdir(), 'ml2drender-bench-'));
   execFileSync(tsc, ['--noCheck', '--skipLibCheck', '--target', 'es2024', '--module', 'esnext', '--outDir', out, join(v.dir, 'packages/ml2drender/src/index.ts')]);
   const api: Api = await import(pathToFileURL(join(out, 'index.js')).href);
@@ -171,11 +175,12 @@ for (const c of cases) {
   const same = runs.every((r) => r.hash === runs[0].hash);
   rows.push(`| ${c.name} | ${medians.map((m) => `${m.toFixed(1)} ms`).join(' | ')} | ${ratios.map(pct).join(', ')}${mark} | ${(Math.max(...runs.map((r) => spread(r.times))) * 100).toFixed(1)}% | ${same ? '同一' : '**変化あり**'} |`);
 }
-const sizes = loaded.map((v) => statSync(v.wasm).size);
-const vs = (xs: number[], f: (x: number) => string) =>
-  `| ${xs.map(f).join(' | ')} | ${xs.slice(1).map((x) => pct(x / xs[0] - 1)).join(', ')} | | |`;
-rows.push(`| WASM サイズ ${vs(sizes, (b) => `${(b / 1e6).toFixed(3)} MB`)}`);
-rows.push(`| WASM メモリ最大 ${vs(memory, mib)}`);
+if (loaded.some((v) => v.wasm)) {
+  const sizes = loaded.map((v) => (v.wasm ? statSync(v.wasm).size : 0));
+  const cell = (xs: number[], f: (x: number) => string) => `| ${xs.map((x) => (x ? f(x) : '-')).join(' | ')} | | | |`;
+  rows.push(`| WASM サイズ ${cell(sizes, (b) => `${(b / 1e6).toFixed(3)} MB`)}`);
+  rows.push(`| WASM メモリ最大 ${cell(memory, mib)}`);
+}
 
 console.log(`## ベンチマーク: ${others.map((v) => v.name).join(', ')} vs ${base.name}
 

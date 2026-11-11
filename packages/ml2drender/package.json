@@ -4,15 +4,11 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./renderer.wasm": {
-      "types": "./src/wasm.d.ts",
-      "default": "./wasm/ml2drender_wasm.wasm"
-    }
+    ".": "./src/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-transform-types tests/single-flight.ts"
+    "test": "node tests/single-flight.ts"
   },
   "devDependencies": {
     "pixelmatch": "^8.0.0",

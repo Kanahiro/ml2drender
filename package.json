@@ -8,13 +8,11 @@
   },
   "scripts": {
     "fixtures": "sh scripts/fetch-fixtures.sh",
-    "build": "cargo build --release",
-    "build:wasm": "cargo build -p ml2drender-wasm --target wasm32-unknown-unknown --profile wasm && mkdir -p packages/ml2drender/wasm && cp target/wasm32-unknown-unknown/wasm/ml2drender_wasm.wasm packages/ml2drender/wasm/",
-    "test": "cargo test --release",
-    "test:render": "cargo run --release -p ml2drender-cli -- render-tests",
+    "test": "pnpm -r test",
+    "test:render": "node packages/ml2drender/tests/render-tests.ts",
     "test:expression": "node packages/ml2drender/tests/expression-tests.ts",
     "bench": "node scripts/bench.ts",
-    "demo": "pnpm build:wasm && pnpm --filter demo-browser dev",
+    "demo": "pnpm --filter demo-browser dev",
     "typecheck": "pnpm -r typecheck"
   }
 }

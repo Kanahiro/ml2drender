@@ -457,9 +457,12 @@ export function drawBackground(target: Target, layer: Layer, ctx: Ctx, raw: any,
             return true;
         }
         // Drawn over the covering tiles, i.e. only within the world's vertical extent.
+        // `t.screenToWorld([x + 0.5, y + 0.5])[1]`, inlined: one call per pixel dominated large views.
+        const [s, co] = t.rot[1];
         for (let y = 0; y < target.h; y++) {
+            const sy = (y + 0.5) / t.pixelRatio - t.height / 2;
             for (let x = 0; x < target.w; x++) {
-                const wy = t.screenToWorld([x + 0.5, y + 0.5])[1];
+                const wy = ((x + 0.5) / t.pixelRatio - t.width / 2) * s + sy * co + t.center[1];
                 if (wy >= 0 && wy < t.worldSize) {
                     const i = y * target.w + x;
                     if (c[3] === 1) target.cover(i, c);

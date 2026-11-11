@@ -51,7 +51,7 @@ function specFeature(f: Feature): object {
         if (f.geometry) o.geometry = f.geometry.map((r) => r.map(([x, y]) => ({x, y})));
         specFeatures.set(f, (s = o));
     }
-    return s;
+    return s!;
 }
 
 /** A compiled layout/paint property (`PropValue`): constant, expression or legacy function. */
