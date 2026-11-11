@@ -403,7 +403,10 @@ export class MapRenderer {
       this.core = undefined;
     }
     if (!this.core) {
-      this.core = { renderer: new Renderer(jsonClone(this.style) as object, view), createdAt: now, active: 0, retired: false };
+      const renderer = new Renderer(jsonClone(this.style) as object, view);
+      // A renderer used for one render needs no buckets afterwards: dropping them as it goes bounds its memory.
+      renderer.keepBuckets = this.ttlMs > 0;
+      this.core = { renderer, createdAt: now, active: 0, retired: false };
     }
     this.core.active++;
     return this.core;

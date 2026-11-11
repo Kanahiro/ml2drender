@@ -26,7 +26,7 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 ## 設計制約(厳守)
 
 - **純 TypeScript のみ。WASM・ネイティブアドオン禁止。** `src/core` は `node:*` や DOM API に依存しない(ブラウザ / Node / Deno / Workers 共通)。依存の npm パッケージは純 JS に限り、採用前に Workers でも動くこと(同期 API・`node:*` 非依存)を確認する。TypeScript は erasable syntax のみ(Node の型ストリップでそのまま動く。`enum` / `namespace` / パラメータプロパティ禁止)、相対 import は `.ts` 拡張子付き。
-- **API の最小形は「style.json + XYZ → タイル画像」**: `new Renderer(style, View.tile(z, x, y, tileSize))`。`View`(center/zoom/bearing/サイズ/pixel_ratio)は任意カメラ用の一般形で、render テストはこちらを使う。スタイルは生成時に固定(変更 API は作らない)。`setView` でカメラだけ切り替えると、取得済みリソースとタイル単位のバケット(線のテッセレーション・塗りの earcut)を再利用する(ソースごとに LRU で `MAX_CACHED_TILES` まで)。1つのレンダラで描画を重ねて走らせるホストは、描画ごとに増加するチケットを `setTicket` で渡し、`renderRetaining(進行中で最古のチケット)` で描く(他の描画がまだ描いていないタイルを追い出さない。公開 API は描画の連番を使う)。
+- **API の最小形は「style.json + XYZ → タイル画像」**: `new Renderer(style, View.tile(z, x, y, tileSize))`。`View`(center/zoom/bearing/サイズ/pixel_ratio)は任意カメラ用の一般形で、render テストはこちらを使う。スタイルは生成時に固定(変更 API は作らない)。`setView` でカメラだけ切り替えると、取得済みリソースとタイル単位のバケット(線のテッセレーション・塗りの earcut)を再利用する(ソースごとに LRU で `MAX_CACHED_TILES` まで)。再利用しないホストは `keepBuckets = false` にする(公開 API では `ttlMs: 0`)と、線・塗り・円・ヒートマップのバケットを最後に使うレイヤを描いた時点で捨てる(Workers の 128MB に収めるため)。ジオメトリは点ごとの配列やオブジェクトにせず、レイヤやバケット単位の型付き配列に詰める(密なタイルは数百万点)。1つのレンダラで描画を重ねて走らせるホストは、描画ごとに増加するチケットを `setTicket` で渡し、`renderRetaining(進行中で最古のチケット)` で描く(他の描画がまだ描いていないタイルを追い出さない。公開 API は描画の連番を使う)。
 - **Sans-IO**: `core` は fetch / ファイル / async / スレッド / 時計に依存しない。`Renderer` が:
   - `needs(): Resource[]`: 現時点で必要な未取得リソース(tile / glyph range / sprite json / sprite png / TileJSON など)
   - `provide(url, bytes | undefined)`: 取得済みバイト列を渡す(`undefined` = 取得失敗/404)
