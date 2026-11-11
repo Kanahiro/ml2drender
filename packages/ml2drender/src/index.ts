@@ -77,8 +77,6 @@ export interface ProjectedTile {
   z: number;
   x: number;
   y: number;
-  /** CSS pixels the tile is drawn at, which picks the source zoom. Default: 512, GL JS's for vector tiles. */
-  tileSize?: number;
   /** A vector or GeoJSON source of the style. */
   source: string;
 }
@@ -459,11 +457,12 @@ export class MapRenderer {
    * Fetch the tiles of `tile.source` and return them as tile `z/x/y` of `tile.tileMatrixSet` in the CRS
    * `tile.projjson`: a vector tile (MVT, extent 4096), for MapLibre GL JS to draw in that CRS (`addProjection`).
    * Layers, features and properties are kept as they are (a GeoJSON source's layer is named after the source);
-   * geometry is clipped to each source tile, then projected.
+   * geometry is clipped to each source tile, then projected. Source tiles are those of the tile drawn at 512 CSS
+   * pixels, the size of GL JS's vector tiles.
    */
   async renderProjectedMvt(tile: ProjectedTile): Promise<Uint8Array<ArrayBuffer>> {
     if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
-    const { z, x, y, tileSize = 512, tileMatrixSet: { origin, extentAtZoom0 } } = tile;
+    const { z, x, y, tileMatrixSet: { origin, extentAtZoom0 } } = tile;
     const n = 2 ** z;
     if (!Number.isInteger(z) || z < 0 || z > 30) throw new RangeError('z must be an integer in 0..=30');
     if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) throw new RangeError('x and y must be integers in 0..2^z');
@@ -472,7 +471,7 @@ export class MapRenderer {
     }
     const s = extentAtZoom0 / n;
     const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
-    const view = { projjson: tile.projjson, bbox: [minX, maxY - s, minX + s, maxY] as ProjectedView['bbox'], width: tileSize, height: tileSize };
+    const view = { projjson: tile.projjson, bbox: [minX, maxY - s, minX + s, maxY] as ProjectedView['bbox'], width: 512, height: 512 };
     return this.run(...this.projected(view), encoder.encode(tile.source), this.wasm.renderer_export_mvt);
   }
 

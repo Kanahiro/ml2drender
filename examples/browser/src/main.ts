@@ -8,8 +8,6 @@ import { stylePresets } from './styles';
 import { TileWorker } from './worker-client';
 
 const TILE_SIZE = 256;
-/** GL JS's size for vector tiles. */
-const MVT_TILE_SIZE = 512;
 /** Vector tiles of a Mercator map: EPSG:3857 on GL JS's own tile grid. */
 const WEB_MERCATOR = {
   definition: projjsonPresets.find((p) => p.projjson.conversion?.method?.name === 'Popular Visualisation Pseudo Mercator')!.projjson as object,
@@ -135,7 +133,6 @@ addProtocol('ml2drender-mvt', async (request, controller) => {
     projjson: crs.definition,
     tileMatrixSet: { origin: crs.origin, extentAtZoom0: crs.extent },
     z, x, y,
-    tileSize: MVT_TILE_SIZE,
     source: url.searchParams.get('source')!,
   });
   checkActive();
