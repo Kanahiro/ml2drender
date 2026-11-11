@@ -673,6 +673,7 @@ function drawFeature(
         if (gradient) return scaled(sampleGradient(gradient, v[3], split), alpha * opacity);
         return scaled(c, alpha);
     };
+    const plain = !dash && !pimg && !gradient;
     for (let k = 0; k + 2 < tris.length; k += 3) {
         const t: [number, number, number] = [tris[k], tris[k + 1], tris[k + 2]];
         if (rotations) {
@@ -687,7 +688,23 @@ function drawFeature(
             const x = along ? along[pointOf[i]] : v.linesofar * scaleX;
             return [v.round ? 1 : 0, v.up ? 1 : -1, x, v.uvX];
         });
-        raster.triangle(target, tf.mask, [screen[t[0]], screen[t[1]], screen[t[2]]], [vary[0], vary[1], vary[2]], shade);
+        const tri = [screen[t[0]], screen[t[1]], screen[t[2]]];
+        if (plain) {
+            // `shade` without dashes, patterns or gradients, inlined.
+            raster.triangleRuns(target, tf.mask, tri, vary, (i0, x0, x1, row, gx, p0x) => {
+                for (let x = x0; x < x1; x++) {
+                    const dx = x + 0.5 - p0x;
+                    const v0 = row[0] + gx[0] * dx;
+                    const v1 = row[1] + gx[1] * dx;
+                    const d = Math.sqrt(v0 * v0 + v1 * v1) * outset;
+                    const alpha = Math.min(Math.max(Math.min(d - (inset - blur2), outset - d) / blur2, 0), 1);
+                    for (let j = 0; j < 4; j++) out[j] = c[j] * alpha;
+                    target.blend(i0 + x, out);
+                }
+            });
+            continue;
+        }
+        raster.triangle(target, tf.mask, tri, vary, shade);
     }
 }
 
