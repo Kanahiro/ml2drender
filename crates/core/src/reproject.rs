@@ -62,8 +62,8 @@ pub struct Warp {
 }
 
 impl Warp {
-    /// The warp for `view` and the Mercator view to render for it: about one Mercator pixel per
-    /// output pixel at the view center, covering the whole output. No Mercator view when nothing
+    /// The warp for `view` and the Mercator view to render for it, at the zoom of the view's CRS
+    /// units per pixel, covering the whole output. No Mercator view when nothing
     /// of `view` is in the projection's domain (the output is then transparent).
     pub fn new(view: &ProjectedView) -> Result<(Warp, Option<View>), Error> {
         let proj = Projection::parse(&view.projjson)?;
@@ -88,8 +88,8 @@ impl Warp {
         let grid: Vec<(f64, f64)> = (0..rows)
             .flat_map(|j| (0..cols).map(move |i| ((i * GRID) as f64, (j * GRID) as f64)))
             .collect();
-        // The reference point: the center or else, e.g. for a tile on the edge of a world
-        // projection, the node nearest to it in the domain, with neighbors 1 px toward the center.
+        // The reference point longitudes are unwrapped around: the center or else, e.g. for a tile
+        // on the edge of a world projection, the node nearest to it in the domain.
         let (cx, cy) = (size[0] as f64 / 2.0, size[1] as f64 / 2.0);
         let css_size = [
             size[0] as f64 / view.pixel_ratio,
@@ -118,16 +118,8 @@ impl Warp {
         .flatten();
         let reference = std::iter::once((cx, cy))
             .chain(candidates)
-            .find_map(|(x, y)| {
-                let (sx, sy) = (
-                    if x < cx { 1.0 } else { -1.0 },
-                    if y < cy { 1.0 } else { -1.0 },
-                );
-                let p = in_domain(x, y)?;
-                (in_domain(x + sx, y).is_some() && in_domain(x, y + sy).is_some())
-                    .then_some((x, y, sx, sy, p[0]))
-            });
-        let Some((rx, ry, sx, sy, reference_lng)) = reference else {
+            .find_map(|(x, y)| in_domain(x, y));
+        let Some([reference_lng, _]) = reference else {
             return Ok((warp, None));
         };
         warp.reference_lng = reference_lng;
@@ -136,13 +128,11 @@ impl Warp {
         warp.central_x = warp.proj.central_meridian().map(tile::mercator_x);
         let merc = |x: f64, y: f64| warp.merc(x, y);
         let nodes: Vec<[f64; 2]> = grid.into_iter().map(|(x, y)| merc(x, y)).collect();
-        // Mercator units per output device pixel at the reference point. It is also the zoom
-        // styles are evaluated at, like a Mercator map's center.
-        let (m0, mx, my) = (merc(rx, ry), merc(rx + sx, ry), merc(rx, ry + sy));
-        let scale = ((mx[0] - m0[0]) * (my[1] - m0[1]) - (mx[1] - m0[1]) * (my[0] - m0[0]))
-            .abs()
-            .sqrt();
-        let mut zoom = (1.0 / (scale * view.pixel_ratio * 512.0)).log2();
+        // The zoom styles are evaluated and tiles are chosen at: CRS units per pixel read as Web
+        // Mercator at the equator (OGC scale denominators), so all tiles of a grid level share it
+        // wherever they are. A local scale would change across the view and seam neighboring tiles.
+        let turn = if matches!(warp.proj, Projection::LongLat) { 360.0 } else { 2.0 * std::f64::consts::PI * 6378137.0 };
+        let mut zoom = (turn / (512.0 * (ux * uy).sqrt() * view.pixel_ratio)).log2();
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
         for n in nodes.iter().filter(|n| n[0].is_finite()) {
             (x0, y0, x1, y1) = (x0.min(n[0]), y0.min(n[1]), x1.max(n[0]), y1.max(n[1]));
@@ -629,5 +619,26 @@ mod tests {
                 assert!((m[0] - exact[0]).abs() < 0.01, "pixel {i}: {m:?} vs {exact:?}");
             }
         }
+    }
+
+    #[test]
+    fn tiles_of_a_grid_level_share_their_zoom() {
+        // Polar stereographic tiles at 70°N and 71°N: their local Mercator scales differ.
+        let zoom = |y: f64| {
+            let view = ProjectedView {
+                projjson: test_crs::projected(
+                    "Polar Stereographic (variant B)",
+                    test_crs::WGS84,
+                    &[("Latitude of standard parallel", 70.0), ("Longitude of origin", -45.0)],
+                ),
+                bbox: [500e3, y, 550e3, y + 50e3],
+                width: 256,
+                height: 256,
+                pixel_ratio: 2.0,
+                margin: 64,
+            };
+            Warp::new(&view).unwrap().1.unwrap().zoom
+        };
+        assert_eq!(zoom(-2.2e6), zoom(-2.1e6));
     }
 }
