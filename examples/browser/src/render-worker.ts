@@ -54,7 +54,7 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
       .catch(failed);
     return;
   }
-  void (request.crs ? active.projected(request.crs).renderTile(request.tile) : active.renderZxy(request.tile))
+  void (request.crs ? active.projected(request.crs).renderTile(request.tile) : active.renderTile(request.tile))
     .then(async (image) => {
       // Includes resource loading and overlapping renders; this is elapsed time, not CPU time.
       const renderMs = performance.now() - started;

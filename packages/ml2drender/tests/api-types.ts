@@ -33,8 +33,8 @@ function glStyle(renderer: MapRenderer): StyleSpecification {
 }
 
 async function mercatorPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>[]> {
-  const tile = await renderer.renderZxy({ z: 3, x: 7, y: 3 });
-  const tokyo = await renderer.renderLngLat({ bbox: [139.5, 35.5, 140, 36], size: 1024 });
+  const tile = await renderer.renderTile({ z: 3, x: 7, y: 3 });
+  const tokyo = await renderer.render({ bbox: [139.5, 35.5, 140, 36], size: 1024 });
   return [tile.toPng(), tokyo.toPng()];
 }
 

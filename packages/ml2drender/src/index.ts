@@ -476,12 +476,12 @@ export class MapRenderer {
   }
 
   /** `renderView` of an XYZ tile of the Web Mercator grid. */
-  async renderZxy(tile: TileView): Promise<RenderedImage> {
+  async renderTile(tile: TileView): Promise<RenderedImage> {
     return this.renderView(tileView(tile));
   }
 
   /** `renderView` of a longitude/latitude box, `view.size` CSS pixels on the long side. */
-  async renderLngLat(view: LngLatView): Promise<RenderedImage> {
+  async render(view: LngLatView): Promise<RenderedImage> {
     return this.renderView(fitLngLat(view));
   }
 
