@@ -306,7 +306,15 @@ impl Warp {
         let m = self.margin as f64;
         let scale = [extent / (self.size[0] as f64 - 2.0 * m), extent / (self.size[1] as f64 - 2.0 * m)];
         if let Some(c) = self.central_x {
+            let cut = geom.iter().flatten().any(|p| (p[0] - c).abs() > 0.5);
             geom = clip_axis(&geom, ty, c - 0.5, c + 0.5, 0);
+            // `clip_axis` joins a ring's crossings in ring order, so a ring that crosses the
+            // antimeridian several times runs back and forth along it. At a tile edge that is in the
+            // buffer, but the antimeridian is the map's outline: its overlapping runs, densified at
+            // different points, would leave slivers that readers' earcut triangulates into gaps.
+            if cut && ty == GeomType::Polygon {
+                geom = crate::union(geom).into_iter().flatten().collect();
+            }
         }
         // Output pixels, as `world_to_screen`.
         let mut projected: Vec<Vec<[f64; 2]>> = Vec::new();
@@ -594,6 +602,20 @@ mod tests {
         let rings = warp.project(mvt::GeomType::Polygon, vec![outer, hole], 1.0 / 32.0, 4096.0, 128.0);
         let area = |r: &[[i32; 2]]| r.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum::<i64>();
         assert_eq!(rings.iter().map(|r| area(r).signum()).collect::<Vec<_>>(), [1, -1], "{rings:?}");
+    }
+
+    #[test]
+    fn polygons_cut_at_the_antimeridian_do_not_fold_back_along_it() {
+        // A world of Equal Earth, and a ring (MVT orientation) across 180° with a bay from the west
+        // that reaches past it: clipped, its crossings (60°, -60°, 20°, 30°) join back and forth
+        // along the edge, where the bay cuts what is left in two.
+        let view = ProjectedView { projjson: test_crs::projected("Equal Earth", test_crs::WGS84, &[]), bbox: [-1.8e7, -9e6, 1.8e7, 9e6], width: 512, height: 256, pixel_ratio: 1.0, margin: 0 };
+        let (warp, _) = Warp::new(&view).unwrap();
+        let m = |lng: f64, lat: f64| [tile::mercator_x(lng), tile::mercator_y(lat)];
+        let ring = vec![m(170.0, 60.0), m(190.0, 60.0), m(190.0, -60.0), m(170.0, -60.0), m(170.0, 20.0), m(185.0, 20.0), m(185.0, 30.0), m(170.0, 30.0), m(170.0, 60.0)];
+        let rings = warp.project(mvt::GeomType::Polygon, vec![ring], 1.0 / 512.0, 4096.0, 128.0);
+        let area = |r: &[[i32; 2]]| r.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum::<i64>();
+        assert_eq!(rings.iter().map(|r| area(r).signum()).collect::<Vec<_>>(), [1, 1], "{rings:?}");
     }
 
     #[test]
