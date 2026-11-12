@@ -991,7 +991,17 @@ impl Renderer {
         let mercator_drawn = warp.is_none() || self.style.layers.iter().zip(&visible).any(|(l, v)| *v && !direct(l));
         let mut target = if mercator_drawn { render::raster::Target::new(w, h) } else { render::raster::Target::new(0, 0) };
         let ctx = self.ctx();
-        let mut out = warp.as_ref().map(|w| render::raster::Target::new(w.size[0], w.size[1]));
+        // Triangles skip the margin, which is cropped. Not the Mercator picture of a projected
+        // view: the warp reads it around each output pixel.
+        let inner = |t: &mut render::raster::Target, m: usize| t.clip = [m, m, t.w.saturating_sub(m), t.h.saturating_sub(m)];
+        if warp.is_none() {
+            inner(&mut target, (self.view.margin as f64 * t.pixel_ratio).round() as usize);
+        }
+        let mut out = warp.as_ref().map(|w| {
+            let mut o = render::raster::Target::new(w.size[0], w.size[1]);
+            inner(&mut o, w.margin);
+            o
+        });
         let out_transform = warp.as_ref().map(|w| t.reprojected(Rc::clone(w)));
         let out_ctx = out_transform.as_ref().map(|ot| render::Ctx::new(ot, &self.style.global_state, &self.sprites.images));
         let out_ctx = out_ctx.as_ref().unwrap_or(&ctx);
@@ -1070,7 +1080,8 @@ impl Renderer {
             if layer_opacity == Some(0.0) {
                 continue;
             }
-            let mut offscreen = layer_opacity.filter(|o| *o < 1.0).map(|_| render::raster::Target::new(lw, lh));
+            let clip = main.clip;
+            let mut offscreen = layer_opacity.filter(|o| *o < 1.0).map(|_| render::raster::Target { clip, ..render::raster::Target::new(lw, lh) });
             let dest = offscreen.as_mut().unwrap_or(&mut *main);
             self.with_tiles(lctx, src, layer, lw, lh, |tiles| match layer.ty.as_str() {
                 "fill" => {
@@ -1311,10 +1322,7 @@ impl Renderer {
             let Some(dem) = &dems[i] else { continue };
             let mask = masks.as_ref().map(|m| &m[i]);
             if let Some(params) = &hillshade {
-                // Raster sources are not reparsed when overzoomed: their tiles keep
-                // `overscaledZ` = the canonical zoom.
-                let tex = dem.slopes(t.canonical.z as f64);
-                render::dem::draw_hillshade_tile(target, ctx, t, tex, params, mask);
+                render::dem::draw_hillshade_tile(target, ctx, t, dem, params, mask);
             }
             if let Some(ramp) = &ramp {
                 render::dem::draw_color_relief_tile(target, ctx, t, &dem.dem, ramp, mask);
