@@ -33,7 +33,7 @@ const variants = args.map((arg) => {
 });
 if (variants.length < 2) throw new Error('usage: node scripts/bench.ts base=<checkout>[:<wasm>] head=<checkout>[:<wasm>] [--samples N] [--threshold R] [--png dir]');
 
-interface View {center: [number, number]; zoom: number; bearing?: number; width: number; height: number; pixelRatio?: number}
+interface View {center: [number, number]; zoom: number; bearing?: number; width: number; height: number; pixelRatio?: number; margin?: number}
 // Base checkouts may predate RenderedImage.toPng() and renderView().
 interface Renderer {renderView?(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; render?(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; renderPng?(view: View): Promise<Uint8Array>}
 const draw = (r: Renderer, view: View) => r.renderView ? r.renderView(view) : r.render!(view);
@@ -90,6 +90,8 @@ const cases: {name: string; style: string; view: View; then?: View[]}[] = [
   {name: 'bright z16.5 bearing 17°', style: 'bright', view: {center: berlin, zoom: 16.5, bearing: 17, width: 1024, height: 1024}},
   {name: 'basic z15', style: 'basic', view: {center: berlin, zoom: 15, width: 1024, height: 1024}},
   {name: 'hillshade + color-relief', style: 'dem', view: {center: terrain, zoom: 13, width: 512, height: 512, pixelRatio: 2}},
+  {name: 'hillshade + color-relief, margin 64', style: 'dem', view: {center: terrain, zoom: 13, width: 512, height: 512, pixelRatio: 2, margin: 64}},
+  {name: 'bright z14, margin 64', style: 'bright', view: {center: berlin, zoom: 14, width: 512, height: 512, margin: 64}},
   {name: 'raster', style: 'satellite', view: {center: terrain, zoom: 13.5, bearing: 17, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON lines, 8 layers', style: 'lines', view: {center: berlin, zoom: 14, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON 10k labels', style: 'labels', view: {center: berlin, zoom: 14, width: 512, height: 512}},

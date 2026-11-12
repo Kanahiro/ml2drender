@@ -303,17 +303,21 @@ fn draw_quad(target: &mut Target, ctx: &Ctx, tile: &RenderTile, mask: Option<&Ma
     }
 }
 
-/// Draw one tile's prepared hillshade texture.
-pub fn draw_hillshade_tile(target: &mut Target, ctx: &Ctx, tile: &RenderTile, tex: &Texture, params: &HillshadeParams, mask: Option<&Mask>) {
+/// Draw one tile's hillshade, preparing its slopes only if a pixel is drawn (a tile in the
+/// cropped margin only lends its border to its neighbors).
+pub fn draw_hillshade_tile(target: &mut Target, ctx: &Ctx, tile: &RenderTile, dem: &DemTile, params: &HillshadeParams, mask: Option<&Mask>) {
     // `u_latrange`: latitudes of the tile's top and bottom edges.
     let n = (1u64 << tile.canonical.z) as f64;
     let lat = |y: f64| crate::tile::mercator_lat(y / n);
     let (lat0, lat1) = (lat(tile.canonical.y as f64) as f32, lat(tile.canonical.y as f64 + 1.0) as f32);
-    let (size_w, size_h) = tex.size();
-    let (sw, sh) = (size_w as f32, size_h as f32);
+    // The slopes texture is `dim + 2` texels square.
+    let (sw, sh) = ((dem.dem.dim + 2) as f32, (dem.dem.dim + 2) as f32);
+    // Raster sources are not reparsed when overzoomed: their tiles keep `overscaledZ` = the
+    // canonical zoom.
+    let zoom = tile.canonical.z as f64;
     draw_quad(target, ctx, tile, mask, &mut |v: &[f32; 2]| {
         let tp = [(v[0] * (sw - 2.0) + 1.0) / sw, (v[1] * (sh - 2.0) + 1.0) / sh];
-        let px = tex.sample(tp[0], tp[1], params.filter, params.filter, 0.0);
+        let px = dem.slopes(zoom).sample(tp[0], tp[1], params.filter, params.filter, 0.0);
         let scale_factor = ((lat0 - lat1) * (1.0 - v[1]) + lat1).to_radians().cos();
         let deriv = [(px[0] - 128.0 / 255.0) * 8.0 / scale_factor, (px[1] - 128.0 / 255.0) * 8.0 / scale_factor];
         Some(params.shade(deriv))

@@ -20,6 +20,9 @@ pub struct Target {
     pub layer: u16,
     /// Whether `occ` can hide anything from the layers being drawn.
     pub cull: bool,
+    /// Triangles only cover pixels in `x0..x1`, `y0..y1` (`[x0, y0, x1, y1]`): the part of the
+    /// image that is kept (a margin is cropped off).
+    pub clip: [usize; 4],
 }
 
 /// Premultiplied color in 0..1.
@@ -27,7 +30,7 @@ pub type Rgba = [f32; 4];
 
 impl Target {
     pub fn new(w: usize, h: usize) -> Target {
-        Target { w, h, px: vec![[0; 4]; w * h], opaque: Vec::new(), occ: Vec::new(), layer: 0, cull: false }
+        Target { w, h, px: vec![[0; 4]; w * h], opaque: Vec::new(), occ: Vec::new(), layer: 0, cull: false, clip: [0, 0, w, h] }
     }
 
     /// `gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA)` into a unorm8 target.
@@ -202,7 +205,7 @@ impl Mask {
 /// Visit pixels whose centers are covered by the triangle (top-left fill rule), with
 /// barycentric weights.
 pub fn for_each_pixel(w: usize, h: usize, p: [[f64; 2]; 3], mut f: impl FnMut(usize, usize, [f64; 3])) {
-    let Some(setup) = Setup::new(w, h, p) else { return };
+    let Some(setup) = Setup::new([0, 0, w, h], p) else { return };
     setup.runs(|y, x0, x1| {
         let cy = y as f64 + 0.5;
         for x in x0..x1 {
@@ -234,7 +237,7 @@ struct Setup {
 }
 
 impl Setup {
-    fn new(w: usize, h: usize, p: [[f64; 2]; 3]) -> Option<Setup> {
+    fn new(clip: [usize; 4], p: [[f64; 2]; 3]) -> Option<Setup> {
         let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]);
         if area == 0.0 || !area.is_finite() {
             return None;
@@ -246,10 +249,10 @@ impl Setup {
         let max_x = p.iter().map(|v| v[0]).fold(f64::NEG_INFINITY, f64::max);
         let min_y = p.iter().map(|v| v[1]).fold(f64::INFINITY, f64::min);
         let max_y = p.iter().map(|v| v[1]).fold(f64::NEG_INFINITY, f64::max);
-        let x0 = (min_x - 0.5).ceil().max(0.0) as i64;
-        let x1 = ((max_x - 0.5).floor() as i64).min(w as i64 - 1);
-        let y0 = (min_y - 0.5).ceil().max(0.0) as i64;
-        let y1 = ((max_y - 0.5).floor() as i64).min(h as i64 - 1);
+        let x0 = (min_x - 0.5).ceil().max(clip[0] as f64) as i64;
+        let x1 = ((max_x - 0.5).floor() as i64).min(clip[2] as i64 - 1);
+        let y0 = (min_y - 0.5).ceil().max(clip[1] as f64) as i64;
+        let y1 = ((max_y - 0.5).floor() as i64).min(clip[3] as i64 - 1);
         if x0 > x1 || y0 > y1 {
             return None;
         }
@@ -362,7 +365,7 @@ pub fn triangle<const N: usize>(
     shade: &mut impl FnMut(&[f32; N]) -> Option<Rgba>,
 ) {
     let w = t.w;
-    let Some(setup) = Setup::new(w, t.h, p) else { return };
+    let Some(setup) = Setup::new(t.clip, p) else { return };
     // v(x, y) = v0 + gx (x - p0x) + gy (y - p0y).
     let (e1, e2) = ([p[1][0] - p[0][0], p[1][1] - p[0][1]], [p[2][0] - p[0][0], p[2][1] - p[0][1]]);
     let det = e1[0] * e2[1] - e1[1] * e2[0];
