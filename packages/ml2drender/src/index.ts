@@ -96,6 +96,11 @@ export interface ProjectedRenderer {
   /** `render` of tile `z/x/y` of the CRS's grid, `tileSize` CSS pixels (default 256) on a side. */
   renderTile(tile: Tile): Promise<RenderedImage>;
   /**
+   * `render` of MapLibre GL JS's camera in the CRS (registered with `addProjection`): `center` in degrees, north up,
+   * and tile 0/0/0 of the grid in 512 CSS pixels at zoom 0. No `bearing`.
+   */
+  renderView(view: Omit<View, 'bearing'>): Promise<RenderedImage>;
+  /**
    * Fetch the data of `tile.source` and return it in tile `z/x/y` of the CRS's grid, for MapLibre GL JS to draw the
    * style in the CRS from (see `toStyle`), not a picture of the map:
    * - vector / GeoJSON: a vector tile (MVT, extent 4096). Layers, features and properties are kept as they are (a
@@ -511,6 +516,17 @@ export class MapRenderer {
         if (!Number.isInteger(tileSize) || tileSize < 1) throw new RangeError('tileSize must be a positive integer');
         return render({ bbox: box(tile), width: tileSize, height: tileSize, pixelRatio, margin });
       },
+      renderView: async ({ center: [lng, lat], zoom, width, height, pixelRatio, margin, ...rest }) => {
+        // ponytail: north up only; a bearing needs a rotation in the core's `Warp` (bbox ↔ output pixels).
+        if ((rest as View).bearing) throw new RangeError('bearing is not supported in a CRS');
+        if (![lng, lat, zoom].every(Number.isFinite)) throw new RangeError('center and zoom must be finite');
+        const [x, y] = this.forward(projjson, lng, lat);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) throw new RangeError('center is outside the CRS');
+        // CRS units per CSS pixel.
+        const unit = extentAtZoom0 / (512 * 2 ** zoom);
+        const [w, h] = [(width / 2) * unit, (height / 2) * unit];
+        return render({ bbox: [x - w, y - h, x + w, y + h], width, height, pixelRatio, margin });
+      },
       getTile: (tile) => {
         if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
         const view = { bbox: box(tile), width: 512, height: 512 };
@@ -533,6 +549,24 @@ export class MapRenderer {
         return structuredClone({ ...style, projection: { type: crs.name }, sources, layers });
       },
     };
+  }
+
+  /** `[lng, lat]` in the CRS `projjson` (encoded); NaN where the CRS has no point. */
+  private forward(projjson: Uint8Array, lng: number, lat: number): number[] {
+    this.assertUsable();
+    const w = this.wasm;
+    const handle = this.withBytes(projjson, (ptr, len) => w.projection_new(ptr, len));
+    if (!handle) throw new Error(decoder.decode(this.output()));
+    w.projection_forward(handle, lng, lat);
+    const xy = [...new Float64Array(w.memory.buffer, w.xy_ptr(), 2)];
+    w.projection_free(handle);
+    return xy;
+  }
+
+  private assertUsable() {
+    if (this.broken || brokenInstances.has(this.wasm)) {
+      throw new Error('The renderer crashed earlier; create a new one', { cause: this.broken });
+    }
   }
 
   /** The core arguments and `setView` of a view of the CRS `projjson` (encoded). */
@@ -658,9 +692,7 @@ export class MapRenderer {
    * render gets its own, freed when the render ends.
    */
   private acquire(args: ViewArgs): Core {
-    if (this.broken || brokenInstances.has(this.wasm)) {
-      throw new Error('The renderer crashed earlier; create a new one', { cause: this.broken });
-    }
+    this.assertUsable();
     const now = performance.now();
     if (this.core && now - this.core.createdAt >= this.ttlMs) {
       this.core.retired = true;

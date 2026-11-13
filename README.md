@@ -118,6 +118,7 @@ Style オブジェクト（公式の `StyleSpecification` 型）を受け取り�
 | `render({ bbox, size })` | 経緯度の範囲 `[west, south, east, north]`。長辺が `size` px になるようにカメラを合わせます。`west > east` は反子午線をまたぐ範囲です。 |
 | `projected(crs).render({ bbox, width, height })` | CRS の範囲 `[minX, minY, maxX, maxY]`（CRS の単位）。 |
 | `projected(crs).renderTile({ z, x, y, tileSize? })` | CRS の格子のタイル。 |
+| `projected(crs).renderView({ center, zoom, width, height })` | CRS のカメラ。`center` は経緯度、北が上です（`bearing` は使えません）。ズームは `addProjection` で登録した GL JS と同じです（ズーム 0 で格子のタイル 0/0/0 が 512 CSS px）。 |
 
 `projected(crs)` の描画は、1 CSS px あたりの CRS 単位を EPSG:3857 の赤道と同じ縮尺とみなしたズーム（OGC のスケール分母と同じ考え方。経緯度は 360° を世界の一周とします）でスタイルを評価し、ソースのタイルを選びます。ズームは場所によらないので、同じ格子のズームのタイルどうしは境界で揃います。高緯度では同じ地上解像度の Mercator 地図より高いズームになります。
 
