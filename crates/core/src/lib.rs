@@ -150,8 +150,10 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
         let mut encoder = png::Encoder::new(&mut bytes, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        // Encoding is on the request's CPU budget; favor speed over minimum file size.
-        encoder.set_compression(png::Compression::Fast);
+        // Encoding is on the request's CPU budget; favor speed over minimum file size. `Fastest` is
+        // `Fast`'s deflate with the Up filter instead of trying all five per row: about 3 times faster
+        // in WASM, with files within ±10% (smaller for map tiles).
+        encoder.set_compression(png::Compression::Fastest);
         let mut writer = encoder.write_header()?;
         writer.write_image_data(rgba)?;
         writer.finish()
@@ -169,6 +171,32 @@ pub fn encode_webp(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Erro
     let mut bytes = Vec::new();
     image_webp::WebPEncoder::new(&mut bytes)
         .encode(rgba, width, height, image_webp::ColorType::Rgba8)
+        .map_err(|e| Error::ImageEncoding(e.to_string()))?;
+    Ok(bytes)
+}
+
+/// Baseline JPEG of row-major RGBA8 pixels at `quality` (1–100), flattened over black, with 4:2:0
+/// chroma subsampling at every quality (libjpeg's and sharp's default; the encoder's own keeps full
+/// chroma from quality 90, at about twice the encoding time and 1.5 times the size).
+pub fn encode_jpeg(rgba: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, Error> {
+    let (Ok(w), Ok(h)) = (u16::try_from(width), u16::try_from(height)) else {
+        return Err(Error::ImageEncoding(format!("{width}x{height} exceeds JPEG's 65535 px limit")));
+    };
+    if rgba.len() as u64 != width as u64 * height as u64 * 4 {
+        return Err(Error::ImageEncoding(format!("{} bytes is not {width}x{height} RGBA", rgba.len())));
+    }
+    let rgb: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|p| {
+            let a = p[3] as u32;
+            [0, 1, 2].map(|i| ((p[i] as u32 * a + 127) / 255) as u8)
+        })
+        .collect();
+    let mut bytes = Vec::new();
+    let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, quality.clamp(1, 100));
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+    encoder
+        .encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb)
         .map_err(|e| Error::ImageEncoding(e.to_string()))?;
     Ok(bytes)
 }
@@ -1491,6 +1519,18 @@ mod tests {
         decoder.read_image(&mut decoded).unwrap();
         assert_eq!(decoded, rgba);
         assert!(matches!(encode_webp(&rgba, 4, 3), Err(Error::ImageEncoding(_))));
+    }
+
+    #[test]
+    fn jpeg_flattens_over_black() {
+        // Opaque white beside transparent white: the second decodes as black.
+        let rgba = [[255u8, 255, 255, 255]; 8].into_iter().chain([[255, 255, 255, 0]; 8]).flatten().collect::<Vec<_>>();
+        let jpeg = encode_jpeg(&rgba, 16, 1, 100).unwrap();
+        let mut decoder = zune_jpeg::JpegDecoder::new(&jpeg);
+        let rgb = decoder.decode().unwrap();
+        assert_eq!(decoder.dimensions(), Some((16, 1)));
+        assert!(rgb[..3].iter().all(|&v| v > 240) && rgb[rgb.len() - 3..].iter().all(|&v| v < 15));
+        assert!(matches!(encode_jpeg(&rgba, 4, 3, 90), Err(Error::ImageEncoding(_))));
     }
 
     #[test]
