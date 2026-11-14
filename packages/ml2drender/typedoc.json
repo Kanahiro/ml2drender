@@ -2,11 +2,11 @@
   "$schema": "https://typedoc.org/schema.json",
   "name": "ml2drender",
   "entryPoints": [
-    "../packages/ml2drender/src/index.ts"
+    "src/index.ts"
   ],
-  "tsconfig": "../packages/ml2drender/tsconfig.json",
-  "readme": "../README.md",
-  "out": "dist",
+  "tsconfig": "tsconfig.json",
+  "readme": "../../README.md",
+  "out": "../../target/docs",
   "excludePrivate": true,
   "excludeInternal": true,
   "includeVersion": false,

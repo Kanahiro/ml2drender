@@ -1,4 +1,4 @@
-# Build the browser demo (examples/browser) and the API reference (docs, served at /api/) and deploy them to GitHub Pages.
+# Build the browser demo (examples/browser) and the API reference (TypeDoc, served at /api/) and deploy them to GitHub Pages.
 name: Pages
 
 on:
@@ -35,7 +35,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build:wasm
       - run: pnpm --filter demo-browser build
-      - run: pnpm build:docs && cp -r docs/dist examples/browser/dist/api
+      - run: pnpm build:docs && cp -r target/docs examples/browser/dist/api
       - uses: actions/upload-pages-artifact@v4
         with:
           path: examples/browser/dist

@@ -12,13 +12,15 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-transform-types tests/single-flight.ts && node --experimental-transform-types tests/shared-instance.ts"
+    "test": "node --experimental-transform-types tests/single-flight.ts && node --experimental-transform-types tests/shared-instance.ts",
+    "docs": "typedoc"
   },
   "peerDependencies": {
     "@maplibre/maplibre-gl-style-spec": "^26.4.4"
   },
   "devDependencies": {
     "@maplibre/maplibre-gl-style-spec": "26.4.4",
-    "typescript": "7.0.2"
+    "typedoc": "0.28.20",
+    "typescript": "6.0.3"
   }
 }
