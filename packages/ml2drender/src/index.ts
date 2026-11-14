@@ -2,12 +2,17 @@ import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpec
 
 /** A camera, of Web Mercator (`MapRenderer.renderView`) or of a CRS (`ProjectedRenderer.renderView`). */
 export interface View {
+  /** Longitude and latitude of the image center, in degrees. */
   center: [lng: number, lat: number];
+  /** MapLibre GL JS zoom: the world (in a CRS: tile 0/0/0 of its grid) is 512 × 2^zoom CSS pixels wide. */
   zoom: number;
   /** Degrees clockwise from north (in a CRS: from its y axis) of the direction that is up. Default: 0. */
   bearing?: number;
+  /** Positive integer CSS pixels. */
   width: number;
+  /** Positive integer CSS pixels. */
   height: number;
+  /** Output pixels per CSS pixel. Default: 1. */
   pixelRatio?: number;
   /** Non-negative integer CSS pixels of extra coverage, cropped from the output. Default: 0. */
   margin?: number;
@@ -15,11 +20,15 @@ export interface View {
 
 /** An XYZ tile of the Web Mercator grid (`tileSize` CSS pixels square). */
 export interface Tile {
+  /** Zoom level: an integer in 0..=30. */
   z: number;
+  /** Column, from the west: an integer in 0..2^z. */
   x: number;
+  /** Row, from the north: an integer in 0..2^z. */
   y: number;
   /** CSS pixels. Default: 256. */
   tileSize?: number;
+  /** Output pixels per CSS pixel. Default: 1. */
   pixelRatio?: number;
   /** Non-negative integer CSS pixels of extra coverage, cropped from the output. Default: 0. */
   margin?: number;
@@ -34,6 +43,7 @@ export interface LngLatBox {
   bbox: [west: number, south: number, east: number, north: number];
   /** Positive integer CSS pixels of the image's long side. */
   size: number;
+  /** Output pixels per CSS pixel. Default: 1. */
   pixelRatio?: number;
   /** Non-negative integer CSS pixels of extra coverage, cropped from the output. Default: 0. */
   margin?: number;
@@ -51,6 +61,7 @@ export interface Crs {
    * Geostationary Satellite, without datum shifts.
    */
   projjson: object;
+  /** The CRS's tile grid, for `renderTile`, `getTile` and GL JS. */
   tileMatrixSet: TileMatrixSet;
 }
 
@@ -62,8 +73,11 @@ export interface Crs {
 export interface ProjectedBox {
   /** In CRS units (degrees for longlat), always easting/longitude first whatever the CRS's axis order. */
   bbox: [minX: number, minY: number, maxX: number, maxY: number];
+  /** Positive integer CSS pixels. */
   width: number;
+  /** Positive integer CSS pixels. */
   height: number;
+  /** Output pixels per CSS pixel. Default: 1. */
   pixelRatio?: number;
   /** Non-negative integer CSS pixels of extra coverage, cropped from the output. Default: 0. */
   margin?: number;
@@ -84,13 +98,17 @@ export interface TileMatrixSet {
 export interface SourceTile {
   /** A vector, GeoJSON, raster, raster-dem or image source of the style. */
   source: string;
+  /** Zoom level of the CRS's grid: an integer in 0..=30. */
   z: number;
+  /** Column, from the grid's west edge: an integer in 0..2^z. */
   x: number;
+  /** Row, from the grid's north edge: an integer in 0..2^z. */
   y: number;
 }
 
 /** A `MapRenderer` drawing in a CRS (see `MapRenderer.projected`). */
 export interface ProjectedRenderer {
+  /** The CRS given to `MapRenderer.projected`. */
   readonly crs: Crs;
   /** Fetch required resources and return a new RGBA image of `box.bbox` (CRS units). */
   render(box: ProjectedBox): Promise<RenderedImage>;
@@ -122,8 +140,11 @@ export interface ProjectedRenderer {
   toStyle(options: { tiles: (source: string) => string }): StyleSpecification;
 }
 
+/** A rendered RGBA image, with encoders that run inside WASM. */
 export interface RenderedImage {
+  /** Pixels: CSS pixels × `pixelRatio`. */
   width: number;
+  /** Pixels: CSS pixels × `pixelRatio`. */
   height: number;
   /** Row-major, 8-bit RGBA pixels. */
   data: Uint8ClampedArray<ArrayBuffer>;
@@ -131,14 +152,18 @@ export interface RenderedImage {
   toPng(): Uint8Array<ArrayBuffer>;
   /** Encode `data` inside WASM as an owned, lossless WebP. */
   toWebp(): Uint8Array<ArrayBuffer>;
+  /** Encode `data` inside WASM as an owned JPEG of `quality` (1–100), flattened over black. */
+  toJpeg(quality: number): Uint8Array<ArrayBuffer>;
 }
 
 /** Style Spec layers supported by the 2D renderer. */
 export type StyleLayer = Exclude<LayerSpecification, FillExtrusionLayerSpecification>;
 
+/** A fill-extrusion layer, which `InitOptions.transformFillExtrusion` turns into a 2D layer. */
 export type FillExtrusionLayer = FillExtrusionLayerSpecification;
 export type { StyleSpecification };
 
+/** Options of `MapRenderer.init`. */
 export interface InitOptions {
   /** Load complete resource bytes, or null for a missing resource (HTTP 404). Other failures must reject. */
   loadResource?: (url: string) => Promise<Uint8Array<ArrayBuffer> | null>;
@@ -152,7 +177,10 @@ export interface InitOptions {
    * (e.g. on Cloudflare Workers, whose 128 MB includes WASM memory, which never shrinks).
    * Fetched bytes are not cached: rely on the HTTP cache, or cache in `loadResource`.
    */
-  cache?: { ttlMs?: number };
+  cache?: {
+    /** Milliseconds; 0 or `Infinity` included. Default: 300 000 (5 minutes). */
+    ttlMs?: number;
+  };
   /**
    * Run this renderer's renders one at a time with the other exclusive renders on the same WASM
    * instance (renderers of one module with `cache.ttlMs` 0 share it), from the first fetch to the image. Overlapping
@@ -184,6 +212,7 @@ interface WasmExports {
   renderer_export_tile(handle: number, oldest: number): number;
   encode_png(ptr: number, len: number, width: number, height: number): number;
   encode_webp(ptr: number, len: number, width: number, height: number): number;
+  encode_jpeg(ptr: number, len: number, width: number, height: number, quality: number): number;
   renderer_free(handle: number): void;
   projection_new(ptr: number, len: number): number;
   projection_forward(handle: number, lng: number, lat: number): number;
@@ -441,7 +470,16 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
 /** Per instance: the end of the last exclusive render queued (see `InitOptions.exclusive`). */
 const exclusiveRenders = new WeakMap<WasmExports, Promise<void>>();
 
-/** Render a MapLibre Style as a static 2D RGBA image. */
+/**
+ * Render a MapLibre Style as a static 2D RGBA image.
+ *
+ * @example
+ * ```ts
+ * const renderer = await MapRenderer.init(style);
+ * const image = await renderer.renderTile({ z: 5, x: 28, y: 12 });
+ * const png = image.toPng();
+ * ```
+ */
 export class MapRenderer {
   /** The reused core (none with a TTL of 0). */
   private core?: Core;
@@ -589,13 +627,20 @@ export class MapRenderer {
     const width = Math.round(view.width * (view.pixelRatio ?? 1));
     const height = Math.round(view.height * (view.pixelRatio ?? 1));
     const data = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const encode = (format: typeof w.encode_png) => () => {
+    const encode = (format: (ptr: number, len: number, width: number, height: number) => number) => () => {
       if (!this.withBytes(bytes, (ptr, len) => format(ptr, len, width, height))) {
         throw new Error(decoder.decode(this.output()));
       }
       return this.output();
     };
-    return { width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp) };
+    return {
+      width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp),
+      toJpeg: (quality) => {
+        if (!Number.isFinite(quality)) throw new RangeError('quality must be finite');
+        const q = Math.min(100, Math.max(1, Math.round(quality)));
+        return encode((ptr, len, width, height) => w.encode_jpeg(ptr, len, width, height, q))();
+      },
+    };
   }
 
   /**
