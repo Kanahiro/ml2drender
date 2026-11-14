@@ -266,7 +266,7 @@ pnpm fixtures          # fetches the upstream test data (first time only, about 
 pnpm test:render       # render tests → target/test-report/render/
 pnpm test:expression   # expression tests → target/test-report/expression/
 pnpm test:python       # Python binding tests (uses uv)
-pnpm build:docs        # API reference → docs/dist/
+pnpm build:docs        # API reference (TypeDoc) → target/docs/
 pnpm bench base=<dir> head=.   # compares WASM performance between two checkouts
 ```
 
@@ -278,7 +278,6 @@ crates/python/        Python extension
 crates/cli/           test runner and native checks
 packages/ml2drender/  JavaScript API
 examples/browser/     demo (Vite + MapLibre GL JS)
-docs/                 API reference (TypeDoc)
 ```
 
 Design constraints and conventions are described in [AGENTS.md](https://github.com/Kanahiro/ml2drender/blob/main/AGENTS.md) (in Japanese). Issues and pull requests are welcome. A change to rendering should keep `pnpm test:render` results unchanged, or explain why they change.
