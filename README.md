@@ -24,7 +24,7 @@ const style = await (await fetch('https://demotiles.maplibre.org/style.json')).j
 const renderer = await MapRenderer.init(style);
 
 const image = await renderer.renderView({ center: [139.767, 35.681], zoom: 5, width: 512, height: 512 });
-const png = image.toPng(); // または image.toWebp()、生の RGBA は image.data
+const png = image.toPng(); // または image.toWebp() / image.toJpeg(80)、生の RGBA は image.data
 ```
 
 必要なタイル・TileJSON・sprite・グリフは、レンダラが判断して取得します。ブラウザ（Vite など）では同梱の WASM を自動で読み込みます。Node.js と Cloudflare Workers では、コンパイル済みの WASM を `wasm` オプションで渡してください（Node.js なら `WebAssembly.compile(readFileSync(...))`）。
@@ -131,6 +131,7 @@ Style オブジェクト（公式の `StyleSpecification` 型）を受け取り�
 - `width`・`height`
 - `data`:行優先の RGBA を並べた `Uint8ClampedArray`
 - `toPng()`・`toWebp()`:WASM 内でエンコードした可逆の PNG / WebP を返します。WebP は PNG より約3割小さくなります。
+- `toJpeg(quality)`:WASM 内でエンコードした JPEG(`quality` は 1–100、4:2:0、透明部分は黒で合成)を返します。
 
 ### `renderer.projected(crs)`
 

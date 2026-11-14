@@ -17,7 +17,7 @@ async function projectedPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuf
   const utmRenderer = renderer.projected(crs);
   const box = await utmRenderer.render({ bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
   const tile = await utmRenderer.renderTile({ z: 3, x: 4, y: 2, tileSize: 512 });
-  return [box.toPng(), tile.toWebp()];
+  return [box.toPng(), tile.toWebp(), tile.toJpeg(80)];
 }
 
 async function sourceTile(renderer: MapRenderer): Promise<Response> {

@@ -261,6 +261,24 @@ pub unsafe extern "C" fn encode_webp(ptr: *const u8, len: usize, width: u32, hei
     }
 }
 
+/// Encodes RGBA8 pixels; returns 1 with a JPEG (flattened over black) in the output buffer, or 0 with an error message.
+///
+/// # Safety
+/// `ptr`/`len` must describe readable memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn encode_jpeg(ptr: *const u8, len: usize, width: u32, height: u32, quality: u32) -> u32 {
+    match ml2drender::encode_jpeg(unsafe { bytes(ptr, len) }, width, height, quality.min(100) as u8) {
+        Ok(jpeg) => {
+            set_out(jpeg);
+            1
+        }
+        Err(e) => {
+            set_out(e.to_string().into_bytes());
+            0
+        }
+    }
+}
+
 /// Returns a projection handle for a PROJJSON CRS, or null with the error message in
 /// the output buffer.
 ///
