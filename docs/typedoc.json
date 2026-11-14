@@ -1,0 +1,32 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "ml2drender",
+  "entryPoints": [
+    "../packages/ml2drender/src/index.ts"
+  ],
+  "tsconfig": "../packages/ml2drender/tsconfig.json",
+  "readme": "../README.md",
+  "out": "dist",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "includeVersion": false,
+  "sort": [
+    "kind",
+    "source-order"
+  ],
+  "navigationLinks": {
+    "Demo": "https://kanahiro.github.io/ml2drender/",
+    "GitHub": "https://github.com/Kanahiro/ml2drender"
+  },
+  "sourceLinkTemplate": "https://github.com/Kanahiro/ml2drender/blob/main/{path}#L{line}",
+  "treatWarningsAsErrors": true,
+  "highlightLanguages": [
+    "bash",
+    "sh",
+    "json",
+    "typescript",
+    "ts",
+    "python",
+    "text"
+  ]
+}
