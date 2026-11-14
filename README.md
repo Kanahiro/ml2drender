@@ -67,9 +67,12 @@ const utm = renderer.projected({
   tileMatrixSet: { origin: [-2_000_000, 6_000_000], extentAtZoom0: 4_000_000 },
 });
 
-await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000], width: 512, height: 512 }); // CRS の範囲
-await utm.renderTile({ z: 3, x: 4, y: 2 });                                                     // CRS の格子のタイル
+await utm.renderView({ center: [139.767, 35.681], zoom: 6, bearing: 30, width: 800, height: 600 }); // カメラ
+await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000], width: 512, height: 512 });      // CRS の範囲
+await utm.renderTile({ z: 3, x: 4, y: 2 });                                                         // CRS の格子のタイル
 ```
+
+`renderView` の `center` は経緯度、ズームは `tileMatrixSet` の格子のズームです。同じ CRS を `addProjection` で登録した MapLibre GL JS の `center`・`zoom`・`bearing` と同じ範囲を描きます。
 
 ### MapLibre GL JS で任意の CRS に描かせる
 
@@ -116,11 +119,11 @@ Style オブジェクト（公式の `StyleSpecification` 型）を受け取り�
 | `renderView({ center, zoom, bearing?, width, height })` | Web Mercator のカメラ。ズームは GL JS と同じです（ズーム 0 で世界全体が 512 CSS px）。 |
 | `renderTile({ z, x, y, tileSize? })` | Web Mercator の XYZ タイル（`tileSize` の既定は 256）。 |
 | `render({ bbox, size })` | 経緯度の範囲 `[west, south, east, north]`。長辺が `size` px になるようにカメラを合わせます。`west > east` は反子午線をまたぐ範囲です。 |
+| `projected(crs).renderView({ center, zoom, bearing?, width, height })` | CRS のカメラ。引数は Mercator の `renderView` と同じです。`center` は経緯度で、`bearing` が 0 なら CRS の y 軸が上です（`bearing` は y 軸から時計回りの角度で、その向きが上になります）。ズームは `addProjection` で登録した GL JS と同じです（ズーム 0 で格子のタイル 0/0/0 が 512 CSS px）。`center` が CRS の定義域の外なら `RangeError` になります。 |
+| `projected(crs).renderTile({ z, x, y, tileSize? })` | CRS の格子のタイル（`tileSize` の既定は 256）。 |
 | `projected(crs).render({ bbox, width, height })` | CRS の範囲 `[minX, minY, maxX, maxY]`（CRS の単位）。 |
-| `projected(crs).renderTile({ z, x, y, tileSize? })` | CRS の格子のタイル。 |
-| `projected(crs).renderView({ center, zoom, width, height })` | CRS のカメラ。`center` は経緯度、北が上です（`bearing` は使えません）。ズームは `addProjection` で登録した GL JS と同じです（ズーム 0 で格子のタイル 0/0/0 が 512 CSS px）。 |
 
-`projected(crs)` の描画は、1 CSS px あたりの CRS 単位を EPSG:3857 の赤道と同じ縮尺とみなしたズーム（OGC のスケール分母と同じ考え方。経緯度は 360° を世界の一周とします）でスタイルを評価し、ソースのタイルを選びます。ズームは場所によらないので、同じ格子のズームのタイルどうしは境界で揃います。高緯度では同じ地上解像度の Mercator 地図より高いズームになります。
+`projected(crs)` の描画は、1 CSS px あたりの CRS 単位を EPSG:3857 の赤道と同じ縮尺とみなしたズーム（OGC のスケール分母と同じ考え方。経緯度は 360° を世界の一周とします）でスタイルを評価し、ソースのタイルを選びます。ズームは場所によらないので、同じ格子のズームのタイルどうしは境界で揃います。高緯度では同じ地上解像度の Mercator 地図より高いズームになります。このズームは `renderView` に渡す格子のズームとは別で、両者が一致するのは `extentAtZoom0` が EPSG:3857 の世界の幅（約 40,075 km、経緯度なら 360°）のときです。
 
 共通のオプションは2つです。
 
@@ -141,7 +144,7 @@ Style オブジェクト（公式の `StyleSpecification` 型）を受け取り�
 - `projjson`:CRS の PROJJSON
 - `tileMatrixSet`:`{ origin: [minX, maxY], extentAtZoom0 }`。タイル 0/0/0 は左上が `origin`、一辺 `extentAtZoom0` の正方形で、ズームごとに4分割します。x は東、y は南に増えます。
 
-上の `render`・`renderTile` のほかに、GL JS に描かせるためのメソッドが2つあります。
+上の `renderView`・`renderTile`・`render` のほかに、GL JS に描かせるためのメソッドが2つあります。
 
 #### `getTile({ source, z, x, y })`
 

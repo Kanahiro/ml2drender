@@ -111,9 +111,9 @@ impl Transform {
         self.warp.as_ref().map(|w| w.pixel_world())
     }
 
-    /// See `Warp::pixel_origin`.
-    pub fn pixel_origin(&self) -> Option<[f64; 2]> {
-        self.warp.as_ref().map(|w| w.pixel_origin())
+    /// See `Warp::pixel_grid`.
+    pub fn pixel_grid(&self) -> Option<crate::reproject::PixelGrid> {
+        self.warp.as_ref().map(|w| w.pixel_grid())
     }
 
     /// See `Warp::central_x`.

@@ -1,9 +1,10 @@
 import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification, SourceSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 
-/** A Web Mercator camera. */
+/** A camera, of Web Mercator (`MapRenderer.renderView`) or of a CRS (`ProjectedRenderer.renderView`). */
 export interface View {
   center: [lng: number, lat: number];
   zoom: number;
+  /** Degrees clockwise from north (in a CRS: from its y axis) of the direction that is up. Default: 0. */
   bearing?: number;
   width: number;
   height: number;
@@ -96,10 +97,10 @@ export interface ProjectedRenderer {
   /** `render` of tile `z/x/y` of the CRS's grid, `tileSize` CSS pixels (default 256) on a side. */
   renderTile(tile: Tile): Promise<RenderedImage>;
   /**
-   * `render` of MapLibre GL JS's camera in the CRS (registered with `addProjection`): `center` in degrees, north up,
-   * and tile 0/0/0 of the grid in 512 CSS pixels at zoom 0. No `bearing`.
+   * `render` of MapLibre GL JS's camera in the CRS (registered with `addProjection`): `center` in degrees, tile
+   * 0/0/0 of the grid in 512 CSS pixels at zoom 0, turned around `center` by `bearing`.
    */
-  renderView(view: Omit<View, 'bearing'>): Promise<RenderedImage>;
+  renderView(view: View): Promise<RenderedImage>;
   /**
    * Fetch the data of `tile.source` and return it in tile `z/x/y` of the CRS's grid, for MapLibre GL JS to draw the
    * style in the CRS from (see `toStyle`), not a picture of the map:
@@ -173,7 +174,7 @@ interface WasmExports {
   out_len(): number;
   renderer_new(stylePtr: number, styleLen: number, ...view: ViewArgs): number;
   renderer_set_view(handle: number, ...view: ViewArgs): void;
-  renderer_set_projected_view(handle: number, projjsonPtr: number, projjsonLen: number, minX: number, minY: number, maxX: number, maxY: number, width: number, height: number, pixelRatio: number, margin: number): number;
+  renderer_set_projected_view(handle: number, projjsonPtr: number, projjsonLen: number, minX: number, minY: number, maxX: number, maxY: number, bearing: number, width: number, height: number, pixelRatio: number, margin: number): number;
   renderer_set_ticket(handle: number, ticket: number): void;
   renderer_set_keep_buckets(handle: number, keep: number): void;
   renderer_needs(handle: number): number;
@@ -508,24 +509,23 @@ export class MapRenderer {
       const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
       return [minX, maxY - s, minX + s, maxY];
     };
-    const render = (view: ProjectedBox) => this.draw(view, ...this.projectedArgs(projjson, view));
+    const render = (view: ProjectedBox, bearing?: number) => this.draw(view, ...this.projectedArgs(projjson, view, bearing));
     return {
       crs,
-      render,
+      render: (view) => render(view),
       renderTile: ({ tileSize = 256, pixelRatio, margin, ...tile }) => {
         if (!Number.isInteger(tileSize) || tileSize < 1) throw new RangeError('tileSize must be a positive integer');
         return render({ bbox: box(tile), width: tileSize, height: tileSize, pixelRatio, margin });
       },
-      renderView: async ({ center: [lng, lat], zoom, width, height, pixelRatio, margin, ...rest }) => {
-        // ponytail: north up only; a bearing needs a rotation in the core's `Warp` (bbox ↔ output pixels).
-        if ((rest as View).bearing) throw new RangeError('bearing is not supported in a CRS');
-        if (![lng, lat, zoom].every(Number.isFinite)) throw new RangeError('center and zoom must be finite');
+      renderView: async ({ center: [lng, lat], zoom, bearing = 0, width, height, pixelRatio, margin }) => {
+        if (![lng, lat, zoom, bearing].every(Number.isFinite)) throw new RangeError('center, zoom and bearing must be finite');
         const [x, y] = this.forward(projjson, lng, lat);
         if (!Number.isFinite(x) || !Number.isFinite(y)) throw new RangeError('center is outside the CRS');
         // CRS units per CSS pixel.
         const unit = extentAtZoom0 / (512 * 2 ** zoom);
         const [w, h] = [(width / 2) * unit, (height / 2) * unit];
-        return render({ bbox: [x - w, y - h, x + w, y + h], width, height, pixelRatio, margin });
+        // The box at bearing 0, which the core turns around its center.
+        return render({ bbox: [x - w, y - h, x + w, y + h], width, height, pixelRatio, margin }, bearing);
       },
       getTile: (tile) => {
         if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
@@ -569,15 +569,15 @@ export class MapRenderer {
     }
   }
 
-  /** The core arguments and `setView` of a view of the CRS `projjson` (encoded). */
-  private projectedArgs(projjson: Uint8Array, view: ProjectedBox): [ViewArgs, (handle: number) => void] {
+  /** The core arguments and `setView` of a view of the CRS `projjson` (encoded), turned around its center by `bearing`. */
+  private projectedArgs(projjson: Uint8Array, view: ProjectedBox, bearing = 0): [ViewArgs, (handle: number) => void] {
     const margin = marginArg(view.margin);
     const size = sizeArgs(view);
     if (!view.bbox.every(Number.isFinite)) throw new RangeError('bbox must be finite');
     // The initial camera is replaced before the first `needs`.
     return [[0, 0, 0, 0, ...size, 0], (handle) => {
       const ok = this.withBytes(projjson, (ptr, len) =>
-        this.wasm.renderer_set_projected_view(handle, ptr, len, ...view.bbox, ...size, margin));
+        this.wasm.renderer_set_projected_view(handle, ptr, len, ...view.bbox, bearing, ...size, margin));
       if (!ok) throw new Error(decoder.decode(this.output()));
     }];
   }

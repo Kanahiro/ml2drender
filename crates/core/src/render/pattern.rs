@@ -26,12 +26,12 @@ pub struct TilePattern {
     pub tile_ratio: f64,
     pixel_upper: [f32; 2],
     pixel_lower: [f32; 2],
-    /// In a projected output: the output's pixel origin (`Transform::pixel_origin`) and device
+    /// In a projected output: the output's pixel grid (`Transform::pixel_grid`) and device
     /// pixels per pattern pixel. Patterns are laid out on the output's pixels there, one pattern
     /// pixel per CSS pixel (a Mercator map's scale at an integer zoom), instead of following the
     /// projected tiles. Not scaled by the view's zoom: that differs between neighboring tiles of a
     /// projected map (it follows the Mercator scale at each tile's center), and so would the pattern.
-    screen: Option<([f64; 2], f64)>,
+    screen: Option<(crate::reproject::PixelGrid, f64)>,
 }
 
 impl TilePattern {
@@ -47,14 +47,18 @@ impl TilePattern {
             ((i >> 16) as f32, (i & 0xFFFF) as f32)
         };
         let ((ux, lx), (uy, ly)) = (split(px), split(py));
-        let screen = ctx.transform.pixel_origin().map(|o| (o, ctx.transform.pixel_ratio));
+        let screen = ctx.transform.pixel_grid().map(|g| (g, ctx.transform.pixel_ratio));
         TilePattern { tile_ratio: size_at_nearest / EXTENT, pixel_upper: [ux, uy], pixel_lower: [lx, ly], screen }
     }
 
     /// The pattern position of a vertex at tile position `pos`, drawn at output pixel `screen`.
     pub fn pos(&self, size: [f32; 2], pos: [f64; 2], screen: [f64; 2]) -> [f32; 2] {
-        let Some((origin, k)) = self.screen else {
+        let Some(((origin, turn), k)) = self.screen else {
             return self.pattern_pos(size, pos);
+        };
+        let screen = match turn {
+            Some((s, c)) => [screen[0] * c + screen[1] * s, screen[1] * c - screen[0] * s],
+            None => screen,
         };
         std::array::from_fn(|i| {
             let size = size[i] as f64;

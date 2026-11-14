@@ -2,7 +2,7 @@
 //! vertices (fill, line, circle, heatmap, symbol, background) are drawn straight into the target
 //! grid with their vertices projected ([`Warp::world_to_screen`]), segments split so that they
 //! curve, and pixel lengths (line widths, radii, text) extruded in screen space. Image patterns
-//! and dashes repeat evenly on the output's pixels ([`Warp::pixel_origin`]). Rasters and DEMs are
+//! and dashes repeat evenly on the output's pixels ([`Warp::pixel_grid`]). Rasters and DEMs are
 //! drawn in Web Mercator and the picture is warped into the target grid ([`Warp::composite`]).
 //! Tile clipping uses the Mercator position of each output pixel
 //! ([`Warp::pixel_world`]), as tile boundaries curve.
@@ -21,8 +21,11 @@ pub struct ProjectedView {
     /// Area, Equal Earth and PROJ's Geostationary Satellite, on any ellipsoid, without datum shifts.
     /// Coordinates are (easting, northing) / (longitude, latitude) whatever the axis order.
     pub projjson: String,
-    /// `[min_x, min_y, max_x, max_y]` in CRS units (degrees for longlat).
+    /// `[min_x, min_y, max_x, max_y]` in CRS units (degrees for longlat): what is drawn at bearing 0.
     pub bbox: [f64; 4],
+    /// Degrees the view is turned around the center of `bbox`, like a Mercator camera's: the
+    /// direction that many degrees clockwise from the CRS's y axis is up.
+    pub bearing: f64,
     /// CSS pixels; the output is `round(width*pixel_ratio)` × `round(height*pixel_ratio)`.
     pub width: u32,
     pub height: u32,
@@ -30,6 +33,9 @@ pub struct ProjectedView {
     /// CSS pixels rendered around the view before cropping to the requested output size.
     pub margin: u32,
 }
+
+/// See [`Warp::pixel_grid`]: the grid position of output pixel (0, 0), and the (sin, cos) of a bearing.
+pub type PixelGrid = ([f64; 2], Option<(f64, f64)>);
 
 /// Largest output side, margins included, in device pixels (bounds the per-pixel buffers).
 const MAX_SIZE: usize = 16384;
@@ -43,6 +49,9 @@ const GRID: usize = 8;
 pub struct Warp {
     proj: Projection,
     bbox: [f64; 4],
+    /// (sin, cos) of the turn of a bearing, from the pixels of `bbox` to the output's (as
+    /// `Transform`'s for a Mercator camera).
+    turn: Option<(f64, f64)>,
     /// Rendered size in device pixels, margins included.
     pub size: [usize; 2],
     /// Rendered size in CSS pixels.
@@ -75,6 +84,11 @@ impl Warp {
         if !(b[2] > b[0] && b[3] > b[1]) || out[0] == 0 || out[1] == 0 {
             return Err(Error::Unsupported(format!("empty projected view {b:?}")));
         }
+        if !view.bearing.is_finite() {
+            return Err(Error::Unsupported("projected view without a finite bearing".into()));
+        }
+        // The Mercator camera's rotation (`Transform::new`), and the Mercator view below has it too.
+        let (sin, cos) = (-view.bearing.to_radians()).sin_cos();
         // The margin extends the box by whole device pixels of the output's resolution.
         let margin = (view.margin as f64 * view.pixel_ratio).round() as usize;
         if out.iter().any(|&n| n.saturating_add(margin.saturating_mul(2)) > MAX_SIZE) {
@@ -98,6 +112,7 @@ impl Warp {
         let mut warp = Warp {
             proj,
             bbox: b,
+            turn: (view.bearing % 360.0 != 0.0).then_some((sin, cos)),
             size,
             css_size,
             margin,
@@ -133,9 +148,11 @@ impl Warp {
         // wherever they are. A local scale would change across the view and seam neighboring tiles.
         let turn = if matches!(warp.proj, Projection::LongLat) { 360.0 } else { 2.0 * std::f64::consts::PI * 6378137.0 };
         let mut zoom = (turn / (512.0 * (ux * uy).sqrt() * view.pixel_ratio)).log2();
+        // The nodes' box along the axes of the Mercator view, which has the view's bearing.
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
         for n in nodes.iter().filter(|n| n[0].is_finite()) {
-            (x0, y0, x1, y1) = (x0.min(n[0]), y0.min(n[1]), x1.max(n[0]), y1.max(n[1]));
+            let r = [n[0] * cos - n[1] * sin, n[0] * sin + n[1] * cos];
+            (x0, y0, x1, y1) = (x0.min(r[0]), y0.min(r[1]), x1.max(r[0]), y1.max(r[1]));
         }
         // ponytail: one zoom for the whole view; far from the center (e.g. continental views) the
         // picture is resampled up or down. Bound the Mercator render to 16× the output area.
@@ -153,14 +170,15 @@ impl Warp {
         // Sized for the zoom the view is clamped to, or the picture would not cover the view.
         let zoom = zoom.max(tile::MIN_ZOOM);
         let [w, h] = css(zoom);
-        let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let (rx, ry) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let (mx, my) = (rx * cos + ry * sin, ry * cos - rx * sin);
         let mercator = View {
             center: [
                 mx * 360.0 - 180.0,
                 tile::mercator_lat(my),
             ],
             zoom,
-            bearing: 0.0,
+            bearing: view.bearing,
             // A pixel of padding on each side for bilinear sampling.
             width: w.ceil() as u32 + 2,
             height: h.ceil() as u32 + 2,
@@ -171,8 +189,25 @@ impl Warp {
         Ok((warp, Some(mercator)))
     }
 
+    /// A pixel position in the output at bearing 0 → in the output.
+    fn turned(&self, p: [f64; 2]) -> [f64; 2] {
+        let Some((s, c)) = self.turn else { return p };
+        let (hx, hy) = (self.size[0] as f64 / 2.0, self.size[1] as f64 / 2.0);
+        let (dx, dy) = (p[0] - hx, p[1] - hy);
+        [dx * c - dy * s + hx, dx * s + dy * c + hy]
+    }
+
+    /// The inverse of `turned`.
+    fn unturned(&self, p: [f64; 2]) -> [f64; 2] {
+        let Some((s, c)) = self.turn else { return p };
+        let (hx, hy) = (self.size[0] as f64 / 2.0, self.size[1] as f64 / 2.0);
+        let (dx, dy) = (p[0] - hx, p[1] - hy);
+        [dx * c + dy * s + hx, dy * c - dx * s + hy]
+    }
+
     /// Longitude/latitude at an output pixel position, if Mercator has it.
     fn lnglat(&self, x: f64, y: f64) -> Option<[f64; 2]> {
+        let [x, y] = self.unturned([x, y]);
         let b = self.bbox;
         self.proj
             .inverse([
@@ -225,16 +260,21 @@ impl Warp {
         Some(self.world_to_screen(p)).filter(|s| s[0].is_finite())
     }
 
-    /// The output's pixel (0, 0) in a grid of the CRS's own: x = CRS x, y = −CRS y, both in output
-    /// device pixels. Anything laid out on it (e.g. image patterns) lines up across views of the
-    /// same resolution, such as neighboring tiles.
-    pub fn pixel_origin(&self) -> [f64; 2] {
+    /// The output's pixels in a grid of the CRS's own (x = CRS x, y = −CRS y, both in output device
+    /// pixels): pixel `p` is at the origin returned plus `p`, first turned back by the (sin, cos)
+    /// returned if the view has a bearing (`x·cos + y·sin`, `y·cos − x·sin`). Anything laid out on
+    /// the grid (e.g. image patterns) lines up across views of the same resolution, such as
+    /// neighboring tiles, and turns with the map.
+    pub fn pixel_grid(&self) -> PixelGrid {
         let b = self.bbox;
         let (ux, uy) = (
             (b[2] - b[0]) / self.size[0] as f64,
             (b[3] - b[1]) / self.size[1] as f64,
         );
-        [b[0] / ux, -b[3] / uy]
+        // Of the output at bearing 0, whose pixel `q` is the output's `turned(q)`.
+        let origin = [b[0] / ux, -b[3] / uy];
+        let [x, y] = self.unturned([0.0; 2]);
+        ([origin[0] + x, origin[1] + y], self.turn)
     }
 
     /// Mercator (world = 1) → output device pixel. Longitudes are not folded: past the
@@ -243,10 +283,10 @@ impl Warp {
         let lat = tile::mercator_lat(p[1]);
         let [x, y] = self.proj.forward_continuous(p[0] * 360.0 - 180.0, lat);
         let b = self.bbox;
-        [
+        self.turned([
             (x - b[0]) / (b[2] - b[0]) * self.size[0] as f64,
             (b[3] - y) / (b[3] - b[1]) * self.size[1] as f64,
-        ]
+        ])
     }
 
     /// Mercator coordinates (world = 1) of each output pixel center, row-major; NaN outside the
@@ -591,7 +631,7 @@ mod tests {
 
     #[test]
     fn holes_across_the_output_edge_stay_after_their_outer_ring() {
-        let view = ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
+        let view = ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], bearing: 0.0, width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
         let (warp, _) = Warp::new(&view).unwrap();
         let m = |lng: f64, lat: f64| [tile::mercator_x(lng), tile::mercator_y(lat)];
         // MVT orientation: the outer ring clockwise on screen, the hole counterclockwise. The hole
@@ -609,7 +649,7 @@ mod tests {
         // A world of Equal Earth, and a ring (MVT orientation) across 180° with a bay from the west
         // that reaches past it: clipped, its crossings (60°, -60°, 20°, 30°) join back and forth
         // along the edge, where the bay cuts what is left in two.
-        let view = ProjectedView { projjson: test_crs::projected("Equal Earth", test_crs::WGS84, &[]), bbox: [-1.8e7, -9e6, 1.8e7, 9e6], width: 512, height: 256, pixel_ratio: 1.0, margin: 0 };
+        let view = ProjectedView { projjson: test_crs::projected("Equal Earth", test_crs::WGS84, &[]), bbox: [-1.8e7, -9e6, 1.8e7, 9e6], bearing: 0.0, width: 512, height: 256, pixel_ratio: 1.0, margin: 0 };
         let (warp, _) = Warp::new(&view).unwrap();
         let m = |lng: f64, lat: f64| [tile::mercator_x(lng), tile::mercator_y(lat)];
         let ring = vec![m(170.0, 60.0), m(190.0, 60.0), m(190.0, -60.0), m(170.0, -60.0), m(170.0, 20.0), m(185.0, 20.0), m(185.0, 30.0), m(170.0, 30.0), m(170.0, 60.0)];
@@ -629,6 +669,7 @@ mod tests {
                 &[("Latitude of standard parallel", -71.0), ("Longitude of origin", 0.0)],
             ),
             bbox: [-4e6, -4e6, 4e6, 4e6],
+            bearing: 0.0,
             width: 128,
             height: 128,
             pixel_ratio: 1.0,
@@ -644,6 +685,35 @@ mod tests {
     }
 
     #[test]
+    fn a_bearing_turns_the_view_around_its_center() {
+        // Longlat 0°–10° at 10 px per degree, turned so that east is up.
+        let view = ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], bearing: 90.0, width: 100, height: 100, pixel_ratio: 1.0, margin: 0 };
+        let (warp, mercator) = Warp::new(&view).unwrap();
+        let s = warp.world_to_screen([tile::mercator_x(7.5), tile::mercator_y(4.0)]);
+        assert!((s[0] - 60.0).abs() < 1e-6 && (s[1] - 25.0).abs() < 1e-6, "{s:?}");
+        let p = warp.lnglat(s[0], s[1]).unwrap();
+        assert!((p[0] - 7.5).abs() < 1e-9 && (p[1] - 4.0).abs() < 1e-9, "{p:?}");
+        // Rasters are drawn by a Mercator camera turned the same way, which sees the whole output.
+        assert_eq!(mercator.unwrap().bearing, 90.0);
+        let polar = ProjectedView {
+            projjson: test_crs::projected("Polar Stereographic (variant B)", test_crs::WGS84, &[("Latitude of standard parallel", 70.0), ("Longitude of origin", -45.0)]),
+            bbox: [0.0, -3e6, 2e6, -2e6],
+            bearing: 40.0,
+            width: 200,
+            height: 100,
+            pixel_ratio: 1.0,
+            margin: 8,
+        };
+        let (warp, mercator) = Warp::new(&polar).unwrap();
+        let m = mercator.unwrap();
+        let t = Transform::new(m.center, m.zoom, m.bearing, m.width as f64, m.height as f64, m.pixel_ratio);
+        for n in warp.pixel_world() {
+            let s = t.world_to_screen([n[0] * t.world_size, n[1] * t.world_size]);
+            assert!(s[0] >= 0.0 && s[0] <= m.width as f64 && s[1] >= 0.0 && s[1] <= m.height as f64, "{n:?} at {s:?} of {m:?}");
+        }
+    }
+
+    #[test]
     fn tiles_of_a_grid_level_share_their_zoom() {
         // Polar stereographic tiles at 70°N and 71°N: their local Mercator scales differ.
         let zoom = |y: f64| {
@@ -654,6 +724,7 @@ mod tests {
                     &[("Latitude of standard parallel", 70.0), ("Longitude of origin", -45.0)],
                 ),
                 bbox: [500e3, y, 550e3, y + 50e3],
+                bearing: 0.0,
                 width: 256,
                 height: 256,
                 pixel_ratio: 2.0,

@@ -1,5 +1,5 @@
 // `projected(crs).renderView` is GL JS's camera on the CRS's grid: `center` lands on the middle of the
-// image, and a CSS pixel is `extentAtZoom0 / (512 * 2^zoom)` CRS units.
+// image, a CSS pixel is `extentAtZoom0 / (512 * 2^zoom)` CRS units, and `bearing` turns the map around `center`.
 // Run: node --experimental-transform-types tests/projected-view.ts (after pnpm build:wasm)
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -42,6 +42,11 @@ assert.deepEqual([image.width, image.height], [256, 128]);
 assert.equal(alpha(128, 64), 255, 'the center is in the middle');
 assert.equal(alpha(228, 24), 255, 'a pixel is extentAtZoom0 / (512 * 2^zoom) CRS units');
 assert.equal(alpha(178, 44), 0);
-// @ts-expect-error No bearing in a CRS.
-await assert.rejects(renderer.projected(crs).renderView({ center, zoom, bearing: 30, width: 256, height: 128 }), RangeError);
+// Bearing 90: east is up, north to the left.
+const turned = await renderer.projected(crs).renderView({ center, zoom, bearing: 90, width: 256, height: 256 });
+const turnedAlpha = (px: number, py: number) => turned.data[(py * turned.width + px) * 4 + 3];
+assert.equal(turnedAlpha(128, 128), 255, 'the map turns around the center');
+assert.equal(turnedAlpha(88, 28), 255, '100 px east is 100 px up, 40 px north is 40 px left');
+assert.equal(turnedAlpha(228, 88), 0);
+await assert.rejects(renderer.projected(crs).renderView({ center, zoom, bearing: NaN, width: 256, height: 128 }), RangeError);
 console.log('ok: projected renderView');
