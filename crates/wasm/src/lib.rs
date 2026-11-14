@@ -106,13 +106,14 @@ pub unsafe extern "C" fn renderer_set_projected_view(
     min_y: f64,
     max_x: f64,
     max_y: f64,
+    bearing: f64,
     width: u32,
     height: u32,
     pixel_ratio: f64,
     margin: u32,
 ) -> u32 {
     let projjson = String::from_utf8_lossy(unsafe { bytes(projjson_ptr, projjson_len) }).into_owned();
-    let view = ProjectedView { projjson, bbox: [min_x, min_y, max_x, max_y], width, height, pixel_ratio, margin };
+    let view = ProjectedView { projjson, bbox: [min_x, min_y, max_x, max_y], bearing, width, height, pixel_ratio, margin };
     match unsafe { &mut *r }.set_projected_view(&view) {
         Ok(()) => 1,
         Err(e) => {

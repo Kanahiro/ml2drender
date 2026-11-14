@@ -1744,7 +1744,7 @@ mod tests {
     fn exports_sources_as_projected_vector_tiles() {
         use expression::Value;
         // Longlat 0°–10° on 4096 units: (x°, y°) is at (409.6 x, 409.6 (10 - y)).
-        let view = reproject::ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
+        let view = reproject::ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], bearing: 0.0, width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
         let near = |p: [i32; 2], lng: f64, lat: f64| (p[0] as f64 - 409.6 * lng).abs() < 2.0 && (p[1] as f64 - 409.6 * (10.0 - lat)).abs() < 2.0;
         let style = r#"{"version":8,"sources":{
             "g":{"type":"geojson","data":{"type":"FeatureCollection","features":[
@@ -1819,7 +1819,7 @@ mod tests {
     #[test]
     fn exports_rasters_images_and_dems_on_the_output_grid() {
         // Longlat 0°–10° on 100 px: pixel x is at longitude (x + 0.5) / 10.
-        let view = reproject::ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], width: 100, height: 100, pixel_ratio: 1.0, margin: 0 };
+        let view = reproject::ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], bearing: 0.0, width: 100, height: 100, pixel_ratio: 1.0, margin: 0 };
         let style = r#"{"version":8,"sources":{
             "r":{"type":"raster","tiles":["r/{z}/{x}/{y}"],"tileSize":256},
             "i":{"type":"image","url":"image.png","coordinates":[[2,8],[8,8],[8,2],[2,2]]},
@@ -1880,7 +1880,7 @@ mod tests {
             r#"{"type":"geojson","data":{"type":"Polygon","coordinates":[[[-180,-85],[180,-85],[180,85],[-180,85],[-180,-85]],[[130,-10],[130,10],[150,10],[150,-10],[130,-10]]]}}"#,
         );
         let r = 5_500_000.0;
-        let view = reproject::ProjectedView { projjson: test_crs::himawari(), bbox: [-r, -r, r, r], width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
+        let view = reproject::ProjectedView { projjson: test_crs::himawari(), bbox: [-r, -r, r, r], bearing: 0.0, width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
         let mut renderer = Renderer::new(&style, View::tile(0, 0, 0, 512)).unwrap();
         renderer.set_projected_view(&view).unwrap();
         let mut export = |source: &str| {
@@ -1913,6 +1913,64 @@ mod tests {
         let line = export("line");
         let west = line.iter().flatten().map(|p| p[0]).min().unwrap() as f64;
         assert!((west - (2048.0 - limb)).abs() < 3.0, "{west} vs {limb}");
+    }
+
+    #[test]
+    fn projected_bearing_matches_the_mercator_camera() {
+        // EPSG:3857 as a projected view draws what the Mercator camera of the same bearing does:
+        // fills, their patterns, lines, circles and icons that rotate with the map.
+        let style = r##"{"version":8,"sprite":"/sprite","sources":{"g":{"type":"geojson","data":{"type":"FeatureCollection","features":[
+            {"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-40,-10],[30,-25],[45,30],[-10,45],[-40,-10]]]}},
+            {"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[-60,40],[0,10],[60,-45]]}},
+            {"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[-30,-20]}}]}}},
+            "layers":[{"id":"bg","type":"background","paint":{"background-color":"#fff"}},
+            {"id":"f","type":"fill","source":"g","filter":["==","$type","Polygon"],"paint":{"fill-pattern":"marker"}},
+            {"id":"l","type":"line","source":"g","filter":["==","$type","LineString"],"paint":{"line-width":6,"line-color":"#080"}},
+            {"id":"c","type":"circle","source":"g","filter":["==","$type","Point"],"paint":{"circle-radius":20,"circle-color":"#00f"}},
+            {"id":"s","type":"symbol","source":"g","filter":["==","$type","Point"],"layout":{"icon-image":"marker","icon-size":3,"icon-rotation-alignment":"map"}}]}"##;
+        // An 8 px image without symmetry: black, with a red and a (smaller) yellow corner.
+        let mut image = Vec::new();
+        for i in 0..64 {
+            image.extend(match (i % 8, i / 8) {
+                (x, y) if x < 4 && y < 4 => [255, 0, 0, 255],
+                (x, y) if x >= 6 && y < 2 => [255, 255, 0, 255],
+                _ => [0, 0, 0, 255],
+            });
+        }
+        let png = encode_png(&image, 8, 8).unwrap();
+        let render = |r: &mut Renderer| {
+            for need in r.needs() {
+                let json = br#"{"marker":{"x":0,"y":0,"width":8,"height":8,"pixelRatio":1}}"#;
+                r.provide(&need.url, Some(if need.url.ends_with(".json") { json } else { &png }));
+            }
+            r.render().unwrap()
+        };
+        // Zoom 1 on 256 px: 128 px of 2πR / 1024 m around the origin.
+        let h = 128.0 * 2.0 * std::f64::consts::PI * 6378137.0 / 1024.0;
+        let different = |bearing: f64, projected_bearing: f64| {
+            let camera = View { center: [0.0, 0.0], zoom: 1.0, bearing, width: 256, height: 256, pixel_ratio: 1.0, margin: 0 };
+            let expected = render(&mut Renderer::new(style, camera).unwrap());
+            let mut r = Renderer::new(style, View::tile(0, 0, 0, 512)).unwrap();
+            let view = reproject::ProjectedView {
+                projjson: test_crs::projected("Popular Visualisation Pseudo Mercator", test_crs::WGS84, &[]),
+                bbox: [-h, -h, h, h],
+                bearing: projected_bearing,
+                width: 256,
+                height: 256,
+                pixel_ratio: 1.0,
+                margin: 0,
+            };
+            r.set_projected_view(&view).unwrap();
+            let actual = render(&mut r);
+            let far = |(a, b): (&[u8], &[u8])| a.iter().zip(b).any(|(a, b)| a.abs_diff(*b) > 64);
+            expected.chunks(4).zip(actual.chunks(4)).filter(|&p| far(p)).count() as f64 / (256.0 * 256.0)
+        };
+        for bearing in [0.0, 30.0, -135.0] {
+            let d = different(bearing, bearing);
+            assert!(d < 0.001, "bearing {bearing}: {:.2}% of the pixels differ", d * 100.0);
+        }
+        // Not by accident: another bearing is another picture.
+        assert!(different(30.0, 0.0) > 0.1);
     }
 
     #[test]
@@ -1954,6 +2012,7 @@ mod tests {
             let ll = reproject::ProjectedView {
                 projjson: test_crs::geographic(),
                 bbox: [0.0, 0.0, 10.0, 10.0],
+                bearing: 0.0,
                 width: 100,
                 height: 100,
                 pixel_ratio: 1.0,
@@ -1989,6 +2048,7 @@ mod tests {
         let pole = reproject::ProjectedView {
             projjson: test_crs::geographic(),
             bbox: [0.0, 95.0, 10.0, 105.0],
+            bearing: 0.0,
             width: 10,
             height: 10,
             pixel_ratio: 1.0,
@@ -1998,6 +2058,7 @@ mod tests {
         let edge = reproject::ProjectedView {
             projjson: test_crs::geographic(),
             bbox: [0.0, 80.0, 10.0, 90.0],
+            bearing: 0.0,
             width: 10,
             height: 10,
             pixel_ratio: 1.0,
@@ -2018,6 +2079,7 @@ mod tests {
         let p = reproject::ProjectedView {
             projjson: utm.clone(),
             bbox: [300_000.0, 0.0, 1_100_000.0, 1_000_000.0],
+            bearing: 0.0,
             width: 400,
             height: 500,
             pixel_ratio: 2.0,
@@ -2061,6 +2123,7 @@ mod tests {
         let view = reproject::ProjectedView {
             projjson: test_crs::himawari(),
             bbox: [-r, -r, r, r],
+            bearing: 0.0,
             width: 128,
             height: 128,
             pixel_ratio: 1.0,
@@ -2117,6 +2180,7 @@ mod tests {
                 ],
             ),
             bbox: [1_000_000.0, 0.0, 8_000_000.0, 7_000_000.0],
+            bearing: 0.0,
             width: 64,
             height: 64,
             pixel_ratio: 1.0,
@@ -2148,6 +2212,7 @@ mod tests {
         let geos = reproject::ProjectedView {
             projjson: test_crs::himawari(),
             bbox: [-r, -r, r, r],
+            bearing: 0.0,
             width: 256,
             height: 256,
             pixel_ratio: 1.0,
@@ -2219,6 +2284,7 @@ mod tests {
                 ],
             ),
             bbox: [41_000.0, -30_000.0, 101_000.0, 30_000.0],
+            bearing: 0.0,
             width: 256,
             height: 256,
             pixel_ratio: 2.0,
@@ -2242,6 +2308,7 @@ mod tests {
             let view = reproject::ProjectedView {
                 projjson: test_crs::geographic(),
                 bbox: [-1.0, -1.0, 11.0, 11.0],
+                bearing: 0.0,
                 width: 120,
                 height: 120,
                 pixel_ratio: 1.0,
@@ -2272,6 +2339,7 @@ mod tests {
         let view = reproject::ProjectedView {
             projjson: test_crs::projected("Equal Earth", test_crs::WGS84, &[]),
             bbox: [-e, -e / 2.0, e, e / 2.0],
+            bearing: 0.0,
             width: 64,
             height: 32,
             pixel_ratio: 1.0,
@@ -2301,6 +2369,7 @@ mod tests {
         let view = reproject::ProjectedView {
             projjson: test_crs::projected("Equal Earth", test_crs::WGS84, &[]),
             bbox: [-e, -e / 2.0, e, e / 2.0],
+            bearing: 0.0,
             width: w as u32,
             height: h as u32,
             pixel_ratio: 1.0,
@@ -2347,6 +2416,7 @@ mod tests {
         let view = reproject::ProjectedView {
             projjson: crs.clone(),
             bbox: [x - d, y - d, x + d, y + d],
+            bearing: 0.0,
             width: 64,
             height: 64,
             pixel_ratio: 1.0,
@@ -2369,6 +2439,7 @@ mod tests {
         let view = reproject::ProjectedView {
             projjson: test_crs::himawari(),
             bbox: [-r, -r, r, r],
+            bearing: 0.0,
             width: 256,
             height: 256,
             pixel_ratio: 1.0,
@@ -2410,6 +2481,7 @@ mod tests {
         // Split into two tiles (each with its own Mercator zoom), the pattern runs on across the seam.
         let half = |x0: f64, x1: f64| reproject::ProjectedView {
             bbox: [x0, -r, x1, r],
+            bearing: 0.0,
             width: 128,
             ..view.clone()
         };

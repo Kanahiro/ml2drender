@@ -67,9 +67,12 @@ const utm = renderer.projected({
   tileMatrixSet: { origin: [-2_000_000, 6_000_000], extentAtZoom0: 4_000_000 },
 });
 
-await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000], width: 512, height: 512 }); // a box in CRS units
-await utm.renderTile({ z: 3, x: 4, y: 2 });                                                     // a tile of the CRS's grid
+await utm.renderView({ center: [139.767, 35.681], zoom: 6, bearing: 30, width: 800, height: 600 }); // a camera
+await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000], width: 512, height: 512 });      // a box in CRS units
+await utm.renderTile({ z: 3, x: 4, y: 2 });                                                         // a tile of the CRS's grid
 ```
+
+`renderView` takes `center` as lng/lat and a zoom of the `tileMatrixSet` grid. It draws the same area as MapLibre GL JS does with that `center`, `zoom` and `bearing` once the CRS is registered with `addProjection`.
 
 ### MapLibre GL JS in any CRS
 
@@ -118,6 +121,7 @@ Each one fetches what it needs and resolves to a `RenderedImage` of all the styl
 | `renderView({ center, zoom, bearing?, width, height })` | A Web Mercator camera. Zoom levels are GL JS's: at zoom 0 the world is 512 CSS px wide. |
 | `renderTile({ z, x, y, tileSize? })` | An XYZ tile of the Web Mercator grid. `tileSize` defaults to 256. |
 | `render({ bbox, size })` | A lng/lat box `[west, south, east, north]`, fitted so that its long side is `size` px. `west > east` crosses the antimeridian. |
+| `projected(crs).renderView({ center, zoom, bearing?, width, height })` | A camera in the CRS, with the same arguments as the Mercator `renderView`. `center` is lng/lat. `bearing` is the angle clockwise from the CRS's y axis of the direction that is up, so at 0 the y axis is up. Zoom levels are those of GL JS with the CRS registered by `addProjection`: at zoom 0, tile 0/0/0 of the grid is 512 CSS px wide. A `center` outside the CRS's domain throws a `RangeError`. |
 | `projected(crs).render({ bbox, width, height })` | A box `[minX, minY, maxX, maxY]` in CRS units. |
 | `projected(crs).renderTile({ z, x, y, tileSize? })` | A tile of the CRS's grid. |
 
@@ -141,9 +145,9 @@ Returns a `ProjectedRenderer` that draws in `crs`. The original renderer is unch
 - `projjson`: the CRS as PROJJSON.
 - `tileMatrixSet`: `{ origin: [minX, maxY], extentAtZoom0 }`. Tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`. Each zoom level splits every tile into four. x grows to the east and y to the south.
 
-Projected renders pick a zoom level from CRS units per CSS px, read on EPSG:3857's scale at the equator (the idea behind OGC scale denominators; for longlat, 360° is one trip around the world). That zoom drives style evaluation and source tile selection. It does not depend on position, so tiles of one grid zoom line up at their edges. At high latitudes the zoom is higher than a Mercator map of the same ground resolution would use.
+Projected renders pick a zoom level from CRS units per CSS px, read on EPSG:3857's scale at the equator (the idea behind OGC scale denominators; for longlat, 360° is one trip around the world). That zoom drives style evaluation and source tile selection. It does not depend on position, so tiles of one grid zoom line up at their edges. At high latitudes the zoom is higher than a Mercator map of the same ground resolution would use. It is not the grid zoom given to `renderView`: the two agree only when `extentAtZoom0` is the width of EPSG:3857's world (about 40,075 km, or 360° for longlat).
 
-Besides `render` and `renderTile`, it has two methods for MapLibre GL JS:
+Besides `renderView`, `render` and `renderTile`, it has two methods for MapLibre GL JS:
 
 #### getTile({ source, z, x, y })
 
