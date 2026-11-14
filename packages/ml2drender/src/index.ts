@@ -125,6 +125,8 @@ export interface RenderedImage {
   toPng(): Uint8Array<ArrayBuffer>;
   /** Encode `data` inside WASM as an owned, lossless WebP. */
   toWebp(): Uint8Array<ArrayBuffer>;
+  /** Encode `data` inside WASM as an owned JPEG of `quality` (1–100), flattened over black. */
+  toJpeg(quality: number): Uint8Array<ArrayBuffer>;
 }
 
 /** Style Spec layers supported by the 2D renderer. */
@@ -178,6 +180,7 @@ interface WasmExports {
   renderer_export_tile(handle: number, oldest: number): number;
   encode_png(ptr: number, len: number, width: number, height: number): number;
   encode_webp(ptr: number, len: number, width: number, height: number): number;
+  encode_jpeg(ptr: number, len: number, width: number, height: number, quality: number): number;
   renderer_free(handle: number): void;
   projection_new(ptr: number, len: number): number;
   projection_forward(handle: number, lng: number, lat: number): number;
@@ -555,13 +558,20 @@ export class MapRenderer {
     const width = Math.round(view.width * (view.pixelRatio ?? 1));
     const height = Math.round(view.height * (view.pixelRatio ?? 1));
     const data = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const encode = (format: typeof w.encode_png) => () => {
+    const encode = (format: (ptr: number, len: number, width: number, height: number) => number) => () => {
       if (!this.withBytes(bytes, (ptr, len) => format(ptr, len, width, height))) {
         throw new Error(decoder.decode(this.output()));
       }
       return this.output();
     };
-    return { width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp) };
+    return {
+      width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp),
+      toJpeg: (quality) => {
+        if (!Number.isFinite(quality)) throw new RangeError('quality must be finite');
+        const q = Math.min(100, Math.max(1, Math.round(quality)));
+        return encode((ptr, len, width, height) => w.encode_jpeg(ptr, len, width, height, q))();
+      },
+    };
   }
 
   /**
