@@ -1,11 +1,11 @@
 /**
  * The ml2drender renderer as a native Node.js addon (Node-API).
  *
- * This is the low-level sans-IO renderer: the host fetches every resource itself, in a loop of
- * {@link Renderer.needs} → fetch → {@link Renderer.provide}, then calls {@link Renderer.render}.
+ * {@link render} fetches the resources a style needs, with an optional custom loader.
+ * {@link Renderer} exposes the sans-IO steps for hosts that manage fetching and reuse themselves.
  * The work runs on libuv's thread pool, so the JavaScript thread stays free and several renderers
- * draw in parallel. It draws Web Mercator views only; for projected CRSs, reprojected sources and
- * resource fetching, use the WebAssembly package `@ml2drender/wasm`, which also runs in Node.js.
+ * draw in parallel. It draws Web Mercator views only; for projected CRSs and reprojected sources,
+ * use the WebAssembly package `@ml2drender/wasm`, which also runs in Node.js.
  *
  * @module
  */
@@ -96,6 +96,43 @@ function load(): Binding {
 
 const binding = load();
 
+async function fetchResource(url: string): Promise<Uint8Array | null> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    await response.body?.cancel();
+    if (response.status === 404) return null;
+    throw new Error(`Resource fetch failed: HTTP ${response.status} ${url}`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+/**
+ * RGBA8 pixels of `style` (style JSON) in `view`, fetching resources with HTTP `fetch` by default.
+ *
+ * @param style - Style JSON, with absolute resource URLs.
+ * @param view - The Web Mercator camera to draw.
+ * @param loadResource - Load bytes for a URL, or `null` for a missing resource (HTTP 404). Other
+ * failures must reject. Use this for authentication, caching, retries or non-HTTP resources.
+ * URLs are passed through as written in the style. Loads within each stage run concurrently.
+ * @returns Non-premultiplied RGBA8 pixels, row by row. Loading and rendering errors reject.
+ */
+export async function render(
+  style: string,
+  view: View,
+  loadResource: (url: string) => Promise<Uint8Array | null> = fetchResource,
+): Promise<Uint8Array> {
+  const renderer = new Renderer(style, view);
+  for (let round = 0; ; round++) {
+    const urls = await renderer.needs();
+    if (urls.length === 0) break;
+    if (round >= 32) throw new Error('Resource requests did not settle');
+    const resources = await Promise.all(urls.map((url) => loadResource(url)));
+    // Only fetching overlaps: calls on the native renderer must be awaited one at a time.
+    for (let i = 0; i < urls.length; i++) await renderer.provide(urls[i], resources[i]);
+  }
+  return renderer.render(0);
+}
+
 /**
  * Create a renderer of `style` (style JSON) for `view`. Throws on an invalid style.
  *
@@ -103,10 +140,11 @@ const binding = load();
  * ```ts
  * const renderer = new Renderer(JSON.stringify(style), view);
  * for (let urls = await renderer.needs(); urls.length > 0; urls = await renderer.needs()) {
- *   await Promise.all(urls.map(async (url) => {
+ *   for (const url of urls) {
  *     const response = await fetch(url);
+ *     if (!response.ok && response.status !== 404) throw new Error(`HTTP ${response.status} ${url}`);
  *     await renderer.provide(url, response.ok ? new Uint8Array(await response.arrayBuffer()) : null);
- *   }));
+ *   }
  * }
  * const rgba = await renderer.render(0);
  * ```

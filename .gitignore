@@ -7,3 +7,5 @@ dist
 /packages/ml2drender-node/native
 .venv/
 __pycache__/
+/crates/python/python/ml2drender/*.so
+/crates/python/python/ml2drender/*.pyd

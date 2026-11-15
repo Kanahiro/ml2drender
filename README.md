@@ -38,8 +38,8 @@ pip install ml2drender         # Python
 | Package | Runs in | API |
 |---|---|---|
 | [`@ml2drender/wasm`](#javascript-api) | browsers, Node.js, Deno, Cloudflare Workers | Everything below: fetching, Web Mercator and projected views, reprojected sources for GL JS. |
-| [`@ml2drender/node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | Low level: you fetch resources yourself. Web Mercator views only. Renders run in parallel off the JS thread. |
-| [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.11+ (Linux, macOS, Windows) | Low level, with a `load(url)` callback. Web Mercator views only. |
+| [`@ml2drender/node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | HTTP fetching by default, with an optional `loadResource(url)` callback. Web Mercator views only. Renders run in parallel off the JS thread. |
+| [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.11+ (Linux, macOS, Windows) | Async HTTP fetching with HTTPX by default, with an optional async `load(url)` callback. Web Mercator views only. |
 
 All three draw with the same Rust core. To build from source, see [Development](#development).
 

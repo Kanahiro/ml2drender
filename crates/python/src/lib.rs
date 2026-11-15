@@ -1,6 +1,5 @@
 //! Python bindings of the `ml2drender` renderer (the same sans-IO core as `crates/napi` and
-//! `crates/wasm`). `render` runs the whole `needs` → load → `provide` loop with a Python callable
-//! for loading; `Renderer` exposes the steps for hosts that fetch concurrently.
+//! `crates/wasm`). The Python package drives `Renderer` with asynchronous resource fetching.
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -81,33 +80,6 @@ impl Renderer {
     }
 }
 
-/// RGBA8 pixels of `style` (JSON) in `view`, loading each resource with `load(url)`, which returns
-/// its bytes or None when missing (like HTTP 404: a missing vector tile is empty, a missing
-/// raster tile is replaced by its parent). Exceptions from `load` propagate.
-#[pyfunction]
-fn render<'py>(py: Python<'py>, style: &str, view: View, load: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBytes>> {
-    let mut r = ml2drender::Renderer::new(style, view.0).map_err(error)?;
-    // Resources come in stages (style sources, tiles, glyph ranges), each found from the last.
-    for round in 0.. {
-        let needs = r.needs();
-        if needs.is_empty() {
-            break;
-        }
-        if round >= 32 {
-            return Err(PyRuntimeError::new_err("resource requests did not settle"));
-        }
-        for res in needs {
-            let data = load.call1((res.url.as_str(),))?;
-            if data.is_none() {
-                r.provide(&res.url, None);
-            } else {
-                r.provide(&res.url, Some(data.cast::<PyBytes>()?.as_bytes()));
-            }
-        }
-    }
-    Ok(PyBytes::new(py, &r.render().map_err(error)?))
-}
-
 /// Lossless PNG of RGBA8 pixels.
 #[pyfunction]
 fn encode_png<'py>(py: Python<'py>, rgba: &[u8], width: u32, height: u32) -> PyResult<Bound<'py, PyBytes>> {
@@ -134,11 +106,10 @@ fn encode_jpeg<'py>(
 }
 
 #[pymodule]
-#[pyo3(name = "ml2drender")]
+#[pyo3(name = "_native")]
 fn ml2drender_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<View>()?;
     m.add_class::<Renderer>()?;
-    m.add_function(wrap_pyfunction!(render, m)?)?;
     m.add_function(wrap_pyfunction!(encode_png, m)?)?;
     m.add_function(wrap_pyfunction!(encode_webp, m)?)?;
     m.add_function(wrap_pyfunction!(encode_jpeg, m)?)?;

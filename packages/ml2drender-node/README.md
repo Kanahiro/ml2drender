@@ -13,7 +13,7 @@ Prebuilt addons are published for Linux (x64, arm64; glibc 2.34+), macOS (x64, a
 | | `@ml2drender/wasm` (WebAssembly) | `@ml2drender/node` (this package) |
 |---|---|---|
 | Runs in | browsers, Node.js, Deno, Cloudflare Workers | Node.js |
-| Fetching | built in (`loadResource` to customize) | you write the `needs` → fetch → `provide` loop |
+| Fetching | built in (`loadResource` to customize) | built in (`render`'s `loadResource` to customize) |
 | Views | Web Mercator, projected CRSs (PROJJSON) | Web Mercator |
 | Reprojected sources for GL JS (`getTile`, `toStyle`) | yes | no |
 | Concurrency | renders take turns on the JS thread | renders run in parallel on libuv's thread pool, off the JS thread |
@@ -23,33 +23,32 @@ Both draw with the same Rust core, so the same view gives the same image. Choose
 ## Usage
 
 ```ts
-import { encodePng, Renderer } from '@ml2drender/node';
+import { encodePng, render } from '@ml2drender/node';
 
 const style = await (await fetch('https://demotiles.maplibre.org/style.json')).text();
-const renderer = new Renderer(style, {
+const rgba = await render(style, {
   lng: 139.767, lat: 35.681, zoom: 5, bearing: 0,
   width: 512, height: 512, pixelRatio: 1, margin: 0,
 });
 
-// Resources come in stages (sources, then tiles, then glyph ranges), each found from the last.
-for (let urls = await renderer.needs(); urls.length > 0; urls = await renderer.needs()) {
-  await Promise.all(urls.map(async (url) => {
-    const response = await fetch(url);
-    if (!response.ok && response.status !== 404) throw new Error(`HTTP ${response.status} ${url}`);
-    await renderer.provide(url, response.ok ? new Uint8Array(await response.arrayBuffer()) : null);
-  }));
-}
-const rgba = await renderer.render(0);
 const png = await encodePng(rgba, 512, 512);
 ```
 
-Resource URLs are passed on exactly as the style writes them, so make `glyphs`, `sprite` and TileJSON URLs absolute. Provide `null` only for a missing resource (like HTTP 404: a missing vector tile is empty, a missing raster tile is replaced by its parent). Fetched bytes are not cached: cache in your fetch loop if you need to.
+`render` fetches TileJSON, GeoJSON, sprites, tiles and glyph ranges with the standard `fetch`. HTTP 404 means a missing resource (an empty vector tile, or a raster tile replaced by its parent); other HTTP and network errors reject. Resource URLs are passed on exactly as the style writes them, so make `glyphs`, `sprite` and TileJSON URLs absolute.
 
 ## API
+
+### `render(style, view, loadResource?)`
+
+Returns non-premultiplied RGBA8 pixels, row by row, as a `Promise<Uint8Array>`. `style` is a JSON string; `view` is the camera described below. A fresh renderer is created for each call.
+
+Override fetching with `loadResource: (url: string) => Promise<Uint8Array | null>`, for authentication, caching or non-HTTP sources. Return `null` only for a missing resource; reject for other failures. Resources come in stages (sources, then tiles, then glyph ranges); `render` repeats the loading loop until all are ready. Loads within a stage run concurrently. Fetched bytes are not cached: cache in your loader if needed.
 
 ### `new Renderer(style, view)`
 
 `style` is the style JSON as a string. Throws on an invalid style. The style is fixed for the life of the renderer.
+
+Use this lower-level API to manage fetching yourself or reuse decoded resources across views: repeat `needs` → load → `provide` until `needs` is empty, then call `render(0)`.
 
 `view` is a Web Mercator camera; every field is required:
 
