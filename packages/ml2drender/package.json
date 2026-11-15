@@ -1,6 +1,6 @@
 {
   "name": "@ml2drender/wasm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MapLibre style 2D renderer in pure Rust / WebAssembly, no GPU",
   "license": "BSD-3-Clause",
   "repository": { "type": "git", "url": "git+https://github.com/Kanahiro/ml2drender.git", "directory": "packages/ml2drender" },
