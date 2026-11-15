@@ -132,7 +132,8 @@ jobs:
           args: --locked -m crates/python/Cargo.toml -o wheels
           manylinux: auto
       - name: Test the wheel
-        run: uv pip install wheels/*.whl && python -m unittest discover crates/python/tests
+        # uv run: the activated environment, whatever python maturin-action put first on PATH (macOS).
+        run: uv pip install wheels/*.whl && uv run --no-project python -m unittest discover crates/python/tests
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheel-${{ matrix.platform }}-${{ matrix.arch }}
