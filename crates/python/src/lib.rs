@@ -3,7 +3,7 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::PyBytes;
 
 fn error(e: ml2drender::Error) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
@@ -50,27 +50,19 @@ fn pixels(width: u32, height: u32, pixel_ratio: f64) -> (u32, u32) {
     ((width as f64 * pixel_ratio).round() as u32, (height as f64 * pixel_ratio).round() as u32)
 }
 
-/// A box of a CRS: `projjson` (the PROJJSON as a dict), `bbox` (min x, min y, max x, max y) in CRS
-/// units, turned around its center by `bearing` degrees; the output size as in `View`.
+/// A box of a CRS: `bbox` (min x, min y, max x, max y) in CRS units, turned around its center by
+/// `bearing` degrees; the output size as in `View`. The CRS is given with it (`set_projected_view`).
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
-struct ProjectedView(ml2drender::reproject::ProjectedView);
+struct ProjectedBox(ml2drender::reproject::ProjectedView);
 
 #[pymethods]
-impl ProjectedView {
+impl ProjectedBox {
     #[new]
-    #[pyo3(signature = (projjson, bbox, width, height, bearing = 0.0, pixel_ratio = 1.0, margin = 0))]
-    fn new(
-        projjson: &Bound<'_, PyDict>,
-        bbox: [f64; 4],
-        width: u32,
-        height: u32,
-        bearing: f64,
-        pixel_ratio: f64,
-        margin: u32,
-    ) -> PyResult<Self> {
-        let projjson = projjson.py().import("json")?.call_method1("dumps", (projjson,))?.extract()?;
-        Ok(ProjectedView(ml2drender::reproject::ProjectedView {
+    #[pyo3(signature = (bbox, width, height, bearing = 0.0, pixel_ratio = 1.0, margin = 0))]
+    fn new(bbox: [f64; 4], width: u32, height: u32, bearing: f64, pixel_ratio: f64, margin: u32) -> Self {
+        let projjson = String::new();
+        ProjectedBox(ml2drender::reproject::ProjectedView {
             projjson,
             bbox,
             bearing,
@@ -78,7 +70,7 @@ impl ProjectedView {
             height,
             pixel_ratio,
             margin,
-        }))
+        })
     }
 
     /// Output width and height in pixels.
@@ -105,9 +97,42 @@ impl Renderer {
         self.0.set_view(view.0);
     }
 
-    /// Point the renderer at a box of a CRS, keeping the resources it has.
-    fn set_projected_view(&mut self, view: ProjectedView) -> PyResult<()> {
-        self.0.set_projected_view(&view.0).map_err(error)
+    /// Point the renderer at a box of the CRS `projjson` (a JSON string), keeping the resources it has.
+    fn set_projected_view(&mut self, projjson: &str, view: ProjectedBox) -> PyResult<()> {
+        let view = ml2drender::reproject::ProjectedView { projjson: projjson.to_owned(), ..view.0 };
+        self.0.set_projected_view(&view).map_err(error)
+    }
+
+    /// Point the renderer at tile `z/x/y` of the grid (`origin`, `extent_at_zoom0`) of the CRS `projjson`.
+    #[allow(clippy::too_many_arguments)]
+    fn set_projected_tile(
+        &mut self,
+        projjson: &str,
+        origin: [f64; 2],
+        extent_at_zoom0: f64,
+        z: u8,
+        x: u32,
+        y: u32,
+        tile_size: u32,
+        pixel_ratio: f64,
+        margin: u32,
+    ) -> PyResult<()> {
+        let grid = ml2drender::reproject::TileMatrixSet { origin, extent_at_zoom0 };
+        let view = ml2drender::reproject::ProjectedView::tile(projjson, &grid, z, x, y, tile_size).map_err(error)?;
+        self.0.set_projected_view(&ml2drender::reproject::ProjectedView { pixel_ratio, margin, ..view }).map_err(error)
+    }
+
+    /// Point the renderer at MapLibre GL JS's camera `view` in the CRS `projjson` on its grid.
+    fn set_projected_camera(
+        &mut self,
+        projjson: &str,
+        origin: [f64; 2],
+        extent_at_zoom0: f64,
+        view: View,
+    ) -> PyResult<()> {
+        let grid = ml2drender::reproject::TileMatrixSet { origin, extent_at_zoom0 };
+        let view = ml2drender::reproject::ProjectedView::camera(projjson, &grid, &view.0).map_err(error)?;
+        self.0.set_projected_view(&view).map_err(error)
     }
 
     /// URLs of the resources still needed before `render`.
@@ -156,7 +181,7 @@ fn encode_jpeg<'py>(
 #[pyo3(name = "_native")]
 fn ml2drender_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<View>()?;
-    m.add_class::<ProjectedView>()?;
+    m.add_class::<ProjectedBox>()?;
     m.add_class::<Renderer>()?;
     m.add_function(wrap_pyfunction!(encode_png, m)?)?;
     m.add_function(wrap_pyfunction!(encode_webp, m)?)?;

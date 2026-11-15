@@ -48,6 +48,34 @@ pub struct ProjectedView {
     pub margin: u32,
 }
 
+/// The tile grid of a CRS (see `ml2drender::reproject::TileMatrixSet`).
+#[napi(object)]
+pub struct TileMatrixSet {
+    /// `[minX, maxY]` of tile 0/0/0 in CRS units.
+    pub origin: Vec<f64>,
+    pub extent_at_zoom0: f64,
+}
+
+impl TryFrom<TileMatrixSet> for ml2drender::reproject::TileMatrixSet {
+    type Error = Error;
+
+    fn try_from(grid: TileMatrixSet) -> Result<Self> {
+        let origin = grid.origin.try_into().map_err(|_| Error::from_reason("origin must be [minX, maxY]"))?;
+        Ok(Self { origin, extent_at_zoom0: grid.extent_at_zoom0 })
+    }
+}
+
+/// A tile of a CRS's grid, `tile_size` CSS pixels square.
+#[napi(object)]
+pub struct Tile {
+    pub z: u32,
+    pub x: u32,
+    pub y: u32,
+    pub tile_size: u32,
+    pub pixel_ratio: f64,
+    pub margin: u32,
+}
+
 fn error(e: ml2drender::Error) -> Error {
     Error::from_reason(e.to_string())
 }
@@ -109,6 +137,25 @@ impl Renderer {
             pixel_ratio: view.pixel_ratio,
             margin: view.margin,
         };
+        with(&self.inner, |r| r.set_projected_view(&view))?.map_err(error)
+    }
+
+    /// Draw a tile of the grid of a CRS (PROJJSON text).
+    #[napi]
+    pub fn set_projected_tile(&self, projjson: String, grid: TileMatrixSet, tile: Tile) -> Result<()> {
+        let z = tile.z.min(u8::MAX as u32) as u8;
+        let view =
+            ml2drender::reproject::ProjectedView::tile(&projjson, &grid.try_into()?, z, tile.x, tile.y, tile.tile_size)
+                .map_err(error)?;
+        let view = ml2drender::reproject::ProjectedView { pixel_ratio: tile.pixel_ratio, margin: tile.margin, ..view };
+        with(&self.inner, |r| r.set_projected_view(&view))?.map_err(error)
+    }
+
+    /// Draw MapLibre GL JS's camera in a CRS (PROJJSON text) on its grid.
+    #[napi]
+    pub fn set_projected_camera(&self, projjson: String, grid: TileMatrixSet, view: View) -> Result<()> {
+        let view =
+            ml2drender::reproject::ProjectedView::camera(&projjson, &grid.try_into()?, &view.into()).map_err(error)?;
         with(&self.inner, |r| r.set_projected_view(&view))?.map_err(error)
     }
 

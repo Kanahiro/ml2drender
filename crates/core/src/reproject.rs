@@ -34,6 +34,59 @@ pub struct ProjectedView {
     pub margin: u32,
 }
 
+/// MapLibre GL JS's `TileMatrixSet` of a CRS (`addProjection`): tile 0/0/0 is the square of side
+/// `extent_at_zoom0` whose top-left corner is `origin` (min x, max y), and each zoom splits every
+/// tile in four; x grows east, y south.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TileMatrixSet {
+    pub origin: [f64; 2],
+    pub extent_at_zoom0: f64,
+}
+
+impl ProjectedView {
+    /// Tile `z/x/y` of `grid` as a `tile_size`-pixel square image (cf. [`View::tile`]).
+    pub fn tile(projjson: &str, grid: &TileMatrixSet, z: u8, x: u32, y: u32, tile_size: u32) -> Result<Self, Error> {
+        if z > 30 || x >> z != 0 || y >> z != 0 {
+            return Err(Error::Unsupported(format!(
+                "tile {z}/{x}/{y} is not of a grid (z in 0..=30, x and y in 0..2^z)"
+            )));
+        }
+        let s = grid.extent_at_zoom0 / (1u64 << z) as f64;
+        let (min_x, max_y) = (grid.origin[0] + x as f64 * s, grid.origin[1] - y as f64 * s);
+        Ok(ProjectedView {
+            projjson: projjson.to_owned(),
+            bbox: [min_x, max_y - s, min_x + s, max_y],
+            bearing: 0.0,
+            width: tile_size,
+            height: tile_size,
+            pixel_ratio: 1.0,
+            margin: 0,
+        })
+    }
+
+    /// MapLibre GL JS's camera in the CRS on `grid`: `view.center` (lng/lat) in the middle, tile
+    /// 0/0/0 of the grid in 512 CSS pixels at zoom 0, turned around the center by `view.bearing`.
+    pub fn camera(projjson: &str, grid: &TileMatrixSet, view: &View) -> Result<Self, Error> {
+        let [x, y] = Projection::parse(projjson)?.forward(view.center[0], view.center[1]);
+        if !(x.is_finite() && y.is_finite()) {
+            return Err(Error::Unsupported(format!("center {:?} is outside the CRS", view.center)));
+        }
+        // CRS units per CSS pixel.
+        let unit = grid.extent_at_zoom0 / (512.0 * 2f64.powf(view.zoom));
+        let (w, h) = (view.width as f64 / 2.0 * unit, view.height as f64 / 2.0 * unit);
+        Ok(ProjectedView {
+            projjson: projjson.to_owned(),
+            // The box at bearing 0, which the view turns around its center.
+            bbox: [x - w, y - h, x + w, y + h],
+            bearing: view.bearing,
+            width: view.width,
+            height: view.height,
+            pixel_ratio: view.pixel_ratio,
+            margin: view.margin,
+        })
+    }
+}
+
 /// See [`Warp::pixel_grid`]: the grid position of output pixel (0, 0), and the (sin, cos) of a bearing.
 pub type PixelGrid = ([f64; 2], Option<(f64, f64)>);
 
@@ -620,6 +673,29 @@ fn sample(t: &Target, x: f64, y: f64) -> Rgba {
 mod tests {
     use super::*;
     use crate::projection::test_crs;
+
+    #[test]
+    fn tiles_and_cameras_of_a_grid() {
+        // Longitude/latitude: 8° tiles at zoom 0, north-west corner at 130°E 42°N.
+        let (crs, grid) = (test_crs::geographic(), TileMatrixSet { origin: [130.0, 42.0], extent_at_zoom0: 8.0 });
+        let tile = ProjectedView::tile(&crs, &grid, 2, 1, 3, 256).unwrap();
+        assert_eq!((tile.bbox, tile.width, tile.height), ([132.0, 34.0, 134.0, 36.0], 256, 256));
+        assert!(ProjectedView::tile(&crs, &grid, 2, 4, 0, 256).is_err());
+        // At zoom 1 a CSS pixel is 8 / 1024 degrees.
+        let view = View {
+            center: [134.0, 38.0],
+            zoom: 1.0,
+            bearing: 30.0,
+            width: 512,
+            height: 256,
+            pixel_ratio: 2.0,
+            margin: 4,
+        };
+        let camera = ProjectedView::camera(&crs, &grid, &view).unwrap();
+        assert_eq!(camera.bbox, [132.0, 37.0, 136.0, 39.0]);
+        assert_eq!((camera.bearing, camera.pixel_ratio, camera.margin), (30.0, 2.0, 4));
+        assert!(ProjectedView::camera(&crs, &grid, &View { center: [f64::NAN, 0.0], ..view }).is_err());
+    }
 
     #[test]
     fn holes_across_the_output_edge_stay_after_their_outer_ring() {

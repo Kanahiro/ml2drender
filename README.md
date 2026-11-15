@@ -38,8 +38,8 @@ pip install ml2drender         # Python
 | Package | Runs in | API |
 |---|---|---|
 | [`@ml2drender/wasm`](#javascript-api) | browsers, Node.js, Deno, Cloudflare Workers | Everything below: fetching, Web Mercator and projected views, reprojected sources for GL JS. |
-| [`@ml2drender/node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | HTTP fetching by default, with an optional `loadResource(url)` callback. Web Mercator cameras and boxes of a projected CRS. Renders run in parallel off the JS thread. |
-| [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.11+ (Linux, macOS, Windows) | Async HTTP fetching with HTTPX by default, with an optional async `load(url)` callback. Web Mercator cameras and boxes of a projected CRS. |
+| [`@ml2drender/node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | HTTP fetching by default, with an optional `loadResource(url)` callback. Web Mercator cameras; boxes, tiles and cameras of a projected CRS. Renders run in parallel off the JS thread. |
+| [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.11+ (Linux, macOS, Windows) | Async HTTP fetching with HTTPX by default, with an optional async `load(url)` callback. Web Mercator cameras; boxes, tiles and cameras of a projected CRS. |
 
 All three draw with the same Rust core. To build from source, see [Development](#development).
 
@@ -136,7 +136,7 @@ Each one fetches what it needs and resolves to a `RenderedImage` of all the styl
 | `renderTile({ z, x, y, tileSize? })` | An XYZ tile of the Web Mercator grid. `tileSize` defaults to 256. |
 | `render({ bbox, size })` | A lng/lat box `[west, south, east, north]`, fitted so that its long side is `size` px. `west > east` crosses the antimeridian. |
 | `projected(crs).renderView({ center, zoom, bearing?, width, height })` | A camera in the CRS, with the same arguments as the Mercator `renderView`. `center` is lng/lat. `bearing` is the angle clockwise from the CRS's y axis of the direction that is up, so at 0 the y axis is up. Zoom levels are those of GL JS with the CRS registered by `addProjection`: at zoom 0, tile 0/0/0 of the grid is 512 CSS px wide. A `center` outside the CRS's domain throws a `RangeError`. |
-| `projected(crs).render({ bbox, width, height })` | A box `[minX, minY, maxX, maxY]` in CRS units. |
+| `projected(crs).render({ bbox, bearing?, width, height })` | A box `[minX, minY, maxX, maxY]` in CRS units (degrees for longlat), turned around its center by `bearing`. |
 | `projected(crs).renderTile({ z, x, y, tileSize? })` | A tile of the CRS's grid. |
 
 All of them also accept two options:
@@ -155,9 +155,10 @@ A `RenderedImage` has:
 
 Returns a `ProjectedRenderer` that draws in `crs`. The original renderer is unchanged. `crs` has the same shape as a CRS registered with MapLibre GL JS's `addProjection`:
 
-- `name`: the CRS's name in GL JS.
-- `projjson`: the CRS as PROJJSON.
-- `tileMatrixSet`: `{ origin: [minX, maxY], extentAtZoom0 }`. Tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`. Each zoom level splits every tile into four. x grows to the east and y to the south.
+- `projjson`: the CRS as PROJJSON. `render` of a box needs nothing else.
+- `tileMatrixSet`: `{ origin: [minX, maxY], extentAtZoom0 }`, required by `renderTile`, `getTile` and `renderView`. A CRS has no tile grid of its own, so tiles and zoom levels mean nothing without one. Tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`. Each zoom level splits every tile into four. x grows to the east and y to the south.
+
+- `name`: the CRS's name in GL JS, required by `toStyle` only.
 
 Projected renders pick a zoom level from CRS units per CSS px, read on EPSG:3857's scale at the equator (the idea behind OGC scale denominators; for longlat, 360° is one trip around the world). That zoom drives style evaluation and source tile selection. It does not depend on position, so tiles of one grid zoom line up at their edges. At high latitudes the zoom is higher than a Mercator map of the same ground resolution would use. It is not the grid zoom given to `renderView`: the two agree only when `extentAtZoom0` is the width of EPSG:3857's world (about 40,075 km, or 360° for longlat).
 
