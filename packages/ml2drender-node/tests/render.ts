@@ -44,6 +44,29 @@ assert.deepEqual(again, rgba);
 assert.deepEqual([...moved.subarray((16 * 64 + 32) * 4, (16 * 64 + 32) * 4 + 4)], [255, 255, 255, 255]);
 assert.deepEqual(loaded, ['test://points.geojson']);
 
+// A box of a CRS (PROJJSON), here longitude/latitude: the point is in the middle of 130..150°E, 32..42°N.
+const longlat = { type: 'GeographicCRS', datum: { ellipsoid: { semi_major_axis: 6378137, inverse_flattening: 298.257223563 } } };
+const box = { projjson: longlat, bbox: [130, 32, 150, 42] as [number, number, number, number], bearing: 0, width: 64, height: 32, pixelRatio: 2, margin: 0 };
+const projected = await renderer.renderProjectedView(box);
+assert.equal(projected.length, 128 * 64 * 4);
+assert.deepEqual([...projected.subarray(0, 4)], [255, 255, 255, 255]);
+assert.deepEqual([...projected.subarray((32 * 128 + 64) * 4, (32 * 128 + 64) * 4 + 4)], [255, 0, 0, 255]);
+// With the box 3.125° further east, the circle (10 device px in radius) is 20 device px left of the middle;
+// turned 90°, east is up, so it is below the middle.
+const offCenter = { ...box, bbox: [133.125, 32, 153.125, 42] as [number, number, number, number] };
+const at = (rgba: Uint8Array, x: number, y: number) => [...rgba.subarray((y * 128 + x) * 4, (y * 128 + x) * 4 + 4)];
+const moved20 = await renderer.renderProjectedView(offCenter);
+assert.deepEqual([at(moved20, 44, 32), at(moved20, 64, 32)], [[255, 0, 0, 255], [255, 255, 255, 255]]);
+const turned = await renderer.renderProjectedView({ ...offCenter, bearing: 90 });
+assert.deepEqual([at(turned, 64, 52), at(turned, 64, 32), at(turned, 44, 32)], [[255, 0, 0, 255], [255, 255, 255, 255], [255, 255, 255, 255]]);
+// An unsupported CRS rejects, a first render in a CRS works, and Mercator views still draw afterwards.
+await assert.rejects(renderer.renderProjectedView({ ...box, projjson: { type: 'ProjectedCRS', conversion: { method: { name: 'Robinson' } } } }), /unsupported/);
+await assert.rejects(renderer.renderProjectedView({ ...box, projjson: '+proj=longlat' as any }), /unsupported/);
+await assert.rejects(renderer.renderProjectedView({ ...box, bbox: [130, 32, Infinity, 42] }), /unsupported/);
+assert.deepEqual(await new Renderer(style, { loadResource: async () => points }).renderProjectedView(box), projected);
+assert.deepEqual(await renderer.renderView(view), rgba);
+assert.deepEqual(loaded, ['test://points.geojson']);
+
 const render = (style: StyleSpecification, options?: RendererOptions) => new Renderer(style, options).renderView(view);
 const missing = await render(style, { loadResource: async () => null });
 assert.deepEqual(missing, new Uint8Array(64 * 32 * 4).fill(255));

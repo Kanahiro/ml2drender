@@ -9,9 +9,9 @@ from typing import Any
 import httpx
 
 from . import _native
-from ._native import View, encode_jpeg, encode_png, encode_webp
+from ._native import ProjectedView, View, encode_jpeg, encode_png, encode_webp
 
-__all__ = ["Renderer", "View", "encode_jpeg", "encode_png", "encode_webp"]
+__all__ = ["ProjectedView", "Renderer", "View", "encode_jpeg", "encode_png", "encode_webp"]
 
 
 Layer = dict[str, Any]
@@ -44,7 +44,7 @@ class Renderer:
     Decoded resources and tiles are kept and reused by later renders.
 
     ``load`` is an async ``load(url)`` returning bytes, or None for a missing resource; its
-    exceptions propagate out of :meth:`render_view`. By default resources are fetched with HTTPX
+    exceptions propagate out of the render. By default resources are fetched with HTTPX
     (HTTP 404 means missing). URLs are passed through as written in the style; use absolute URLs.
 
     ``transform_layer(layer)`` replaces each layer of a type the renderer does not draw
@@ -90,12 +90,22 @@ class Renderer:
 
         Decoding and drawing run synchronously on the calling thread.
         """
+        return await self._render(lambda renderer: renderer.set_view(view))
+
+    async def render_projected_view(self, view: ProjectedView) -> bytes:
+        """:meth:`render_view` of a box of a CRS (see :attr:`ProjectedView.size`).
+
+        Raises ``RuntimeError`` for a CRS the renderer does not support. Resources loaded for one
+        CRS serve the others, and Web Mercator views, too.
+        """
+        return await self._render(lambda renderer: renderer.set_projected_view(view))
+
+    async def _render(self, set_view: Callable[[_native.Renderer], None]) -> bytes:
         async with self._lock, AsyncExitStack() as stack:
             if self._native is None:
-                self._native = _native.Renderer(self._style, view)
-            else:
-                self._native.set_view(view)
+                self._native = _native.Renderer(self._style)
             renderer = self._native
+            set_view(renderer)
             load = self._load
             if load is None:
                 client = await stack.enter_async_context(httpx.AsyncClient(follow_redirects=True))

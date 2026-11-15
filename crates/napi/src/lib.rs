@@ -35,6 +35,19 @@ impl From<View> for ml2drender::View {
     }
 }
 
+/// A box of a CRS, given as PROJJSON text (see `ml2drender::reproject::ProjectedView`).
+#[napi(object)]
+pub struct ProjectedView {
+    pub projjson: String,
+    /// `[minX, minY, maxX, maxY]` in CRS units.
+    pub bbox: Vec<f64>,
+    pub bearing: f64,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_ratio: f64,
+    pub margin: u32,
+}
+
 fn error(e: ml2drender::Error) -> Error {
     Error::from_reason(e.to_string())
 }
@@ -70,15 +83,33 @@ pub struct Renderer {
 
 #[napi]
 impl Renderer {
+    /// The host points it at a view (`set_view` or `set_projected_view`) before the first `needs`.
     #[napi(constructor)]
-    pub fn new(style: String, view: View) -> Result<Self> {
-        let renderer = ml2drender::Renderer::new(&style, view.into()).map_err(error)?;
+    pub fn new(style: String) -> Result<Self> {
+        let renderer = ml2drender::Renderer::new(&style, ml2drender::View::tile(0, 0, 0, 256)).map_err(error)?;
         Ok(Renderer { inner: Arc::new(Mutex::new(Movable(renderer))) })
     }
 
     #[napi]
     pub fn set_view(&self, view: View) -> Result<()> {
         with(&self.inner, |r| r.set_view(view.into()))
+    }
+
+    /// Draw a box of a CRS instead of a Mercator camera. Fails for a CRS the core does not support.
+    #[napi]
+    pub fn set_projected_view(&self, view: ProjectedView) -> Result<()> {
+        let bbox =
+            <[f64; 4]>::try_from(view.bbox).map_err(|_| Error::from_reason("bbox must be [minX, minY, maxX, maxY]"))?;
+        let view = ml2drender::reproject::ProjectedView {
+            projjson: view.projjson,
+            bbox,
+            bearing: view.bearing,
+            width: view.width,
+            height: view.height,
+            pixel_ratio: view.pixel_ratio,
+            margin: view.margin,
+        };
+        with(&self.inner, |r| r.set_projected_view(&view))?.map_err(error)
     }
 
     #[napi]

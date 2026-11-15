@@ -209,17 +209,8 @@ interface WasmExports {
   renderer_free(handle: number): void;
   projection_new(ptr: number, len: number): number;
   projection_forward(handle: number, lng: number, lat: number): number;
-  projection_inverse(handle: number, x: number, y: number): number;
   projection_free(handle: number): void;
   xy_ptr(): number;
-}
-
-/** A CRS's projection, computed by the renderer itself. */
-export interface Projection {
-  /** `[lng, lat]` in degrees → `[x, y]` in CRS units; NaN where the CRS has no point (e.g. the far side of a geostationary view). */
-  forward(lngLat: number[]): number[];
-  /** `[x, y]` → `[lng, lat]` in degrees; NaN outside the projection's domain. */
-  inverse(xy: number[]): number[];
 }
 
 type ViewArgs = [lng: number, lat: number, zoom: number, bearing: number, width: number, height: number, pixelRatio: number, margin: number];
@@ -287,9 +278,8 @@ function withBytes<T>(w: WasmExports, bytes: Uint8Array, call: (ptr: number, len
 }
 
 /**
- * One WASM instance per module (the bundled one under `undefined`), shared by projections and by
- * renderers that keep nothing between renders (`ttlMs` 0): memory freed by one render is reused by
- * the next. (WASM memory never shrinks, and an instance per renderer holds its own until collected;
+ * One WASM instance per module (the bundled one under `undefined`), shared by renderers that keep
+ * nothing between renders (`ttlMs` 0): memory freed by one render is reused by the next. (WASM memory never shrinks, and an instance per renderer holds its own until collected;
  * on Cloudflare Workers all of it counts towards the isolate's 128 MB.) A renderer that keeps
  * resources gets its own instance, which goes with it.
  */
@@ -313,46 +303,6 @@ function sharedWasm(module: WebAssembly.Module | undefined): Promise<WasmExports
 function discardInstance(module: WebAssembly.Module | undefined, instance: Promise<WasmExports>, w: WasmExports) {
   brokenInstances.add(w);
   if (instances.get(module) === instance) instances.delete(module);
-}
-
-const freeProjection = new FinalizationRegistry<{ w: WasmExports; handle: number }>(({ w, handle }) => w.projection_free(handle));
-
-/**
- * Load a PROJJSON CRS the way `MapRenderer.projected` reads `Crs.projjson`, e.g. to compute
- * tile bounds or to register the CRS with MapLibre's `addProjection`, so both agree on the CRS.
- * Throws for a CRS the renderer does not support.
- */
-export async function loadProjection(projjson: object, options: Pick<InitOptions, 'wasm'> = {}): Promise<Projection> {
-  return (await loadProjectionFactory(options))(projjson);
-}
-
-/**
- * Load the WASM once and return a synchronous `loadProjection`, for hosts that must build a
- * projection without awaiting, such as MapLibre's worker `setProjectionHandler`.
- */
-export async function loadProjectionFactory(options: Pick<InitOptions, 'wasm'> = {}): Promise<(projjson: object) => Projection> {
-  const w = await sharedWasm(options.wasm);
-  return (projjson) => {
-    if (!projjson || typeof projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
-    const handle = withBytes(w, encoder.encode(JSON.stringify(projjson)), (ptr, len) => w.projection_new(ptr, len));
-    if (!handle) throw new Error(decoder.decode(output(w)));
-    // A fresh view per call: memory growth detaches earlier ones.
-    const xy = () => [...new Float64Array(w.memory.buffer, w.xy_ptr(), 2)];
-    // The methods hold `owner`, which frees the handle once collected: callers may keep only them.
-    const owner = { handle };
-    const projection: Projection = {
-      forward: ([lng, lat]) => {
-        w.projection_forward(owner.handle, lng, lat);
-        return xy();
-      },
-      inverse: ([x, y]) => {
-        w.projection_inverse(owner.handle, x, y);
-        return xy();
-      },
-    };
-    freeProjection.register(owner, { w, handle });
-    return projection;
-  };
 }
 
 function viewArgs(view: View): ViewArgs {

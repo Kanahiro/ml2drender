@@ -1,5 +1,5 @@
 import type { FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
-import { loadProjection, loadProjectionFactory, MapRenderer, type InitOptions, type Projection, type StyleLayer } from '../src/index';
+import { MapRenderer, type InitOptions, type StyleLayer } from '../src/index';
 import wasm from '@ml2drender/wasm/renderer.wasm';
 
 async function pngResponse() {
@@ -48,16 +48,6 @@ async function wrongPath(renderer: MapRenderer) {
   await renderer.projected(crs).render({ center: [0, 0], zoom: 0, width: 256, height: 256 });
   // @ts-expect-error A CRS is PROJJSON, not a PROJ string.
   renderer.projected({ ...crs, projjson: '+proj=utm +zone=54 +ellps=GRS80' });
-}
-
-async function utmEasting(): Promise<number> {
-  const projection: Projection = await loadProjection(utm, { wasm });
-  const lngLat: number[] = projection.inverse(projection.forward([139.76, 35.68]));
-  // @ts-expect-error `loadProjection` takes PROJJSON, not a PROJ string.
-  await loadProjection('+proj=utm +zone=54 +ellps=GRS80');
-  const create: (projjson: object) => Projection = await loadProjectionFactory({ wasm });
-  create(utm).forward([139.76, 35.68]);
-  return lngLat ? lngLat[0] : NaN;
 }
 
 async function webpBytes(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>> {

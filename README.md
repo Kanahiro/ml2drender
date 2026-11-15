@@ -38,8 +38,8 @@ pip install ml2drender         # Python
 | Package | Runs in | API |
 |---|---|---|
 | [`@ml2drender/wasm`](#javascript-api) | browsers, Node.js, Deno, Cloudflare Workers | Everything below: fetching, Web Mercator and projected views, reprojected sources for GL JS. |
-| [`@ml2drender/node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | HTTP fetching by default, with an optional `loadResource(url)` callback. Web Mercator views only. Renders run in parallel off the JS thread. |
-| [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.11+ (Linux, macOS, Windows) | Async HTTP fetching with HTTPX by default, with an optional async `load(url)` callback. Web Mercator views only. |
+| [`@ml2drender/node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | HTTP fetching by default, with an optional `loadResource(url)` callback. Web Mercator cameras and boxes of a projected CRS. Renders run in parallel off the JS thread. |
+| [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.11+ (Linux, macOS, Windows) | Async HTTP fetching with HTTPX by default, with an optional async `load(url)` callback. Web Mercator cameras and boxes of a projected CRS. |
 
 All three draw with the same Rust core. To build from source, see [Development](#development).
 
@@ -88,14 +88,17 @@ const tile = await renderer.projected(crs).getTile({ source, z, x, y }); // MVT,
 
 // Browser: register the CRS with GL JS and draw the rewritten style
 import { addProjection, Map } from 'maplibre-gl';
-import { loadProjection } from '@ml2drender/wasm';
+import proj4 from 'proj4';
 
-addProjection({ name: crs.name, projection: await loadProjection(crs.projjson), tileMatrixSet: crs.tileMatrixSet });
+addProjection({ name: crs.name, projection: proj4(crs.projjson), tileMatrixSet: crs.tileMatrixSet });
 const glStyle = renderer.projected(crs).toStyle({ tiles: (source) => `https://tiles.example.com/${source}/{z}/{x}/{y}` });
 new Map({ container: 'map', style: glStyle });
 ```
 
-Give `addProjection` the projection from `loadProjection`. It is the same code ml2drender draws with, so positions match exactly. If GL JS also draws GeoJSON sources itself, its workers need the same projection too. Use `loadProjectionFactory` with `setProjectionHandler`, as the [demo](https://github.com/Kanahiro/ml2drender/blob/main/examples/browser/src/gl-projection-handler.ts) does.
+`addProjection` takes any `forward` / `inverse` pair between lng/lat and CRS coordinates, such as a [proj4js](https://github.com/proj4js/proj4js) converter, which reads PROJJSON. ml2drender draws with its own formulas; for the CRSs of the demo the two agree within a few micrometres. Two things to know:
+
+- proj4js does not read the Geostationary Satellite method from PROJJSON. Give it the PROJ string (`+proj=geos ...`) instead, as the [demo](https://github.com/Kanahiro/ml2drender/blob/main/examples/browser/src/proj.ts) does.
+- If GL JS also draws GeoJSON sources itself, its workers need the same converter. Set it with `setProjectionHandler`, as the [demo](https://github.com/Kanahiro/ml2drender/blob/main/examples/browser/src/gl-projection-handler.ts) does.
 
 ## JavaScript API
 
@@ -186,10 +189,6 @@ Returns the style given to `init`, rewritten so that GL JS can draw it in CRS `c
 - Other layers, fill-extrusion included, are kept. Layers of video sources are removed.
 
 GL JS evaluates the style at its own zoom on the projected grid, and hillshade slopes come from the tile's zoom. Zoom-dependent styling may therefore look slightly different from ml2drender's own renders.
-
-### loadProjection(projjson, options?) and loadProjectionFactory(options?)
-
-Return the same Rust projection code the renderer draws with. `forward([lng, lat])` returns CRS coordinates and `inverse([x, y])` returns lng/lat. Points that cannot be projected give NaN. Use them to compute tile ranges, or to pass to GL JS's `addProjection`. `loadProjectionFactory` resolves to a synchronous `(projjson) => Projection`, for places that cannot await, such as `setProjectionHandler` in GL JS's workers.
 
 ## Projected coordinate reference systems
 

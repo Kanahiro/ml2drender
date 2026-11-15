@@ -8,7 +8,7 @@ use std::cell::RefCell;
 
 thread_local! {
     static OUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// The point `projection_forward` / `projection_inverse` computed, read via `xy_ptr`.
+    /// The point `projection_forward` computed, read via `xy_ptr`.
     static XY: RefCell<[f64; 2]> = const { RefCell::new([0.0; 2]) };
 }
 
@@ -315,15 +315,6 @@ fn set_xy(p: [f64; 2]) -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn projection_forward(p: *const Projection, lng: f64, lat: f64) -> u32 {
     set_xy(unsafe { &*p }.forward(lng, lat))
-}
-
-/// CRS units → degrees at `xy_ptr`; returns 0 outside the projection's domain.
-///
-/// # Safety
-/// `p` must be a live handle from `projection_new`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn projection_inverse(p: *const Projection, x: f64, y: f64) -> u32 {
-    set_xy(unsafe { &*p }.inverse([x, y]).unwrap_or([f64::NAN; 2]))
 }
 
 /// # Safety

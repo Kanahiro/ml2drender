@@ -174,6 +174,9 @@ importers:
       maplibre-gl:
         specifier: 6.15.0
         version: 6.15.0
+      proj4:
+        specifier: 2.22.0
+        version: 2.22.0
     devDependencies:
       '@types/geojson':
         specifier: 7946.0.16
@@ -511,6 +514,9 @@ packages:
   mdurl@2.1.0:
     resolution: {integrity: sha512-1+HBaOx0zi/dQWht8rNv9MYf9qqpqL/kxI0hXImU6Y547zM6Sni8BQibt7ifgMcYtQg41ao3Ivd6cnSM86inpg==}
 
+  mgrs@1.0.0:
+    resolution: {integrity: sha512-awNbTOqCxK1DBGjalK3xqWIstBZgN6fxsMSiXLs9/spqWkF2pAhb2rrYCFSsr1/tT7PhcDGjZndG8SWYn0byYA==}
+
   minimatch@10.2.6:
     resolution: {integrity: sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A==}
     engines: {node: 18 || 20 || >=22}
@@ -543,6 +549,14 @@ packages:
 
   potpack@2.1.0:
     resolution: {integrity: sha512-pcaShQc1Shq0y+E7GqJqvZj8DTthWV1KeHGdi0Z6IAin2Oi3JnLCOfwnCo84qc+HAp52wT9nK9H7FAJp5a44GQ==}
+
+  proj4@2.22.0:
+    resolution: {integrity: sha512-MVvH09QrYm3A235rcX39WDiCKanrBiblu28l0KYIn/B2DofmYhvP/LLS43kE66jNDfx/P1l/nah3JmsAq8UgbQ==}
+    peerDependencies:
+      geotiff: '*'
+    peerDependenciesMeta:
+      geotiff:
+        optional: true
 
   protocol-buffers-schema@3.6.1:
     resolution: {integrity: sha512-VG2K63Igkiv9p76tk1lilczEK1cT+kCjKtkdhw1dQZV3k3IXJbd3o6Ho8b9zJZaHSnT2hKe4I+ObmX9w6m5SmQ==}
@@ -637,6 +651,9 @@ packages:
         optional: true
       yaml:
         optional: true
+
+  wkt-parser@1.6.0:
+    resolution: {integrity: sha512-O2WMUagkdOKkgcfqZBUauysHVeifCwcs+zUd2QG7UIzVljLwK9g5xHUfL/TkQFwmQ3eF7oHFKGnMcb/kZdvbaw==}
 
   yaml@2.9.1:
     resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
@@ -889,6 +906,8 @@ snapshots:
 
   mdurl@2.1.0: {}
 
+  mgrs@1.0.0: {}
+
   minimatch@10.2.6:
     dependencies:
       brace-expansion: 5.0.12
@@ -914,6 +933,11 @@ snapshots:
       source-map-js: 1.2.2
 
   potpack@2.1.0: {}
+
+  proj4@2.22.0:
+    dependencies:
+      mgrs: 1.0.0
+      wkt-parser: 1.6.0
 
   protocol-buffers-schema@3.6.1: {}
 
@@ -983,5 +1007,7 @@ snapshots:
       '@types/node': 24.19.2
       fsevents: 2.3.3
       yaml: 2.9.1
+
+  wkt-parser@1.6.0: {}
 
   yaml@2.9.1: {}

@@ -3,8 +3,9 @@
  *
  * A {@link Renderer} draws views of a style, fetching the resources they need (or loading them
  * through `loadResource`). The work runs on libuv's thread pool, so the JavaScript thread stays
- * free and several renderers draw in parallel. It draws Web Mercator views only; for projected CRSs and reprojected sources,
- * use the WebAssembly package `@ml2drender/wasm`, which also runs in Node.js.
+ * free and several renderers draw in parallel. It draws Web Mercator cameras and boxes of a CRS (PROJJSON); for
+ * tile grids of a CRS and reprojected sources for MapLibre GL JS, use the WebAssembly package `@ml2drender/wasm`,
+ * which also runs in Node.js.
  *
  * @module
  */
@@ -20,6 +21,31 @@ export interface View {
   /** MapLibre zoom: the world is `512 * 2^zoom` CSS pixels wide. */
   zoom: number;
   /** Degrees clockwise. */
+  bearing: number;
+  /** Output width in CSS pixels. */
+  width: number;
+  /** Output height in CSS pixels. */
+  height: number;
+  /** Device pixels per CSS pixel: the image is `round(width * pixelRatio)` pixels wide. */
+  pixelRatio: number;
+  /** CSS pixels drawn around the view and cropped, so that labels near the edge are placed as in a larger map. */
+  margin: number;
+}
+
+/**
+ * A box of a CRS. Every field is required. Vector layers are drawn in it with projected vertices; raster,
+ * hillshade and color-relief are rendered in Web Mercator and warped.
+ */
+export interface ProjectedView {
+  /**
+   * PROJJSON of a geographic or projected CRS. Supported methods: Transverse Mercator, Mercator, Pseudo Mercator,
+   * Lambert Conic Conformal, Polar Stereographic, Lambert Azimuthal Equal Area, Equal Earth and PROJ's
+   * Geostationary Satellite, without datum shifts.
+   */
+  projjson: object;
+  /** What is drawn at bearing 0, in CRS units (degrees for longlat), easting/longitude first whatever the CRS's axis order. */
+  bbox: [minX: number, minY: number, maxX: number, maxY: number];
+  /** Degrees clockwise from the CRS's y axis of the direction that is up: the view turns around the center of `bbox`. */
   bearing: number;
   /** Output width in CSS pixels. */
   width: number;
@@ -50,6 +76,8 @@ export interface RendererOptions {
 /** The addon's sans-IO renderer. Calls on one renderer must not overlap. */
 interface NativeRenderer {
   setView(view: View): void;
+  /** Throws for a CRS the renderer does not support. */
+  setProjectedView(view: Omit<ProjectedView, 'projjson'> & { projjson: string }): void;
   /** URLs still needed: sources, then tiles, then glyph ranges, each stage found from the last. */
   needs(): Promise<string[]>;
   /** `null` is a missing resource. The bytes are read in place until this resolves. */
@@ -59,7 +87,7 @@ interface NativeRenderer {
 }
 
 interface Binding {
-  Renderer: new (style: string, view: View) => NativeRenderer;
+  Renderer: new (style: string) => NativeRenderer;
   encodePng(rgba: Uint8Array, width: number, height: number): Promise<Uint8Array>;
   encodeWebp(rgba: Uint8Array, width: number, height: number): Promise<Uint8Array>;
   encodeJpeg(rgba: Uint8Array, width: number, height: number, quality: number): Promise<Uint8Array>;
@@ -161,16 +189,28 @@ export class Renderer {
    * renderers to draw in parallel.
    */
   renderView(view: View): Promise<Uint8Array> {
+    return this.#enqueue((native) => native.setView(view));
+  }
+
+  /**
+   * `renderView` of a box of a CRS: `round(width * pixelRatio)` x `round(height * pixelRatio)` pixels. An
+   * unsupported CRS rejects. Resources loaded for one CRS serve the others, and Web Mercator views, too.
+   */
+  renderProjectedView(view: ProjectedView): Promise<Uint8Array> {
+    const projected = { ...view, projjson: JSON.stringify(view.projjson) };
+    return this.#enqueue((native) => native.setProjectedView(projected));
+  }
+
+  #enqueue(setView: (native: NativeRenderer) => void): Promise<Uint8Array> {
     // The native renderer takes one call at a time and has one view.
-    const rgba = this.#queue.then(() => this.#draw(view));
+    const rgba = this.#queue.then(() => this.#draw(setView));
     this.#queue = rgba.catch(() => {});
     return rgba;
   }
 
-  async #draw(view: View): Promise<Uint8Array> {
-    if (this.#native) this.#native.setView(view);
-    else this.#native = new binding.Renderer(this.#style, view);
-    const native = this.#native;
+  async #draw(setView: (native: NativeRenderer) => void): Promise<Uint8Array> {
+    const native = this.#native ??= new binding.Renderer(this.#style);
+    setView(native);
     for (let round = 0; ; round++) {
       const urls = await native.needs();
       if (urls.length === 0) break;

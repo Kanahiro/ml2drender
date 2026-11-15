@@ -81,8 +81,8 @@ impl Warp {
             (view.width as f64 * view.pixel_ratio).round() as usize,
             (view.height as f64 * view.pixel_ratio).round() as usize,
         ];
-        if !(b[2] > b[0] && b[3] > b[1]) || out[0] == 0 || out[1] == 0 {
-            return Err(Error::Unsupported(format!("empty projected view {b:?}")));
+        if !(b[2] > b[0] && b[3] > b[1]) || !b.iter().all(|v| v.is_finite()) || out[0] == 0 || out[1] == 0 {
+            return Err(Error::Unsupported(format!("empty or infinite projected view {b:?}")));
         }
         if !view.bearing.is_finite() {
             return Err(Error::Unsupported("projected view without a finite bearing".into()));

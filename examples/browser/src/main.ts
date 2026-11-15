@@ -242,7 +242,7 @@ async function applyStyle(): Promise<boolean> {
 async function applyProjection() {
   const text = projInput.value.trim();
   if (text === appliedProjJson) return;
-  const next = text ? await registerProjJson(text) : undefined;
+  const next = text ? registerProjJson(text) : undefined;
   let center = map.getCenter();
   const zoom = map.getZoom() - (projection ? zoomOffset(projection, center) : 0);
   // GL JS cannot migrate its camera to a CRS without a point for the center (e.g. the far side of a

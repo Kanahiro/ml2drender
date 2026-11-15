@@ -14,7 +14,7 @@ Prebuilt addons are published for Linux (x64, arm64; glibc 2.34+), macOS (x64, a
 |---|---|---|
 | Runs in | browsers, Node.js, Deno, Cloudflare Workers | Node.js |
 | Fetching | built in (`loadResource` to customize) | built in (`loadResource` to customize) |
-| Views | Web Mercator, projected CRSs (PROJJSON) | Web Mercator |
+| Views | Web Mercator; projected CRSs (PROJJSON) by box, tile of a grid or camera | Web Mercator; projected CRSs (PROJJSON) by box |
 | Reprojected sources for GL JS (`getTile`, `toStyle`) | yes | no |
 | Concurrency | renders take turns on the JS thread | renders run in parallel on libuv's thread pool, off the JS thread |
 
@@ -64,6 +64,29 @@ A renderer keeps the resources and tiles it has decoded, so later views load onl
 | `width`, `height` | Output size in CSS pixels. |
 | `pixelRatio` | Device pixels per CSS pixel. The image is `round(width * pixelRatio)` x `round(height * pixelRatio)` pixels. |
 | `margin` | CSS pixels drawn around the view and cropped, so labels near the edge are placed as in a larger map. |
+
+### `renderer.renderProjectedView(view)`
+
+`renderView` of a box of a projected CRS:
+
+```ts
+const rgba = await renderer.renderProjectedView({
+  projjson: utm54n, // PROJJSON of EPSG:32654
+  bbox: [300_000, 3_900_000, 500_000, 4_100_000], bearing: 0,
+  width: 512, height: 512, pixelRatio: 1, margin: 0,
+});
+```
+
+Vector layers are drawn with projected vertices; raster, hillshade and color-relief are rendered in Web Mercator and warped. An unsupported CRS rejects. One renderer can mix CRSs and Web Mercator views, and they share loaded resources. Every field is required:
+
+| Field | |
+|---|---|
+| `projjson` | The CRS as a PROJJSON object. For the supported methods, see [Projected coordinate reference systems](https://github.com/Kanahiro/ml2drender#projected-coordinate-reference-systems). |
+| `bbox` | `[minX, minY, maxX, maxY]` in CRS units (degrees for longlat), easting first: the area drawn at bearing 0. |
+| `bearing` | Degrees clockwise from the CRS's y axis of the direction that is up. The view turns around the center of `bbox`. |
+| `width`, `height`, `pixelRatio`, `margin` | As in `renderView`. |
+
+The zoom that drives style evaluation and source tile selection comes from CRS units per CSS pixel, as in [`@ml2drender/wasm`](https://github.com/Kanahiro/ml2drender#rendererprojectedcrs).
 
 ### `encodePng(rgba, width, height)`, `encodeWebp(rgba, width, height)`, `encodeJpeg(rgba, width, height, quality)`
 

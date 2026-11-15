@@ -3,7 +3,7 @@
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 
 fn error(e: ml2drender::Error) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
@@ -42,25 +42,72 @@ impl View {
     /// Output width and height in pixels.
     #[getter]
     fn size(&self) -> (u32, u32) {
-        let v = &self.0;
-        ((v.width as f64 * v.pixel_ratio).round() as u32, (v.height as f64 * v.pixel_ratio).round() as u32)
+        pixels(self.0.width, self.0.height, self.0.pixel_ratio)
     }
 }
 
-/// A style fixed at creation, drawn for a view once the resources it `needs` are provided.
+fn pixels(width: u32, height: u32, pixel_ratio: f64) -> (u32, u32) {
+    ((width as f64 * pixel_ratio).round() as u32, (height as f64 * pixel_ratio).round() as u32)
+}
+
+/// A box of a CRS: `projjson` (the PROJJSON as a dict), `bbox` (min x, min y, max x, max y) in CRS
+/// units, turned around its center by `bearing` degrees; the output size as in `View`.
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct ProjectedView(ml2drender::reproject::ProjectedView);
+
+#[pymethods]
+impl ProjectedView {
+    #[new]
+    #[pyo3(signature = (projjson, bbox, width, height, bearing = 0.0, pixel_ratio = 1.0, margin = 0))]
+    fn new(
+        projjson: &Bound<'_, PyDict>,
+        bbox: [f64; 4],
+        width: u32,
+        height: u32,
+        bearing: f64,
+        pixel_ratio: f64,
+        margin: u32,
+    ) -> PyResult<Self> {
+        let projjson = projjson.py().import("json")?.call_method1("dumps", (projjson,))?.extract()?;
+        Ok(ProjectedView(ml2drender::reproject::ProjectedView {
+            projjson,
+            bbox,
+            bearing,
+            width,
+            height,
+            pixel_ratio,
+            margin,
+        }))
+    }
+
+    /// Output width and height in pixels.
+    #[getter]
+    fn size(&self) -> (u32, u32) {
+        pixels(self.0.width, self.0.height, self.0.pixel_ratio)
+    }
+}
+
+/// A style fixed at creation, drawn for a view (`set_view` or `set_projected_view`) once the
+/// resources it `needs` are provided.
 #[pyclass(unsendable)]
 struct Renderer(ml2drender::Renderer);
 
 #[pymethods]
 impl Renderer {
     #[new]
-    fn new(style: &str, view: View) -> PyResult<Self> {
-        Ok(Renderer(ml2drender::Renderer::new(style, view.0).map_err(error)?))
+    fn new(style: &str) -> PyResult<Self> {
+        Ok(Renderer(ml2drender::Renderer::new(style, ml2drender::View::tile(0, 0, 0, 256)).map_err(error)?))
     }
 
-    /// Point the renderer at another camera, keeping the resources it has.
+    /// Point the renderer at a camera, keeping the resources it has.
     fn set_view(&mut self, view: View) {
         self.0.set_view(view.0);
+    }
+
+    /// Point the renderer at a box of a CRS, keeping the resources it has.
+    fn set_projected_view(&mut self, view: ProjectedView) -> PyResult<()> {
+        self.0.set_projected_view(&view.0).map_err(error)
     }
 
     /// URLs of the resources still needed before `render`.
@@ -109,6 +156,7 @@ fn encode_jpeg<'py>(
 #[pyo3(name = "_native")]
 fn ml2drender_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<View>()?;
+    m.add_class::<ProjectedView>()?;
     m.add_class::<Renderer>()?;
     m.add_function(wrap_pyfunction!(encode_png, m)?)?;
     m.add_function(wrap_pyfunction!(encode_webp, m)?)?;
