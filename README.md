@@ -2,13 +2,13 @@
 
 **A 2D map renderer for MapLibre styles, written in Rust. It needs no GPU.** It compiles to WebAssembly and runs in browsers, Cloudflare Workers, Deno and Node.js. Node-API and Python bindings are also included.
 
-[Live demo](https://kanahiro.github.io/ml2drender/) · [API reference](https://kanahiro.github.io/ml2drender/api/) · [Quick start](#quick-start) · [Projected CRSs](#projected-coordinate-reference-systems) · [Cloudflare Workers](#cloudflare-workers)
+[Live demo](https://kanahiro.github.io/ml2drender/) · [API reference](https://kanahiro.github.io/ml2drender/api/) · [Quick start](#quick-start) · [Projected CRSs](#projected-coordinate-reference-systems)
 
 - **No GPU, no native dependencies.** It is a software rasterizer in pure Rust. It runs on `wasm32-unknown-unknown` and links no C libraries.
 - **Faithful to MapLibre.** Bucket building, shader math and quantization are ported from MapLibre GL JS. It passes 98.0% of the applicable upstream render tests at GL JS's own tolerances ([conformance](#conformance)).
 - **Any projected CRS.** It draws maps directly in a CRS given as PROJJSON: UTM, national grids, LAEA, polar stereographic, Equal Earth, geostationary views and more.
 - **MapLibre GL JS in any CRS.** Every source of a style (vector tiles, GeoJSON, raster, DEM) can be reprojected and served on a CRS's tile grid. MapLibre GL JS can then draw the original style in that CRS, with interaction and feature queries.
-- **Made for serverless.** The core does no network or file I/O; the host fetches everything. Memory use is kept within Cloudflare Workers' 128 MB limit.
+- **Made for serverless.** The core does no network or file I/O; the host fetches everything.
 
 > [!NOTE]
 > ml2drender draws flat 2D maps. 3D features (fill-extrusion, terrain, globe, pitch) are out of scope; fill-extrusion layers are drawn as fills by default. Styles are fixed when a renderer is created: there is no API for changing a style at runtime.
@@ -107,7 +107,6 @@ Takes a style object (the official `StyleSpecification` type) and loads the WASM
 | `loadResource` | HTTP `fetch` | `(url) => Promise<Uint8Array \| null>`. Fetches tiles, TileJSON, sprites and glyphs. Return `null` (HTTP 404) for a missing resource and rendering goes on without it; any other failure should reject. Concurrency limits, retries and caching belong here. |
 | `wasm` | bundled WASM | A compiled `WebAssembly.Module`. Required in Node.js and Cloudflare Workers. |
 | `cache.ttlMs` | `300_000` | How long the renderer inside WASM (decoded tiles, geometry, glyphs) is reused across renders. `0` creates and frees one per render, for the least memory; `Infinity` never expires. |
-| `exclusive` | `false` | Runs renders on the same WASM instance one at a time. Without it, overlapping renders each hold their decoded data while they wait for fetches. Meant for Workers. |
 | `transformFillExtrusion` | convert to fill | Replaces each fill-extrusion layer with a 2D layer. By default it becomes a fill with the same color, opacity, pattern and translation. |
 
 Concurrent requests for the same URL are fetched once. Fetched bytes are not cached: rely on the browser's HTTP cache, or cache inside `loadResource` (for example with the Cache API on Workers).
@@ -188,28 +187,6 @@ CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`). PROJ strings and
 - **No datum transformations.** Style coordinates (WGS84) are projected as if they were lng/lat on the CRS's ellipsoid.
 - **Axis order:** always easting first, then northing (longitude, latitude), whatever the CRS's declared axis order.
 - **How layers are drawn:** background, fill, line, circle, heatmap and symbol layers are drawn from projected vertices directly into the output. Pixel lengths such as line widths, circle radii and text sizes stay constant on screen. raster, hillshade and color-relief layers are drawn in Web Mercator and warped onto a mesh. Areas outside the projection's domain are transparent.
-
-## Cloudflare Workers
-
-Import `ml2drender/renderer.wasm` with Wrangler and pass the module it gives you:
-
-```ts
-import { MapRenderer } from 'ml2drender';
-import wasm from 'ml2drender/renderer.wasm';
-
-export default {
-  async fetch() {
-    const style = await (await fetch('https://demotiles.maplibre.org/style.json')).json();
-    const renderer = await MapRenderer.init(style, { wasm, cache: { ttlMs: 0 }, exclusive: true });
-    const image = await renderer.renderView({ center: [0, 0], zoom: 0, width: 512, height: 512, margin: 64 });
-    return new Response(image.toWebp(), { headers: { 'Content-Type': 'image/webp' } });
-  },
-};
-```
-
-An isolate's 128 MB limit covers the JS heap plus WASM memory, and WASM memory never shrinks. Create a renderer per request with `ttlMs: 0` and `exclusive: true`. Such renderers share one WASM instance per isolate and draw concurrent requests one at a time.
-
-Measured example: OpenFreeMap Liberty at z14 around Tokyo Station (512 px, margin 64) uses about 75 MiB of WASM memory. The figure is the same with 8 concurrent requests on a local workerd.
 
 ## Other bindings
 
