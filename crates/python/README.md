@@ -73,7 +73,7 @@ async with httpx.AsyncClient(headers={"Authorization": "Bearer ..."}, follow_red
 | `await projected.render(box)` | `render_view` of a box of the CRS. An unsupported CRS raises `RuntimeError`. |
 | `await projected.render_tile(z, x, y, tile_size=256, pixel_ratio=1.0, margin=0)` | Tile `z/x/y` of the CRS's grid. Without a `tile_matrix_set` it raises `TypeError`. |
 | `await projected.render_view(view)` | The camera `view` (a `View`) in the CRS: the same area as MapLibre GL JS draws with that center, zoom and bearing once the CRS is registered with `addProjection`. At zoom 0, tile 0/0/0 of the grid is 512 CSS pixels wide. Without a `tile_matrix_set` it raises `TypeError`. |
-| `ProjectedBox(bbox, width, height, bearing=0.0, pixel_ratio=1.0, margin=0)` | A box of a CRS. `bbox` is `(min_x, min_y, max_x, max_y)` in CRS units (degrees for longlat), easting first: the area drawn at bearing 0. `bearing` is degrees clockwise from the CRS's y axis of the direction that is up; the view turns around the center of `bbox`. The rest is as in `View`. |
+| `ProjectedBox(bbox, size, bearing=0.0, pixel_ratio=1.0, margin=0)` | A box of a CRS. `bbox` is `(min_x, min_y, max_x, max_y)` in CRS units (degrees for longlat), easting first: the area drawn at bearing 0. The image has the box's aspect ratio and `size` CSS pixels on its long side. `bearing` is degrees clockwise from the CRS's y axis of the direction that is up; the view turns around the center of `bbox`. The rest is as in `View`. |
 | `ProjectedBox.size` | `(width, height)` of the output in pixels. |
 | `encode_png(rgba, width, height)` | Lossless PNG. |
 | `encode_webp(rgba, width, height)` | Lossless WebP. |
@@ -90,7 +90,7 @@ In a projected CRS, vector layers are drawn with projected vertices; raster, hil
 utm = renderer.projected(utm54n, ml2drender.TileMatrixSet((-2_000_000, 6_000_000), 4_000_000))
 
 # a box in CRS units
-box = ml2drender.ProjectedBox((300_000, 3_900_000, 500_000, 4_100_000), width=512, height=512)
+box = ml2drender.ProjectedBox((300_000, 3_900_000, 500_000, 4_100_000), size=512)
 rgba = await utm.render(box)
 # a tile of the CRS's grid
 rgba = await utm.render_tile(3, 4, 2)

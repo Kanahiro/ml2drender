@@ -42,8 +42,8 @@ pub struct ProjectedView {
     /// `[minX, minY, maxX, maxY]` in CRS units.
     pub bbox: Vec<f64>,
     pub bearing: f64,
-    pub width: u32,
-    pub height: u32,
+    /// CSS pixels of the long side; the image has the box's aspect ratio.
+    pub size: u32,
     pub pixel_ratio: f64,
     pub margin: u32,
 }
@@ -128,15 +128,14 @@ impl Renderer {
     pub fn set_projected_view(&self, view: ProjectedView) -> Result<()> {
         let bbox =
             <[f64; 4]>::try_from(view.bbox).map_err(|_| Error::from_reason("bbox must be [minX, minY, maxX, maxY]"))?;
-        let view = ml2drender::reproject::ProjectedView {
-            projjson: view.projjson,
+        let view = ml2drender::reproject::ProjectedView::fit(
+            &view.projjson,
             bbox,
-            bearing: view.bearing,
-            width: view.width,
-            height: view.height,
-            pixel_ratio: view.pixel_ratio,
-            margin: view.margin,
-        };
+            view.bearing,
+            view.size,
+            view.pixel_ratio,
+            view.margin,
+        );
         with(&self.inner, |r| r.set_projected_view(&view))?.map_err(error)
     }
 

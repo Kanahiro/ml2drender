@@ -81,10 +81,8 @@ export interface ProjectedBox {
   bbox: [minX: number, minY: number, maxX: number, maxY: number];
   /** Degrees clockwise from the CRS's y axis of the direction that is up: the view turns around the center of `bbox`. Default: 0. */
   bearing?: number;
-  /** Positive integer CSS pixels. */
-  width: number;
-  /** Positive integer CSS pixels. */
-  height: number;
+  /** Positive integer CSS pixels of the image's long side; the image has the box's aspect ratio. */
+  size: number;
   /** Output pixels per CSS pixel. Default: 1. */
   pixelRatio?: number;
   /** Non-negative integer CSS pixels of extra coverage, cropped from the output. Default: 0. */
@@ -349,7 +347,6 @@ function tileView({ z, x, y, tileSize = 256, pixelRatio, margin }: Tile): View {
 const MAX_LAT = 85.0511287798066;
 
 function fitLngLat({ bbox: [west, south, east, north], size, pixelRatio, margin }: LngLatBox): View {
-  if (!Number.isInteger(size) || size < 1 || size > 0xffffffff) throw new RangeError('size must be a positive uint32 integer');
   if (east < west) east += 360;
   [south, north] = [south, north].map((lat) => Math.max(-MAX_LAT, Math.min(MAX_LAT, lat)));
   if (!(east > west && north > south)) throw new RangeError('bbox must be [west, south, east, north] with a non-empty area');
@@ -357,18 +354,28 @@ function fitLngLat({ bbox: [west, south, east, north], size, pixelRatio, margin 
   const my = (lat: number) => (1 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / Math.PI) / 2;
   const [y0, y1] = [my(north), my(south)];
   const [dx, dy] = [(east - west) / 360, y1 - y0];
-  // CSS pixels per world: the long side spans `size`.
-  const scale = size / Math.max(dx, dy);
+  const [width, height, scale] = fitSize(dx, dy, size);
   const lng = (west + east) / 2;
   return {
     center: [lng > 180 ? lng - 360 : lng, Math.atan(Math.sinh(Math.PI * (1 - (y0 + y1)))) * 180 / Math.PI],
+    // `scale` is CSS pixels per world.
     zoom: Math.log2(scale / 512),
-    width: Math.max(1, Math.round(dx * scale)),
-    height: Math.max(1, Math.round(dy * scale)),
+    width,
+    height,
     pixelRatio,
     margin,
   };
 }
+
+/** Width and height of a `dx` x `dy` box with `size` on the long side (at least 1 on the short one), and the scale. */
+function fitSize(dx: number, dy: number, size: number): [width: number, height: number, scale: number] {
+  if (!Number.isInteger(size) || size < 1 || size > 0xffffffff) throw new RangeError('size must be a positive uint32 integer');
+  const scale = size / Math.max(dx, dy);
+  return [Math.max(1, Math.round(dx * scale)), Math.max(1, Math.round(dy * scale)), scale];
+}
+
+/** A `ProjectedBox` of a size in CSS pixels. */
+type SizedBox = Omit<ProjectedBox, 'size'> & { width: number; height: number };
 
 function marginArg(value = 0): number {
   const margin = nonnegative(value, 'margin');
@@ -516,10 +523,14 @@ export class MapRenderer {
       const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
       return [minX, maxY - s, minX + s, maxY];
     };
-    const render = async (view: ProjectedBox) => this.draw(view, ...this.projectedArgs(projjson, view));
+    const render = async (view: SizedBox) => this.draw(view, ...this.projectedArgs(projjson, view));
     return {
       crs,
-      render,
+      render: async ({ size, ...box }) => {
+        const [minX, minY, maxX, maxY] = box.bbox;
+        const [width, height] = fitSize(maxX - minX, maxY - minY, size);
+        return render({ ...box, width, height });
+      },
       renderTile: async ({ tileSize = 256, pixelRatio, margin, ...tile }) => {
         if (!Number.isInteger(tileSize) || tileSize < 1) throw new RangeError('tileSize must be a positive integer');
         return render({ bbox: box(tile), width: tileSize, height: tileSize, pixelRatio, margin });
@@ -578,7 +589,7 @@ export class MapRenderer {
   }
 
   /** The core arguments and `setView` of a view of the CRS `projjson` (encoded), turned around its center by `bearing`. */
-  private projectedArgs(projjson: Uint8Array, view: ProjectedBox): [ViewArgs, (handle: number) => void] {
+  private projectedArgs(projjson: Uint8Array, view: SizedBox): [ViewArgs, (handle: number) => void] {
     const margin = marginArg(view.margin);
     const size = sizeArgs(view);
     const bearing = view.bearing ?? 0;
@@ -592,7 +603,7 @@ export class MapRenderer {
   }
 
   /** The fetch-and-render loop of images; `setView` points a core at the view. */
-  private async draw(view: View | ProjectedBox, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
+  private async draw(view: View | SizedBox, args: ViewArgs, setView: (handle: number) => void): Promise<RenderedImage> {
     const w = this.wasm;
     const bytes = await this.run(args, setView, new Uint8Array(), w.renderer_render);
     const width = Math.round(view.width * (view.pixelRatio ?? 1));

@@ -86,11 +86,9 @@ export interface ProjectedBox {
   bbox: [minX: number, minY: number, maxX: number, maxY: number];
   /** Degrees clockwise from the CRS's y axis of the direction that is up: the view turns around the center of `bbox`. */
   bearing: number;
-  /** Output width in CSS pixels. */
-  width: number;
-  /** Output height in CSS pixels. */
-  height: number;
-  /** Device pixels per CSS pixel: the image is `round(width * pixelRatio)` pixels wide. */
+  /** CSS pixels of the image's long side; the image has the box's aspect ratio. */
+  size: number;
+  /** Device pixels per CSS pixel. */
   pixelRatio: number;
   /** CSS pixels drawn around the view and cropped, so that labels near the edge are placed as in a larger map. */
   margin: number;
@@ -99,8 +97,8 @@ export interface ProjectedBox {
 /** A {@link Renderer} drawing in a CRS (see {@link Renderer.projected}). */
 export interface ProjectedRenderer {
   /**
-   * `renderView` of a box of the CRS: `round(width * pixelRatio)` x `round(height * pixelRatio)` pixels. A CRS the
-   * renderer does not support rejects.
+   * `renderView` of a box of the CRS, in an image of its aspect ratio with `size * pixelRatio` pixels (rounded) on
+   * the long side. A CRS the renderer does not support rejects.
    */
   render(box: ProjectedBox): Promise<Uint8Array>;
   /** `render` of tile `z/x/y` of the CRS's grid. Rejects without `crs.tileMatrixSet`. */
