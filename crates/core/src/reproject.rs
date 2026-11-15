@@ -335,6 +335,12 @@ impl Warp {
             // different points, would leave slivers that readers' earcut triangulates into gaps.
             if cut && ty == GeomType::Polygon {
                 geom = crate::union(geom).into_iter().flatten().collect();
+                // The union rounds coordinates, some past the cut: `on_map` would take those for
+                // leaving the map, and `rejoin` would walk an outline the antimeridian of a polar
+                // projection (a slit through the map) is not part of.
+                for p in geom.iter_mut().flatten() {
+                    p[0] = p[0].clamp(c - 0.5, c + 0.5);
+                }
             }
         }
         // Output pixels, as `world_to_screen`.
@@ -672,6 +678,50 @@ mod tests {
             r.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum::<i64>()
         };
         assert_eq!(rings.iter().map(|r| area(r).signum()).collect::<Vec<_>>(), [1, 1], "{rings:?}");
+    }
+
+    #[test]
+    fn polygons_cut_at_a_polar_antimeridian_stay_on_their_side() {
+        // North polar LAEA around 40°W (EPSG:3574), the quadrant left of its antimeridian (140°E, the
+        // output's right edge). The antimeridian is a slit in the map, not its outline: what is
+        // left of a polygon cut there ends on it, east of 140°E here and west of it past the edge.
+        let view = ProjectedView {
+            projjson: test_crs::projected(
+                "Lambert Azimuthal Equal Area",
+                test_crs::WGS84,
+                &[("Latitude of natural origin", 90.0), ("Longitude of natural origin", -40.0)],
+            ),
+            bbox: [-2.45e6, 0.0, 0.0, 2.45e6],
+            bearing: 0.0,
+            width: 512,
+            height: 512,
+            pixel_ratio: 1.0,
+            margin: 0,
+        };
+        let (warp, _) = Warp::new(&view).unwrap();
+        let m = |lng: f64, lat: f64| [tile::mercator_x(lng), tile::mercator_y(lat)];
+        // Rings (MVT orientation) across 140°E with a bay from the west that reaches past it, so
+        // that what is left on either side meets the cut twice.
+        for k in 0..8 {
+            let (w, e, d) = (130.0 - k as f64, 150.0 + k as f64, k as f64 * 0.7);
+            let ring = vec![
+                m(w, 70.0 + d),
+                m(e, 70.0 + d),
+                m(e, 50.0 + d),
+                m(w, 50.0 + d),
+                m(w, 55.0 + d),
+                m(145.0, 55.0 + d),
+                m(145.0, 60.0 + d),
+                m(w, 60.0 + d),
+                m(w, 70.0 + d),
+            ];
+            // The world copy east of the cut, as the tiles of this view have it, and the one west.
+            let east: Vec<[f64; 2]> = ring.iter().map(|p| [p[0] - 1.0, p[1]]).collect();
+            let east = warp.project(mvt::GeomType::Polygon, vec![east], 1.0 / 256.0, 4096.0, 128.0);
+            assert!(east.iter().flatten().all(|p| p[0] <= 4096), "east of 140°E, ring {k}: {east:?}");
+            let west = warp.project(mvt::GeomType::Polygon, vec![ring], 1.0 / 256.0, 4096.0, 128.0);
+            assert!(west.iter().flatten().all(|p| p[0] >= 4096), "west of 140°E, ring {k}: {west:?}");
+        }
     }
 
     #[test]
