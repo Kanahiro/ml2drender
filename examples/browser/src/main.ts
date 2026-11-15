@@ -1,9 +1,8 @@
-import { addProtocol, type GeoJSONSource, type GeoJSONSourceSpecification, importScriptInWorkers, LngLat, Map as MapLibreMap, Popup, setWorkerUrl, type StyleSpecification } from 'maplibre-gl';
+import { addProtocol, LngLat, Map as MapLibreMap, Popup, setWorkerUrl, type StyleSpecification } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
-import projectionHandlerUrl from './gl-projection-handler.ts?worker&url';
 import projjsonPresets from './projjson-presets.json';
-import { clipToCrs, type Crs, registerProjJson, zoomOffset } from './projections';
+import { type Crs, registerProjJson, zoomOffset } from './projections';
 import { type Crs as RendererCrs, MapRenderer } from '@ml2drender/wasm';
 import { stylePresets } from './styles';
 import { TileWorker } from './worker-client';
@@ -50,17 +49,11 @@ const tileWorker = new TileWorker();
 let styleGeneration = 0;
 let tileRevision = 0;
 let ready = false;
-/** The applied inputs: the renderer follows these. */
+/** The applied Style JSON and GeoJSON inputs: the renderer follows these. */
 let appliedStyle: string | undefined;
 /** The applied style on the main thread, for the style GL JS draws from reprojected sources (`toStyle`). */
 let appliedRenderer: MapRenderer | undefined;
 let appliedProjJson: string | undefined;
-let appliedGeojson: string | undefined;
-const emptyCollection: GeoJSONSourceSpecification['data'] = { type: 'FeatureCollection', features: [] };
-/** The overlay GL JS draws itself. */
-let checkData: GeoJSONSourceSpecification["data"] = emptyCollection;
-/** `checkData` cut to where the applied projection places it. */
-const overlay = () => projection ? clipToCrs(checkData, projection) : checkData;
 /** The applied projection; undefined renders Web Mercator without reprojection. */
 let projection: Crs | undefined;
 
@@ -134,9 +127,6 @@ addProtocol('ml2drender-source', async (request, controller) => {
 });
 
 setWorkerUrl(workerUrl);
-// GL JS imports URLs ending in `.mjs` as modules as they are (others it re-imports from a blob,
-// which breaks the module's own imports); the fragment never reaches the server.
-await importScriptInWorkers(`${projectionHandlerUrl}#.mjs`);
 const emptyStyle = (): StyleSpecification => ({ version: 8, sources: {}, layers: [] });
 // The URL hash (`#zoom/lat/lng`) keeps the location across reloads and links. A CRS's zoom can be
 // below the Mercator one's at the same scale.
@@ -159,11 +149,10 @@ map.on('error', (event) => {
   if (!(event.error instanceof Error && event.error.name === 'AbortError')) fail(event.error);
 });
 
-// Hovering a feature of the check overlay, or in vector mode of the style, shows its attributes.
+// Hovering a feature in GL JS mode shows its attributes.
 const popup = new Popup({ closeButton: false, closeOnClick: false, maxWidth: '320px' });
-const checkLayers = ['check-fill', 'check-line', 'check'];
 /** Layers whose features show on hover (set by `redraw`). */
-let hoverLayers = checkLayers;
+let hoverLayers: string[] = [];
 const hideHover = () => {
   map.getCanvas().style.cursor = '';
   popup.remove();
@@ -199,31 +188,38 @@ function redraw() {
       sources: { rendered: { type: 'raster', tiles: [`ml2drender://${styleGeneration}/{z}/{x}/{y}?${revision}`], tileSize: TILE_SIZE, maxzoom: 23 } },
       layers: [{ id: 'rendered', type: 'raster', source: 'rendered', paint: { 'raster-fade-duration': 0 } }],
     };
-  hoverLayers = [...checkLayers, ...tiles.layers.filter((l) => l.type !== 'background' && l.id !== 'rendered').map((l) => l.id)];
-  map.setStyle({
-    ...tiles,
-    sources: {
-      ...tiles.sources,
-      // Drawn by GL JS itself, to check that its projection lines up with the rendered tiles.
-      check: { type: 'geojson', data: overlay() },
-    },
+  hoverLayers = tiles.layers.filter((l) => l.type !== 'background' && l.id !== 'rendered').map((l) => l.id);
+  map.setStyle(tiles, { diff: false });
+}
+
+/** The Style JSON and GeoJSON inputs, as the key of what the renderer follows. */
+const styleInputs = () => `${styleInput.value}\0${geojsonInput.value.trim()}`;
+
+/** The style input with the GeoJSON input (empty: nothing) on top as the source `check`. */
+function inputStyle(): StyleSpecification {
+  const style: StyleSpecification = JSON.parse(styleInput.value);
+  if (!style || style.version !== 8 || !style.sources || typeof style.sources !== 'object' || Array.isArray(style.sources) || !Array.isArray(style.layers)) {
+    throw new Error('Style JSON needs version: 8, a sources object and a layers array.');
+  }
+  const geojson = geojsonInput.value.trim();
+  if (!geojson) return style;
+  return {
+    ...style,
+    sources: { ...style.sources, check: { type: 'geojson', data: JSON.parse(geojson) } },
     layers: [
-      ...tiles.layers,
+      ...style.layers,
       { id: 'check-fill', type: 'fill', source: 'check', filter: ['in', ['geometry-type'], ['literal', ['Polygon', 'MultiPolygon']]], paint: { 'fill-color': '#1e6fd9', 'fill-opacity': 0.2 } },
       { id: 'check-line', type: 'line', source: 'check', filter: ['!', ['in', ['geometry-type'], ['literal', ['Point', 'MultiPoint']]]], paint: { 'line-color': '#1e6fd9', 'line-width': 1.5 } },
       { id: 'check', type: 'circle', source: 'check', filter: ['in', ['geometry-type'], ['literal', ['Point', 'MultiPoint']]], paint: { 'circle-radius': 3, 'circle-color': '#1e6fd9', 'circle-stroke-color': '#fff', 'circle-stroke-width': 1 } },
     ],
-  }, { diff: false });
+  };
 }
 
-/** Loads the style input into the render workers, if it changed. */
+/** Loads the style and GeoJSON inputs into the renderers, if they changed. */
 async function applyStyle(): Promise<boolean> {
-  const text = styleInput.value;
+  const text = styleInputs();
   if (text === appliedStyle) return true;
-  const style: StyleSpecification = JSON.parse(text);
-  if (!style || style.version !== 8 || !style.sources || typeof style.sources !== 'object' || Array.isArray(style.sources) || !Array.isArray(style.layers)) {
-    throw new Error('Style JSON needs version: 8, a sources object and a layers array.');
-  }
+  const style = inputStyle();
   const generation = ++styleGeneration;
   ready = false;
   initMs = undefined;
@@ -264,28 +260,11 @@ async function applyProjection() {
   map.once('style.load', () => map.jumpTo({ center, zoom: Number.isFinite(nextZoom) ? nextZoom : map.getZoom() }));
 }
 
-/** Puts the GeoJSON input (empty: nothing) on the overlay, if it changed. */
-function applyGeojson() {
-  const text = geojsonInput.value.trim();
-  if (text === appliedGeojson) return;
-  checkData = text ? JSON.parse(text) : emptyCollection;
-  appliedGeojson = text;
-  const setData = () => (map.getSource('check') as GeoJSONSource | undefined)?.setData(overlay());
-  // A style still loading has no sources yet.
-  if (!setData()) map.once('style.load', setData);
-}
-
-/** Applies the inputs; redraws the tiles if the style or projection changed. */
+/** Applies the inputs; redraws the tiles if any changed. */
 async function apply() {
   logEl.textContent = '';
-  // First, so that a redraw below carries the new overlay; its errors do not hold back the others.
   try {
-    applyGeojson();
-  } catch (error) {
-    fail(error);
-  }
-  try {
-    const changed = styleInput.value !== appliedStyle || projInput.value.trim() !== appliedProjJson;
+    const changed = styleInputs() !== appliedStyle || projInput.value.trim() !== appliedProjJson;
     if (!await applyStyle()) return;
     await applyProjection();
     if (changed) redraw();
