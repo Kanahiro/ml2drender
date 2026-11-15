@@ -103,7 +103,7 @@ class Renderer:
         """The bytes of ``url``, or None for a missing resource (like HTTP 404: a missing vector
         tile is empty, a missing raster tile is replaced by its parent)."""
     def render(self) -> bytes:
-        """Non-premultiplied RGBA8 pixels of the view, row by row (see its ``size``). Raises ``RuntimeError`` while resources are still needed."""
+        """Non-premultiplied RGBA8 pixels of the view, row by row (see the view's ``pixels``). Raises ``RuntimeError`` while resources are still needed."""
 
 def encode_png(rgba: bytes, width: int, height: int) -> bytes:
     """Lossless PNG of RGBA8 pixels."""
