@@ -79,7 +79,7 @@ impl Properties {
         match self {
             Properties::Object(o) => o.get(key),
             Properties::Tags(t, start, end) => t.tags[*start as usize..*end as usize]
-                .chunks_exact(2)
+                .as_chunks::<2>().0.iter()
                 .rev()
                 .find_map(|kv| (t.keys.get(kv[0] as usize).is_some_and(|k| &**k == key)).then(|| t.values.get(kv[1] as usize)).flatten()),
         }
@@ -95,7 +95,7 @@ impl Properties {
             Properties::Tags(t, start, end) => {
                 let tags = &t.tags[*start as usize..*end as usize];
                 let mut o = Object::with_capacity_and_hasher(tags.len() / 2, Default::default());
-                for kv in tags.chunks_exact(2) {
+                for kv in tags.as_chunks::<2>().0 {
                     if let (Some(k), Some(v)) = (t.keys.get(kv[0] as usize), t.values.get(kv[1] as usize)) {
                         o.insert(k.clone(), v.clone());
                     }

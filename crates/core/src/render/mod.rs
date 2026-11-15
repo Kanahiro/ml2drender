@@ -47,7 +47,7 @@ fn subdivide(points: &mut Vec<[f64; 2]>, triangles: &[usize], max: f64) -> Vec<u
     let mut mids: HashMap<(usize, usize), usize> = HashMap::default();
     let mut out = Vec::with_capacity(triangles.len());
     let mut todo: Vec<[usize; 3]> = triangles
-        .chunks_exact(3)
+        .as_chunks::<3>().0.iter()
         .map(|t| [t[0], t[1], t[2]])
         .collect();
     while let Some(t) = todo.pop() {
@@ -676,7 +676,7 @@ pub fn draw_fill(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
             for polygon in polygons {
                 let screen: Vec<[f64; 2]> = polygon.points.iter().map(|p| to_screen(*p)).collect();
                 let vary = vary_of(&tp, pattern_size, &polygon.points, &screen);
-                for t in polygon.triangles.chunks_exact(3) {
+                for t in polygon.triangles.as_chunks::<3>().0 {
                     let p = [screen[t[0]], screen[t[1]], screen[t[2]]];
                     // Projections keep orientation and bend edges gently, except across a
                     // singularity (e.g. near the antipode of an azimuthal projection, which spreads

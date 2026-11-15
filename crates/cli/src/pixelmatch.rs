@@ -7,8 +7,8 @@ use std::sync::LazyLock;
 pub fn pixelmatch(img1: &[u8], img2: &[u8], output: &mut [u8], width: usize, height: usize, threshold: f64) -> usize {
     let len = width * height;
     assert!(img1.len() == len * 4 && img2.len() == len * 4 && output.len() == len * 4);
-    let a32: Vec<u32> = img1.chunks_exact(4).map(|p| u32::from_le_bytes(p.try_into().unwrap())).collect();
-    let b32: Vec<u32> = img2.chunks_exact(4).map(|p| u32::from_le_bytes(p.try_into().unwrap())).collect();
+    let a32: Vec<u32> = img1.as_chunks::<4>().0.iter().map(|p| u32::from_le_bytes(*p)).collect();
+    let b32: Vec<u32> = img2.as_chunks::<4>().0.iter().map(|p| u32::from_le_bytes(*p)).collect();
 
     let mut diff = 0;
     for i in 0..len {

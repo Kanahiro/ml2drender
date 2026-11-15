@@ -141,6 +141,16 @@ pub fn blend(target: &mut Target, colors: &[Rgba], only: Option<&[bool]>) {
     }
 }
 
+/// Blend the heatmaps again over the pixels the last layer wrote in the opaque pass.
+pub fn reapply(target: &mut Target, heatmaps: &[Vec<Rgba>]) {
+    let only = std::mem::take(&mut target.opaque);
+    if only.iter().any(|&o| o) {
+        for colors in heatmaps {
+            blend(target, colors, Some(&only));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::f16;
@@ -151,15 +161,5 @@ mod tests {
         assert_eq!(f16(1.0 + 1.0 / 4096.0), 1.0);
         assert_eq!(f16(1.0 + 3.0 / 2048.0), 1.0 + 2.0 / 1024.0);
         assert_eq!(f16(1e-9), 0.0);
-    }
-}
-
-/// Blend the heatmaps again over the pixels the last layer wrote in the opaque pass.
-pub fn reapply(target: &mut Target, heatmaps: &[Vec<Rgba>]) {
-    let only = std::mem::take(&mut target.opaque);
-    if only.iter().any(|&o| o) {
-        for colors in heatmaps {
-            blend(target, colors, Some(&only));
-        }
     }
 }

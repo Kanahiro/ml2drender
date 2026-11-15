@@ -90,7 +90,7 @@ fn decode_webp(bytes: &[u8]) -> Option<Image> {
     let (w, h) = dec.dimensions();
     let mut buf = vec![0; dec.output_buffer_size()?];
     dec.read_image(&mut buf).ok()?;
-    let data = if dec.has_alpha() { buf } else { buf.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect() };
+    let data = if dec.has_alpha() { buf } else { buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect() };
     Some(Image { w: w as usize, h: h as usize, data })
 }
 
@@ -103,8 +103,8 @@ fn decode_png(bytes: &[u8]) -> Option<Image> {
     buf.truncate(info.buffer_size());
     let data = match info.color_type {
         png::ColorType::Rgba => buf,
-        png::ColorType::Rgb => buf.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Rgb => buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
         png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return None,
     };
@@ -133,7 +133,7 @@ impl Texture {
     pub fn new(img: &Image, mipmaps: bool) -> Texture {
         let px = img
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|p| {
                 // round(c·a / 255) in integers: c·a / 255 is never a tie.
                 let m = |c: u8| ((c as u32 * p[3] as u32 + 127) / 255) as u8;

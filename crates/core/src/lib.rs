@@ -186,7 +186,7 @@ pub fn encode_jpeg(rgba: &[u8], width: u32, height: u32, quality: u8) -> Result<
         return Err(Error::ImageEncoding(format!("{} bytes is not {width}x{height} RGBA", rgba.len())));
     }
     let rgb: Vec<u8> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .flat_map(|p| {
             let a = p[3] as u32;
             [0, 1, 2].map(|i| ((p[i] as u32 * a + 127) / 255) as u8)
@@ -1590,8 +1590,8 @@ mod tests {
             let rgba = renderer.render().unwrap();
             assert_eq!(rgba.len(), 64 * 64 * 4);
             let center_row = &rgba[32 * 64 * 4..33 * 64 * 4];
-            assert!(center_row.chunks_exact(4).any(|p| p != [255; 4]), "Hillshade must change the white background");
-            assert!(center_row.chunks_exact(4).any(|p| p != &center_row[..4]), "A curved DEM must have varying shading");
+            assert!(center_row.as_chunks::<4>().0.iter().any(|p| *p != [255; 4]), "Hillshade must change the white background");
+            assert!(center_row.as_chunks::<4>().0.iter().any(|p| p != &center_row[..4]), "A curved DEM must have varying shading");
         }
     }
 
@@ -1678,7 +1678,7 @@ mod tests {
             let mut once = Renderer::new(&style, view).unwrap();
             once.set_keep_buckets(false);
             assert_eq!(rgba, render(&mut once), "view {i} without keeping buckets");
-            drawn += rgba.chunks_exact(4).any(|p| p[3] > 0) as usize;
+            drawn += rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0) as usize;
         }
         assert!(drawn > views.len() / 2);
         let src = &shared.sources["g"];
@@ -1731,7 +1731,7 @@ mod tests {
                 let rgba = renderer.render().unwrap();
                 let size = (512.0 * ratio).round() as usize;
                 assert_eq!(rgba.len(), size * size * 4);
-                let visible = rgba.chunks_exact(4).any(|p| p[3] > 0);
+                let visible = rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0);
                 assert_eq!(visible, margin > 0, "ratio={ratio}, margin={margin}");
                 if margin > 0 {
                     assert!(rgba.chunks_exact(size * 4).any(|row| row[(size - 1) * 4 + 3] > 0));
@@ -1779,7 +1779,7 @@ mod tests {
             let layer = |name: &str, f| mvt::Layer { name: name.into(), extent: 4096, features: vec![f] };
             // A square across 0°, a tile boundary at every zoom: each tile has its part, with a buffer,
             // and an id of its own (like OpenMapTiles' oceans).
-            let square = vec![vec![at(-3.0, 2.0), at(-3.0, 8.0), at(3.0, 8.0), at(3.0, 2.0), at(-3.0, 2.0)]];
+            let square = [vec![at(-3.0, 2.0), at(-3.0, 8.0), at(3.0, 8.0), at(3.0, 2.0), at(-3.0, 2.0)]];
             let square: Vec<Vec<[f64; 2]>> = square.iter().map(|r| r.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()).collect();
             let clip = |axis| mvt::clip_axis(&square, mvt::GeomType::Polygon, -128.0, 4224.0, axis);
             let square: Vec<Vec<[i32; 2]>> = mvt::clip_axis(&clip(0), mvt::GeomType::Polygon, -128.0, 4224.0, 1)
@@ -2152,8 +2152,8 @@ mod tests {
             ([0, 0, 255, 255], [255, 255, 255, 255], [0, 0, 0, 0])
         );
         assert_eq!(
-            rgba.chunks_exact(4)
-                .filter(|p| *p == [0, 0, 255, 255])
+            rgba.as_chunks::<4>().0.iter()
+                .filter(|p| **p == [0, 0, 255, 255])
                 .count(),
             64
         );
@@ -2293,7 +2293,7 @@ mod tests {
         let (rgba, renderer) = render(style, &jgd);
         let tiles = renderer.resolve(&renderer.sources["g"]).0.len();
         assert!(tiles > 1, "{tiles} tiles");
-        assert!(rgba.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+        assert!(rgba.as_chunks::<4>().0.iter().all(|p| *p == [255, 0, 0, 255]));
     }
 
     #[test]
@@ -2426,7 +2426,7 @@ mod tests {
         r.set_projected_view(&view).unwrap();
         assert!(r.needs().is_empty());
         let rgba = r.render().unwrap();
-        assert!(rgba.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+        assert!(rgba.as_chunks::<4>().0.iter().all(|p| *p == [255, 0, 0, 255]));
     }
 
     #[test]

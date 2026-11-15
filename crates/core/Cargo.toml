@@ -2,6 +2,7 @@
 name = "ml2drender"
 version = "0.0.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
@@ -15,3 +16,6 @@ zune-jpeg = "0.4"
 image-webp = "0.2"
 i_overlay = { version = "9", default-features = false }
 jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

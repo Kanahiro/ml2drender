@@ -4,7 +4,15 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
+rust-version = "1.100"
 license = "BSD-3-Clause"
+
+# Numeric code indexes several arrays in one loop, keeps tuple-heavy cache types inline, and writes
+# `!(x < y)` where NaN must take the negated branch (as the GLSL it ports does).
+[workspace.lints.clippy]
+needless_range_loop = "allow"
+type_complexity = "allow"
+neg_cmp_op_on_partial_ord = "allow"
 
 [workspace.dependencies]
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
