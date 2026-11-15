@@ -70,7 +70,8 @@ impl TilePattern {
     /// `get_pattern_pos` for a vertex at tile position `pos` and pattern display size `size`.
     pub fn pattern_pos(&self, size: [f32; 2], pos: [f64; 2]) -> [f32; 2] {
         std::array::from_fn(|i| {
-            let offset = gmod(gmod(gmod(self.pixel_upper[i], size[i]) * 256.0, size[i]) * 256.0 + self.pixel_lower[i], size[i]);
+            let offset =
+                gmod(gmod(gmod(self.pixel_upper[i], size[i]) * 256.0, size[i]) * 256.0 + self.pixel_lower[i], size[i]);
             ((self.tile_ratio as f32) * pos[i] as f32 + offset) / size[i]
         })
     }

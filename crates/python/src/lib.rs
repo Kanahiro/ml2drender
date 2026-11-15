@@ -21,7 +21,15 @@ struct View(ml2drender::View);
 impl View {
     #[new]
     #[pyo3(signature = (center, zoom, width, height, bearing = 0.0, pixel_ratio = 1.0, margin = 0))]
-    fn new(center: (f64, f64), zoom: f64, width: u32, height: u32, bearing: f64, pixel_ratio: f64, margin: u32) -> Self {
+    fn new(
+        center: (f64, f64),
+        zoom: f64,
+        width: u32,
+        height: u32,
+        bearing: f64,
+        pixel_ratio: f64,
+        margin: u32,
+    ) -> Self {
         View(ml2drender::View { center: [center.0, center.1], zoom, bearing, width, height, pixel_ratio, margin })
     }
 
@@ -115,7 +123,13 @@ fn encode_webp<'py>(py: Python<'py>, rgba: &[u8], width: u32, height: u32) -> Py
 /// JPEG of RGBA8 pixels at `quality` (1–100), flattened over black.
 #[pyfunction]
 #[pyo3(signature = (rgba, width, height, quality = 90))]
-fn encode_jpeg<'py>(py: Python<'py>, rgba: &[u8], width: u32, height: u32, quality: u8) -> PyResult<Bound<'py, PyBytes>> {
+fn encode_jpeg<'py>(
+    py: Python<'py>,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> PyResult<Bound<'py, PyBytes>> {
     Ok(PyBytes::new(py, &ml2drender::encode_jpeg(rgba, width, height, quality).map_err(error)?))
 }
 

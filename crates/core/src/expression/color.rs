@@ -183,15 +183,17 @@ pub fn parse_css_color(input: &str) -> Option<[f64; 4]> {
         return Some([r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0]);
     }
     if let Some(hex) = input.strip_prefix('#')
-        && matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|c| c.is_ascii_hexdigit()) {
-            let step = if hex.len() < 6 { 1 } else { 2 };
-            let ch = |i: usize| -> f64 {
-                let s = hex.get(i * step..i * step + step).unwrap_or("ff");
-                let s = if s.len() == 1 { s.repeat(2) } else { s.to_string() };
-                u8::from_str_radix(&s, 16).unwrap() as f64 / 255.0
-            };
-            return Some([ch(0), ch(1), ch(2), ch(3)]);
-        }
+        && matches!(hex.len(), 3 | 4 | 6 | 8)
+        && hex.bytes().all(|c| c.is_ascii_hexdigit())
+    {
+        let step = if hex.len() < 6 { 1 } else { 2 };
+        let ch = |i: usize| -> f64 {
+            let s = hex.get(i * step..i * step + step).unwrap_or("ff");
+            let s = if s.len() == 1 { s.repeat(2) } else { s.to_string() };
+            u8::from_str_radix(&s, 16).unwrap() as f64 / 255.0
+        };
+        return Some([ch(0), ch(1), ch(2), ch(3)]);
+    }
     let func = |name: &str| -> Option<Vec<(String, bool)>> {
         // Returns args with separators: ("value", is_percent) and ("," | "/" | " ") markers.
         let rest = input.strip_prefix(name)?;

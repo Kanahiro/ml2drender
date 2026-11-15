@@ -1,7 +1,7 @@
 //! Line layers: port of MapLibre's `LineBucket.addLine` geometry and the `line` shader.
 
 use super::raster::{self, Rgba, Target};
-use super::{color, num, BucketFeature, Ctx, TileFeatures, EXTENT};
+use super::{BucketFeature, Ctx, EXTENT, TileFeatures, color, num};
 use crate::expression::Value;
 use crate::mvt::GeomType;
 use crate::style::Layer;
@@ -86,12 +86,22 @@ fn quantize(v: f64) -> i8 {
 impl Builder {
     #[allow(clippy::too_many_arguments)]
     fn add_half_vertex(&mut self, p: P, ex: f64, ey: f64, ox: f64, oy: f64, round: bool, up: bool) {
-        let total = if self.clip.is_some() { self.scaled_distance * (MAX_LINE_DISTANCE - 1.0) } else { self.scaled_distance };
+        let total =
+            if self.clip.is_some() { self.scaled_distance * (MAX_LINE_DISTANCE - 1.0) } else { self.scaled_distance };
         // Stored as an integer of half the distance (LINE_DISTANCE_SCALE), decoded times two.
         let linesofar = ((total * 0.5) as i64 as f64) * 2.0;
         let uv_x = self.clip.map_or(0.0, |(s, e)| (self.scaled_distance - s) / (e - s)) as f32;
         let split = self.clips.len() as u32;
-        self.vertices.push(Vertex { pos: p, extrude: [quantize(ex), quantize(ey)], offset: [quantize(ox), quantize(oy)], round, up, linesofar, uv_x, split });
+        self.vertices.push(Vertex {
+            pos: p,
+            extrude: [quantize(ex), quantize(ey)],
+            offset: [quantize(ox), quantize(oy)],
+            round,
+            up,
+            linesofar,
+            uv_x,
+            split,
+        });
         let e = self.vertices.len() - 1;
         if let (Some(e1), Some(e2)) = (self.e1, self.e2) {
             self.triangles.push([e1 as u32, e as u32, e2 as u32]);
@@ -104,7 +114,16 @@ impl Builder {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn add_current_vertex(&mut self, p: P, normal: P, end_left: f64, end_right: f64, round: bool, offset_normal: Option<P>, fallback: f64) {
+    fn add_current_vertex(
+        &mut self,
+        p: P,
+        normal: P,
+        end_left: f64,
+        end_right: f64,
+        round: bool,
+        offset_normal: Option<P>,
+        fallback: f64,
+    ) {
         let on = offset_normal.unwrap_or(normal);
         let lx = normal[0] + normal[1] * end_left;
         let ly = normal[1] - normal[0] * end_left;
@@ -135,7 +154,16 @@ impl Builder {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn add_line(&mut self, vertices: &[P], is_polygon: bool, join: &str, cap: &str, mut miter_limit: f64, round_limit: f64, overscaling: f64) {
+    fn add_line(
+        &mut self,
+        vertices: &[P],
+        is_polygon: bool,
+        join: &str,
+        cap: &str,
+        mut miter_limit: f64,
+        round_limit: f64,
+        overscaling: f64,
+    ) {
         self.line_starts.push(self.vertices.len());
         self.distance = 0.0;
         self.scaled_distance = 0.0;
@@ -160,7 +188,8 @@ impl Builder {
         if join == "bevel" {
             miter_limit = 1.05;
         }
-        let sharp_corner_offset = if overscaling <= 16.0 { SHARP_CORNER_OFFSET * EXTENT / (512.0 * overscaling) } else { 0.0 };
+        let sharp_corner_offset =
+            if overscaling <= 16.0 { SHARP_CORNER_OFFSET * EXTENT / (512.0 * overscaling) } else { 0.0 };
         self.e1 = None;
         self.e2 = None;
         let mut current: Option<P> = None;
@@ -173,7 +202,11 @@ impl Builder {
         }
         let mut prev: Option<P> = None;
         for i in first..len {
-            let next_vertex = if i == len - 1 { if is_polygon { Some(vertices[first + 1]) } else { None } } else { Some(vertices[i + 1]) };
+            let next_vertex = if i == len - 1 {
+                if is_polygon { Some(vertices[first + 1]) } else { None }
+            } else {
+                Some(vertices[i + 1])
+            };
             if next_vertex.is_some_and(|n| n == vertices[i]) {
                 continue;
             }
@@ -203,7 +236,8 @@ impl Builder {
             let is_sharp = cos_half < COS_HALF_SHARP_CORNER && prev_vertex.is_some() && next_vertex.is_some();
             let turns_left = pn[0] * nn[1] - pn[1] * nn[0] > 0.0;
             let offset_normal = mult(join_normal, miter_length.min(MAX_OFFSET_MITER_LENGTH));
-            let fallback = ((miter_length - OFFSET_FALLBACK_START) / (OFFSET_FALLBACK_END - OFFSET_FALLBACK_START)).clamp(0.0, 1.0);
+            let fallback = ((miter_length - OFFSET_FALLBACK_START) / (OFFSET_FALLBACK_END - OFFSET_FALLBACK_START))
+                .clamp(0.0, 1.0);
 
             if is_sharp && i > first {
                 let pv = prev_vertex.unwrap();
@@ -217,7 +251,13 @@ impl Builder {
                 }
             }
             let middle = prev_vertex.is_some() && next_vertex.is_some();
-            let mut cj = if middle { join } else if is_polygon { "butt" } else { cap };
+            let mut cj = if middle {
+                join
+            } else if is_polygon {
+                "butt"
+            } else {
+                cap
+            };
             if middle && cj == "round" {
                 if miter_length < round_limit {
                     cj = "miter";
@@ -272,7 +312,11 @@ impl Builder {
                                 t += t * t2 * (t - 1.0) * (a * t2 * t2 + b);
                             }
                             let e = mult(unit(add(mult(sub(nn, pn), t), pn)), if turns_left { -1.0 } else { 1.0 });
-                            let (ox, oy) = if turns_left { (-offset_normal[0], -offset_normal[1]) } else { (offset_normal[0], offset_normal[1]) };
+                            let (ox, oy) = if turns_left {
+                                (-offset_normal[0], -offset_normal[1])
+                            } else {
+                                (offset_normal[0], offset_normal[1])
+                            };
                             self.add_half_vertex(cur, e[0], e[1], ox, oy, false, turns_left);
                         }
                     }
@@ -498,7 +542,9 @@ impl LineBucket {
         let mut clips: Vec<(f64, f64)> = Vec::new();
         let mut max_line_length: f64 = 0.0;
         let mut lines = Vec::new();
-        for (i, f) in features.iter().enumerate().filter(|(_, f)| matches!(f.ty, GeomType::LineString | GeomType::Polygon)) {
+        for (i, f) in
+            features.iter().enumerate().filter(|(_, f)| matches!(f.ty, GeomType::LineString | GeomType::Polygon))
+        {
             let l = |name: &str| ctx.layout(layer, name, Some(f), &tf.tile);
             let mut b = Builder { clips: std::mem::take(&mut clips), ..Default::default() };
             let props = &f.feature.properties;
@@ -534,7 +580,16 @@ impl LineBucket {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn draw_line(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeatures], source_maxzoom: u8, map_max_zoom: f64, has_gradient: bool, has_pattern: bool) {
+pub fn draw_line(
+    target: &mut Target,
+    layer: &Layer,
+    ctx: &Ctx,
+    tiles: &[TileFeatures],
+    source_maxzoom: u8,
+    map_max_zoom: f64,
+    has_gradient: bool,
+    has_pattern: bool,
+) {
     let dpr = ctx.transform.pixel_ratio;
     // Dash textures by dasharray and cap (MapLibre's LineAtlas).
     let mut dashes = Vec::new();
@@ -545,7 +600,11 @@ pub fn draw_line(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
         let gradient = has_gradient.then(|| {
             let step = matches!(layer.paint("line-gradient"), crate::style::PropValue::Expr(e) if e.is_step());
             let width = if step {
-                let overzoom = if tf.tile.canonical.z == source_maxzoom { (2f64.powf(map_max_zoom - tf.tile.canonical.z as f64)).ceil() } else { 1.0 };
+                let overzoom = if tf.tile.canonical.z == source_maxzoom {
+                    (2f64.powf(map_max_zoom - tf.tile.canonical.z as f64)).ceil()
+                } else {
+                    1.0
+                };
                 let coverage = bucket.max_line_length / EXTENT * 1024.0 * overzoom;
                 (coverage.max(1.0) as u64).next_power_of_two().clamp(256, MAX_TEXTURE_SIZE) as usize
             } else {
@@ -554,7 +613,20 @@ pub fn draw_line(target: &mut Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFea
             Gradient::new(layer, ctx, &bucket.clips, width)
         });
         for (i, b) in &bucket.lines {
-            draw_feature(target, layer, ctx, tf, &bucket.features[*i], b, &to_world, tr, dpr, gradient.as_ref(), has_pattern, &mut dashes);
+            draw_feature(
+                target,
+                layer,
+                ctx,
+                tf,
+                &bucket.features[*i],
+                b,
+                &to_world,
+                tr,
+                dpr,
+                gradient.as_ref(),
+                has_pattern,
+                &mut dashes,
+            );
         }
     }
 }
@@ -606,7 +678,16 @@ fn draw_feature(
     } else {
         None
     };
-    let dash = match if pattern.is_some() { Value::Null } else { layer.paint("line-dasharray").eval(floor_zoom, Some(&f.feature), Some(Ctx::canonical(&tf.tile)), ctx.global_state) } {
+    let dash = match if pattern.is_some() {
+        Value::Null
+    } else {
+        layer.paint("line-dasharray").eval(
+            floor_zoom,
+            Some(&f.feature),
+            Some(Ctx::canonical(&tf.tile)),
+            ctx.global_state,
+        )
+    } {
         Value::Array(a) if !a.is_empty() => {
             let d: Vec<f64> = a.iter().map(num).collect();
             // A non-data-driven dasharray uses the layer's cap only if that is constant too.
@@ -639,7 +720,8 @@ fn draw_feature(
     let halfwidth = width / 2.0;
     let offset = -offset;
     let inset = gapwidth + if gapwidth > 0.0 { aa } else { 0.0 };
-    let outset = gapwidth + halfwidth * if gapwidth > 0.0 { 2.0 } else { 1.0 } + if halfwidth == 0.0 { 0.0 } else { aa };
+    let outset =
+        gapwidth + halfwidth * if gapwidth > 0.0 { 2.0 } else { 1.0 } + if halfwidth == 0.0 { 0.0 } else { aa };
     let rotations = ctx.transform.is_projected().then(|| ctx.rotations(&tf.tile));
     // Vertices come in pairs on the same point: its projection and rotation.
     type Frame = (P, (f64, f64));
@@ -678,7 +760,9 @@ fn draw_feature(
                     let f = (ctx.transform.world_to_screen(w), rotations.at(v.pos));
                     frame = Some((v.pos, f));
                     let d = match points.last() {
-                        Some(&(_, prev, d)) if !line_start => d + ((f.0[0] - prev[0]).powi(2) + (f.0[1] - prev[1]).powi(2)).sqrt(),
+                        Some(&(_, prev, d)) if !line_start => {
+                            d + ((f.0[0] - prev[0]).powi(2) + (f.0[1] - prev[1]).powi(2)).sqrt()
+                        }
                         _ => {
                             starts.push(points.len());
                             0.0
@@ -696,11 +780,18 @@ fn draw_feature(
     let blur2 = (blur + 1.0 / dpr) as f32;
     let (outset_f, inset_f) = (outset as f32, inset as f32);
     // Dash texture x per vertex: distance in pixels at the integer tile zoom, in dash periods.
-    let floorwidth = num(&layer.paint("line-width").eval(floor_zoom, Some(&f.feature), Some(Ctx::canonical(&tf.tile)), ctx.global_state));
+    let floorwidth = num(&layer.paint("line-width").eval(
+        floor_zoom,
+        Some(&f.feature),
+        Some(Ctx::canonical(&tf.tile)),
+        ctx.global_state,
+    ));
     let tileratio = 512.0 * 2f64.powf(floor_zoom.max(0.0) - tf.tile.canonical.z as f64) / EXTENT;
     let (sdfgamma, scale_x) = match (&dash, pattern) {
         // The gradient variant of the shader omits the device pixel ratio.
-        (Some(d), _) => ((if gradient.is_some() { 1.0 } else { 1.0 / dpr } / d.length) as f32, tileratio / d.length / floorwidth),
+        (Some(d), _) => {
+            ((if gradient.is_some() { 1.0 } else { 1.0 / dpr } / d.length) as f32, tileratio / d.length / floorwidth)
+        }
         // Pattern: x = linesofar / pattern_size.x * aspect (in pattern repeats).
         (None, Some(img)) => {
             let ds = super::pattern::display_size(img);
@@ -712,11 +803,7 @@ fn draw_feature(
     };
     // Projected: the distance on the output, in pixels of the integer zoom like `linesofar * tileratio`.
     let along = (rotations.is_some() && scale_x != 0.0).then(|| {
-        edge_anchored(
-            &points,
-            &starts,
-            scale_x / tileratio / dpr / 2f64.powf(ctx.transform.zoom - floor_zoom.max(0.0)),
-        )
+        edge_anchored(&points, &starts, scale_x / tileratio / dpr / 2f64.powf(ctx.transform.zoom - floor_zoom.max(0.0)))
     });
     let floorwidth_f = floorwidth as f32;
     let opacity_f = opacity as f32;
@@ -729,7 +816,8 @@ fn draw_feature(
         None => Vec::new(),
     };
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    let line4 = (dash.is_none() && pattern.is_none() && gradient.is_none()).then(|| super::x4::Line::new(c, outset_f, inset_f, blur2));
+    let line4 = (dash.is_none() && pattern.is_none() && gradient.is_none())
+        .then(|| super::x4::Line::new(c, outset_f, inset_f, blur2));
     for t in &b.triangles {
         let t = t.map(|i| i as usize);
         if !broken.is_empty() {
@@ -828,11 +916,7 @@ fn edge_anchored(points: &[(P, P, f64)], starts: &[usize], k: f64) -> Vec<f64> {
                 base += span(i).0;
                 i += 1;
             }
-            let stretch = if x < anchors[i] || i + 1 == anchors.len() {
-                1.0
-            } else {
-                span(i).1
-            };
+            let stretch = if x < anchors[i] || i + 1 == anchors.len() { 1.0 } else { span(i).1 };
             out.push(base + (x - anchors[i]) * stretch);
         }
     }
@@ -848,7 +932,8 @@ mod tests {
         // A straight line through the tile, starting in either buffer: the tile edges (x = 0 and
         // x = EXTENT) are at whole repeats, up to interpolating across the edge between points.
         for start in [-100.0, -37.0] {
-            let points: Vec<(P, P, f64)> = (0..=100).map(|i| start + i as f64 * 100.0).map(|x| ([x, 10.0], [x, 0.0], x - start)).collect();
+            let points: Vec<(P, P, f64)> =
+                (0..=100).map(|i| start + i as f64 * 100.0).map(|x| ([x, 10.0], [x, 0.0], x - start)).collect();
             let out = edge_anchored(&points, &[0], 0.03);
             let at = |x: f64| {
                 let i = points.iter().position(|p| p.0[0] >= x).unwrap();

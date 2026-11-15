@@ -1,6 +1,6 @@
 //! Legacy function → expression conversion (style-spec `function/convert.ts`).
 
-use serde_json::{json, Value as J};
+use serde_json::{Value as J, json};
 
 pub fn is_function(v: &J) -> bool {
     v.is_object()

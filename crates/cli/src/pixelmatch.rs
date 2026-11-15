@@ -16,7 +16,8 @@ pub fn pixelmatch(img1: &[u8], img2: &[u8], output: &mut [u8], width: usize, hei
         let delta = if a32[i] == b32[i] { 0 } else { color_delta(img1, img2, pos, threshold) };
         if delta != 0 {
             let (x, y) = (i % width, i / width);
-            if antialiased(img1, x, y, width, height, &a32, &b32) || antialiased(img2, x, y, width, height, &b32, &a32) {
+            if antialiased(img1, x, y, width, height, &a32, &b32) || antialiased(img2, x, y, width, height, &b32, &a32)
+            {
                 draw(output, pos, 255, 255, 0);
             } else {
                 draw(output, pos, 255, 0, 0);
@@ -24,7 +25,10 @@ pub fn pixelmatch(img1: &[u8], img2: &[u8], output: &mut [u8], width: usize, hei
             }
         } else {
             let v = 255.0
-                + (img1[pos] as f64 * 0.29889531 + img1[pos + 1] as f64 * 0.58662247 + img1[pos + 2] as f64 * 0.11448223 - 255.0)
+                + (img1[pos] as f64 * 0.29889531
+                    + img1[pos + 1] as f64 * 0.58662247
+                    + img1[pos + 2] as f64 * 0.11448223
+                    - 255.0)
                     * 0.1
                     * img1[pos + 3] as f64
                     / 255.0;
@@ -122,7 +126,8 @@ static LIN: LazyLock<[f64; 257]> = LazyLock::new(|| {
 });
 
 const CBRT_N: usize = 4096;
-static CBRT: LazyLock<Vec<f64>> = LazyLock::new(|| (0..=CBRT_N + 1).map(|i| (i as f64 / CBRT_N as f64).cbrt()).collect());
+static CBRT: LazyLock<Vec<f64>> =
+    LazyLock::new(|| (0..=CBRT_N + 1).map(|i| (i as f64 / CBRT_N as f64).cbrt()).collect());
 
 fn lin_lut(x: f64) -> f64 {
     let i = x as usize;
@@ -162,10 +167,7 @@ fn color_delta(img1: &[u8], img2: &[u8], k: usize, max_delta: f64) -> i32 {
         let gb = 48.0 + 159.0 * ((h >> 30) & 1) as f64;
         let bb = 48.0 + 159.0 * ((h >> 29) & 1) as f64;
         let bl = |c: f64, a: f64, bg: f64| lin_lut((c * a + bg * (255.0 - a)) / 255.0);
-        (
-            lms(bl(r1, a1, rb), bl(g1, a1, gb), bl(b1, a1, bb)),
-            lms(bl(r2, a2, rb), bl(g2, a2, gb), bl(b2, a2, bb)),
-        )
+        (lms(bl(r1, a1, rb), bl(g1, a1, gb), bl(b1, a1, bb)), lms(bl(r2, a2, rb), bl(g2, a2, gb), bl(b2, a2, bb)))
     };
     let (l1, m1, s1) = p1;
     let (l2, m2, s2) = p2;

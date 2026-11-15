@@ -33,8 +33,7 @@ pub enum Projection {
 impl Projection {
     /// PROJJSON of a geographic or projected CRS.
     pub fn parse(projjson: &str) -> Result<Projection, Error> {
-        let json: J =
-            serde_json::from_str(projjson).map_err(|e| unsupported(format!("PROJJSON: {e}")))?;
+        let json: J = serde_json::from_str(projjson).map_err(|e| unsupported(format!("PROJJSON: {e}")))?;
         Projection::from_proj_string(&proj_string(&json)?)
     }
 
@@ -46,21 +45,20 @@ impl Projection {
             .map(|t| t.split_once('=').unwrap_or((t, "")))
             .collect();
         let get = |k: &str| params.iter().find(|p| p.0 == k).map(|p| p.1);
-        let num = |k: &str| {
-            get(k)
-                .map(|v| {
-                    v.parse::<f64>()
-                        .map_err(|_| unsupported(format!("+{k}={v}")))
-                })
-                .transpose()
-        };
+        let num = |k: &str| get(k).map(|v| v.parse::<f64>().map_err(|_| unsupported(format!("+{k}={v}")))).transpose();
         let (a, f) = match (num("R")?, num("a")?) {
             (Some(r), _) => (r, 0.0),
             (_, Some(a)) => (
                 a,
                 match (num("rf")?, num("f")?, num("b")?) {
                     // WKT's inverse flattening 0 is a sphere.
-                    (Some(rf), ..) => if rf == 0.0 { 0.0 } else { 1.0 / rf },
+                    (Some(rf), ..) => {
+                        if rf == 0.0 {
+                            0.0
+                        } else {
+                            1.0 / rf
+                        }
+                    }
                     (_, Some(f), _) => f,
                     (.., Some(b)) => 1.0 - b / a,
                     _ => 0.0,
@@ -68,10 +66,7 @@ impl Projection {
             ),
             _ => return Err(unsupported("no ellipsoid")),
         };
-        let el = Ellipsoid {
-            a,
-            e: (f * (2.0 - f)).sqrt(),
-        };
+        let el = Ellipsoid { a, e: (f * (2.0 - f)).sqrt() };
         let lat_0 = num("lat_0")?.unwrap_or(0.0);
         let lon_0 = num("lon_0")?.unwrap_or(0.0);
         let k_0 = num("k_0")?.unwrap_or(1.0);
@@ -85,14 +80,7 @@ impl Projection {
             "webmerc" => Projection::Merc(Merc::new(Ellipsoid { a, e: 0.0 }, None, 1.0, p)),
             "lcc" => {
                 let lat_1 = num("lat_1")?.unwrap_or(lat_0);
-                Projection::Lcc(Lcc::new(
-                    el,
-                    lat_0,
-                    lat_1,
-                    num("lat_2")?.unwrap_or(lat_1),
-                    k_0,
-                    p,
-                ))
+                Projection::Lcc(Lcc::new(el, lat_0, lat_1, num("lat_2")?.unwrap_or(lat_1), k_0, p))
             }
             "stere" => {
                 let lat_ts = num("lat_ts")?;
@@ -171,10 +159,7 @@ impl Projection {
             Projection::Geos(g) => g.inverse(g.p.local(xy)),
         };
         let lon_0 = self.lon_0();
-        let r = [
-            (lon_0 + lam.to_degrees() + 540.0).rem_euclid(360.0) - 180.0,
-            phi.to_degrees(),
-        ];
+        let r = [(lon_0 + lam.to_degrees() + 540.0).rem_euclid(360.0) - 180.0, phi.to_degrees()];
         (r[0].is_finite() && r[1].is_finite()).then_some(r)
     }
 
@@ -232,8 +217,7 @@ impl Ellipsoid {
         let mut tau = taup / e2m;
         for _ in 0..5 {
             let tp = self.taup(tau);
-            let d =
-                (taup - tp) / hypot(tp, 1.0) * (1.0 + e2m * tau * tau) / (e2m * hypot(tau, 1.0));
+            let d = (taup - tp) / hypot(tp, 1.0) * (1.0 + e2m * tau * tau) / (e2m * hypot(tau, 1.0));
             tau += d;
             if d.abs() < 1e-14 * tau.abs().max(1.0) {
                 break;
@@ -309,48 +293,30 @@ impl Tmerc {
         let n = f / (2.0 - f);
         let [n2, n3, n4, n5, n6] = [n * n, n.powi(3), n.powi(4), n.powi(5), n.powi(6)];
         let alpha = [
-            n / 2.0 - 2.0 * n2 / 3.0 + 5.0 * n3 / 16.0 + 41.0 * n4 / 180.0 - 127.0 * n5 / 288.0
-                + 7891.0 * n6 / 37800.0,
-            13.0 * n2 / 48.0 - 3.0 * n3 / 5.0 + 557.0 * n4 / 1440.0 + 281.0 * n5 / 630.0
-                - 1983433.0 * n6 / 1935360.0,
-            61.0 * n3 / 240.0 - 103.0 * n4 / 140.0
-                + 15061.0 * n5 / 26880.0
-                + 167603.0 * n6 / 181440.0,
+            n / 2.0 - 2.0 * n2 / 3.0 + 5.0 * n3 / 16.0 + 41.0 * n4 / 180.0 - 127.0 * n5 / 288.0 + 7891.0 * n6 / 37800.0,
+            13.0 * n2 / 48.0 - 3.0 * n3 / 5.0 + 557.0 * n4 / 1440.0 + 281.0 * n5 / 630.0 - 1983433.0 * n6 / 1935360.0,
+            61.0 * n3 / 240.0 - 103.0 * n4 / 140.0 + 15061.0 * n5 / 26880.0 + 167603.0 * n6 / 181440.0,
             49561.0 * n4 / 161280.0 - 179.0 * n5 / 168.0 + 6601661.0 * n6 / 7257600.0,
             34729.0 * n5 / 80640.0 - 3418889.0 * n6 / 1995840.0,
             212378941.0 * n6 / 319334400.0,
         ];
         let beta = [
-            n / 2.0 - 2.0 * n2 / 3.0 + 37.0 * n3 / 96.0 - n4 / 360.0 - 81.0 * n5 / 512.0
-                + 96199.0 * n6 / 604800.0,
-            n2 / 48.0 + n3 / 15.0 - 437.0 * n4 / 1440.0 + 46.0 * n5 / 105.0
-                - 1118711.0 * n6 / 3870720.0,
+            n / 2.0 - 2.0 * n2 / 3.0 + 37.0 * n3 / 96.0 - n4 / 360.0 - 81.0 * n5 / 512.0 + 96199.0 * n6 / 604800.0,
+            n2 / 48.0 + n3 / 15.0 - 437.0 * n4 / 1440.0 + 46.0 * n5 / 105.0 - 1118711.0 * n6 / 3870720.0,
             17.0 * n3 / 480.0 - 37.0 * n4 / 840.0 - 209.0 * n5 / 4480.0 + 5569.0 * n6 / 90720.0,
             4397.0 * n4 / 161280.0 - 11.0 * n5 / 504.0 - 830251.0 * n6 / 7257600.0,
             4583.0 * n5 / 161280.0 - 108847.0 * n6 / 3991680.0,
             20648693.0 * n6 / 638668800.0,
         ];
         let k0a = k_0 * el.a / (1.0 + n) * (1.0 + n2 / 4.0 + n4 / 64.0 + n6 / 256.0);
-        let mut t = Tmerc {
-            el,
-            k0a,
-            alpha,
-            beta,
-            xi0: 0.0,
-            p,
-        };
+        let mut t = Tmerc { el, k0a, alpha, beta, xi0: 0.0, p };
         t.xi0 = t.xi_eta(lat_0.to_radians(), 0.0)[0];
         t
     }
 
     fn xi_eta(&self, phi: f64, lam: f64) -> [f64; 2] {
-        let taup = self
-            .el
-            .taup(phi.clamp(-FRAC_PI_2 + 1e-11, FRAC_PI_2 - 1e-11).tan());
-        let (xi1, eta1) = (
-            taup.atan2(lam.cos()),
-            (lam.sin() / hypot(taup, lam.cos())).asinh(),
-        );
+        let taup = self.el.taup(phi.clamp(-FRAC_PI_2 + 1e-11, FRAC_PI_2 - 1e-11).tan());
+        let (xi1, eta1) = (taup.atan2(lam.cos()), (lam.sin() / hypot(taup, lam.cos())).asinh());
         let [dxi, deta] = sin_series(&self.alpha, xi1, eta1);
         [xi1 + dxi, eta1 + deta]
     }
@@ -381,16 +347,10 @@ fn sin_series(c: &[f64; 6], xi: f64, eta: f64) -> [f64; 2] {
     // b_j = c_j + k·b_{j+1} − b_{j+2}; the sum is b_1·sin 2ζ.
     let (mut b1, mut b2) = ([0.0; 2], [0.0; 2]);
     for &a in c.iter().rev() {
-        let b0 = [
-            a + k[0] * b1[0] - k[1] * b1[1] - b2[0],
-            k[0] * b1[1] + k[1] * b1[0] - b2[1],
-        ];
+        let b0 = [a + k[0] * b1[0] - k[1] * b1[1] - b2[0], k[0] * b1[1] + k[1] * b1[0] - b2[1]];
         (b2, b1) = (b1, b0);
     }
-    [
-        b1[0] * sin_z[0] - b1[1] * sin_z[1],
-        b1[0] * sin_z[1] + b1[1] * sin_z[0],
-    ]
+    [b1[0] * sin_z[0] - b1[1] * sin_z[1], b1[0] * sin_z[1] + b1[1] * sin_z[0]]
 }
 
 /// Mercator (variant A with `k_0`, B with `lat_ts`).
@@ -404,11 +364,7 @@ pub struct Merc {
 impl Merc {
     fn new(el: Ellipsoid, lat_ts: Option<f64>, k_0: f64, p: Origin) -> Merc {
         let k = lat_ts.map_or(k_0, |t| el.m(t.to_radians()));
-        Merc {
-            el,
-            ak: el.a * k,
-            p,
-        }
+        Merc { el, ak: el.a * k, p }
     }
     fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
         [self.ak * lam, self.ak * self.el.taup(phi.tan()).asinh()]
@@ -439,13 +395,7 @@ impl Lcc {
             phi1.sin()
         };
         let af = el.a * k_0 * m1 / (n * t1.powf(n));
-        Lcc {
-            el,
-            n,
-            af,
-            rho0: af * el.t(phi0).powf(n),
-            p,
-        }
+        Lcc { el, n, af, rho0: af * el.t(phi0).powf(n), p }
     }
     fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
         let rho = self.af * self.el.t(phi).powf(self.n);
@@ -461,10 +411,7 @@ impl Lcc {
         if (theta / self.n).abs() > std::f64::consts::PI {
             return [f64::NAN; 2];
         }
-        [
-            theta / self.n,
-            self.el.phi_from_t((rho / self.af).powf(1.0 / self.n)),
-        ]
+        [theta / self.n, self.el.phi_from_t((rho / self.af).powf(1.0 / self.n))]
     }
 }
 
@@ -483,10 +430,7 @@ impl Stere {
     fn new(el: Ellipsoid, lat_0: f64, lat_ts: Option<f64>, k_0: f64, p: Origin) -> Stere {
         let s = lat_0.signum();
         let e = el.e;
-        let k = match lat_ts
-            .map(|t| (t * s).to_radians())
-            .filter(|t| (t - FRAC_PI_2).abs() > 1e-10)
-        {
+        let k = match lat_ts.map(|t| (t * s).to_radians()).filter(|t| (t - FRAC_PI_2).abs() > 1e-10) {
             Some(ts) => el.a * el.m(ts) / el.t(ts),
             None => 2.0 * el.a * k_0 / ((1.0 + e).powf(1.0 + e) * (1.0 - e).powf(1.0 - e)).sqrt(),
         };
@@ -498,10 +442,7 @@ impl Stere {
     }
     fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
         let rho = hypot(x, y);
-        [
-            x.atan2(-self.s * y),
-            self.s * self.el.phi_from_t(rho / self.k),
-        ]
+        [x.atan2(-self.s * y), self.s * self.el.phi_from_t(rho / self.k)]
     }
 }
 
@@ -526,27 +467,10 @@ impl Laea {
         let qp = el.q(FRAC_PI_2);
         let rq = el.a * (qp / 2.0).sqrt();
         let phi0 = lat_0.to_radians();
-        let pole = if (lat_0.abs() - 90.0).abs() < 1e-10 {
-            lat_0.signum()
-        } else {
-            0.0
-        };
+        let pole = if (lat_0.abs() - 90.0).abs() < 1e-10 { lat_0.signum() } else { 0.0 };
         let (sb1, cb1) = (el.q(phi0) / qp).clamp(-1.0, 1.0).asin().sin_cos();
-        let d = if pole == 0.0 {
-            el.a * el.m(phi0) / (rq * cb1)
-        } else {
-            1.0
-        };
-        Laea {
-            el,
-            qp,
-            rq,
-            pole,
-            sb1,
-            cb1,
-            d,
-            p,
-        }
+        let d = if pole == 0.0 { el.a * el.m(phi0) / (rq * cb1) } else { 1.0 };
+        Laea { el, qp, rq, pole, sb1, cb1, d, p }
     }
     fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
         let q = self.el.q(phi);
@@ -556,18 +480,12 @@ impl Laea {
         }
         let (sb, cb) = (q / self.qp).clamp(-1.0, 1.0).asin().sin_cos();
         let b = self.rq * (2.0 / (1.0 + self.sb1 * sb + self.cb1 * cb * lam.cos())).sqrt();
-        [
-            b * self.d * cb * lam.sin(),
-            b / self.d * (self.cb1 * sb - self.sb1 * cb * lam.cos()),
-        ]
+        [b * self.d * cb * lam.sin(), b / self.d * (self.cb1 * sb - self.sb1 * cb * lam.cos())]
     }
     fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
         if self.pole != 0.0 {
             let r = hypot(x, y) / self.el.a;
-            return [
-                x.atan2(-self.pole * y),
-                self.el.phi_from_q(self.pole * (self.qp - r * r)),
-            ];
+            return [x.atan2(-self.pole * y), self.el.phi_from_q(self.pole * (self.qp - r * r))];
         }
         let (x, y) = (x / self.d, y * self.d);
         let rho = hypot(x, y);
@@ -576,10 +494,7 @@ impl Laea {
         }
         let (sc, cc) = (2.0 * (rho / (2.0 * self.rq)).asin()).sin_cos();
         let sb = cc * self.sb1 + y * sc * self.cb1 / rho;
-        [
-            (x * sc).atan2(rho * self.cb1 * cc - y * self.sb1 * sc),
-            self.el.phi_from_q(self.qp * sb),
-        ]
+        [(x * sc).atan2(rho * self.cb1 * cc - y * self.sb1 * sc), self.el.phi_from_q(self.qp * sb)]
     }
 }
 
@@ -598,21 +513,13 @@ const EQ_M: f64 = 0.866_025_403_784_438_6; // √3 / 2
 impl EqEarth {
     fn new(el: Ellipsoid, p: Origin) -> EqEarth {
         let qp = el.q(FRAC_PI_2);
-        EqEarth {
-            el,
-            qp,
-            rq: el.a * (qp / 2.0).sqrt(),
-            p,
-        }
+        EqEarth { el, qp, rq: el.a * (qp / 2.0).sqrt(), p }
     }
     /// y(θ)/θ and dy/dθ of the unit projection.
     fn poly(t: f64) -> (f64, f64) {
         let [a1, a2, a3, a4] = EQ_A;
         let (t2, t6) = (t * t, t.powi(6));
-        (
-            a1 + a2 * t2 + t6 * (a3 + a4 * t2),
-            a1 + 3.0 * a2 * t2 + t6 * (7.0 * a3 + 9.0 * a4 * t2),
-        )
+        (a1 + a2 * t2 + t6 * (a3 + a4 * t2), a1 + 3.0 * a2 * t2 + t6 * (7.0 * a3 + 9.0 * a4 * t2))
     }
     fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
         let sb = (self.el.q(phi) / self.qp).clamp(-1.0, 1.0);
@@ -659,25 +566,14 @@ pub struct Geos {
 impl Geos {
     fn new(el: Ellipsoid, h: f64, sweep_x: bool, p: Origin) -> Geos {
         let radius_g_1 = h / el.a;
-        Geos {
-            a: el.a,
-            radius_g: 1.0 + radius_g_1,
-            radius_g_1,
-            radius_p: (1.0 - el.e * el.e).sqrt(),
-            sweep_x,
-            p,
-        }
+        Geos { a: el.a, radius_g: 1.0 + radius_g_1, radius_g_1, radius_p: (1.0 - el.e * el.e).sqrt(), sweep_x, p }
     }
     fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
         let rp2 = self.radius_p * self.radius_p;
         // Geocentric latitude, and the vector from the center to the surface (units of `a`).
         let phi = (rp2 * phi.tan()).atan();
         let r = self.radius_p / hypot(self.radius_p * phi.cos(), phi.sin());
-        let (vx, vy, vz) = (
-            r * lam.cos() * phi.cos(),
-            r * lam.sin() * phi.cos(),
-            r * phi.sin(),
-        );
+        let (vx, vy, vz) = (r * lam.cos() * phi.cos(), r * lam.sin() * phi.cos(), r * phi.sin());
         if (self.radius_g - vx) * vx - vy * vy - vz * vz / rp2 < 0.0 {
             return [f64::NAN; 2];
         }
@@ -714,149 +610,66 @@ impl Geos {
 }
 
 /// An EPSG conversion method: code, name, PROJ name, parameters as (code, PROJ key).
-type Method = (
-    u64,
-    &'static str,
-    &'static str,
-    &'static [(u64, &'static str)],
-);
+type Method = (u64, &'static str, &'static str, &'static [(u64, &'static str)]);
 
 const METHODS: &[Method] = &[
     (
         9807,
         "Transverse Mercator",
         "tmerc",
-        &[
-            (8801, "lat_0"),
-            (8802, "lon_0"),
-            (8805, "k_0"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
+        &[(8801, "lat_0"), (8802, "lon_0"), (8805, "k_0"), (8806, "x_0"), (8807, "y_0")],
     ),
     (
         9804,
         "Mercator (variant A)",
         "merc",
-        &[
-            (8801, "lat_0"),
-            (8802, "lon_0"),
-            (8805, "k_0"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
+        &[(8801, "lat_0"), (8802, "lon_0"), (8805, "k_0"), (8806, "x_0"), (8807, "y_0")],
     ),
-    (
-        9805,
-        "Mercator (variant B)",
-        "merc",
-        &[
-            (8823, "lat_ts"),
-            (8802, "lon_0"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
-    ),
+    (9805, "Mercator (variant B)", "merc", &[(8823, "lat_ts"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     (
         1024,
         "Popular Visualisation Pseudo Mercator",
         "webmerc",
-        &[
-            (8801, "lat_0"),
-            (8802, "lon_0"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
+        &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")],
     ),
     (
         9801,
         "Lambert Conic Conformal (1SP)",
         "lcc",
-        &[
-            (8801, "lat_0"),
-            (8802, "lon_0"),
-            (8805, "k_0"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
+        &[(8801, "lat_0"), (8802, "lon_0"), (8805, "k_0"), (8806, "x_0"), (8807, "y_0")],
     ),
     (
         9802,
         "Lambert Conic Conformal (2SP)",
         "lcc",
-        &[
-            (8821, "lat_0"),
-            (8822, "lon_0"),
-            (8823, "lat_1"),
-            (8824, "lat_2"),
-            (8826, "x_0"),
-            (8827, "y_0"),
-        ],
+        &[(8821, "lat_0"), (8822, "lon_0"), (8823, "lat_1"), (8824, "lat_2"), (8826, "x_0"), (8827, "y_0")],
     ),
-    (
-        9820,
-        "Lambert Azimuthal Equal Area",
-        "laea",
-        &[
-            (8801, "lat_0"),
-            (8802, "lon_0"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
-    ),
+    (9820, "Lambert Azimuthal Equal Area", "laea", &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     (
         9810,
         "Polar Stereographic (variant A)",
         "stere",
-        &[
-            (8801, "lat_0"),
-            (8802, "lon_0"),
-            (8805, "k_0"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
+        &[(8801, "lat_0"), (8802, "lon_0"), (8805, "k_0"), (8806, "x_0"), (8807, "y_0")],
     ),
     (
         9829,
         "Polar Stereographic (variant B)",
         "stere",
-        &[
-            (8832, "lat_ts"),
-            (8833, "lon_0"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
+        &[(8832, "lat_ts"), (8833, "lon_0"), (8806, "x_0"), (8807, "y_0")],
     ),
-    (
-        1078,
-        "Equal Earth",
-        "eqearth",
-        &[(8802, "lon_0"), (8806, "x_0"), (8807, "y_0")],
-    ),
+    (1078, "Equal Earth", "eqearth", &[(8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     // PROJ's own methods and parameters, without EPSG codes (0: matched by name).
     (
         0,
         "Geostationary Satellite (Sweep X)",
         "geos +sweep=x",
-        &[
-            (8801, "lat_0"),
-            (8802, "lon_0"),
-            (0, "h"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
+        &[(8801, "lat_0"), (8802, "lon_0"), (0, "h"), (8806, "x_0"), (8807, "y_0")],
     ),
     (
         0,
         "Geostationary Satellite (Sweep Y)",
         "geos +sweep=y",
-        &[
-            (8801, "lat_0"),
-            (8802, "lon_0"),
-            (0, "h"),
-            (8806, "x_0"),
-            (8807, "y_0"),
-        ],
+        &[(8801, "lat_0"), (8802, "lon_0"), (0, "h"), (8806, "x_0"), (8807, "y_0")],
     ),
 ];
 
@@ -884,21 +697,11 @@ fn proj_string(crs: &J) -> Result<String, Error> {
         Some("GeographicCRS") => (crs, None),
         Some("ProjectedCRS") => (&crs["base_crs"], Some(&crs["conversion"])),
         t => {
-            return Err(unsupported(format!(
-                "PROJJSON type {}",
-                t.unwrap_or("(none)")
-            )));
+            return Err(unsupported(format!("PROJJSON type {}", t.unwrap_or("(none)"))));
         }
     };
-    let datum = if base["datum"].is_object() {
-        &base["datum"]
-    } else {
-        &base["datum_ensemble"]
-    };
-    if datum["prime_meridian"]["longitude"]
-        .as_f64()
-        .is_some_and(|l| l != 0.0)
-    {
+    let datum = if base["datum"].is_object() { &base["datum"] } else { &base["datum_ensemble"] };
+    if datum["prime_meridian"]["longitude"].as_f64().is_some_and(|l| l != 0.0) {
         return Err(unsupported("prime meridians other than Greenwich"));
     }
     let el = &datum["ellipsoid"];
@@ -918,11 +721,7 @@ fn proj_string(crs: &J) -> Result<String, Error> {
     let Some(conversion) = conversion else {
         return Ok(format!("+proj=longlat {ellipsoid}"));
     };
-    for axis in crs["coordinate_system"]["axis"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
+    for axis in crs["coordinate_system"]["axis"].as_array().into_iter().flatten() {
         let unit = &axis["unit"];
         if !(unit == "metre" || unit.is_null() || unit["conversion_factor"].as_f64() == Some(1.0)) {
             return Err(unsupported(format!("axis unit {unit}")));
@@ -932,27 +731,18 @@ fn proj_string(crs: &J) -> Result<String, Error> {
     let name = method["name"].as_str().unwrap_or_default();
     let &(_, _, proj, keys) = METHODS
         .iter()
-        .find(|m| {
-            method["id"]["code"]
-                .as_u64()
-                .filter(|_| m.0 != 0)
-                .map_or(m.1 == name, |c| c == m.0)
-        })
+        .find(|m| method["id"]["code"].as_u64().filter(|_| m.0 != 0).map_or(m.1 == name, |c| c == m.0))
         .ok_or_else(|| unsupported(format!("conversion method {name}")))?;
     let mut out = format!("+proj={proj} {ellipsoid}");
     for p in conversion["parameters"].as_array().into_iter().flatten() {
         let pname = p["name"].as_str().unwrap_or_default();
-        let code = p["id"]["code"]
-            .as_u64()
-            .or_else(|| PARAMETER_NAMES.iter().find(|n| n.1 == pname).map(|n| n.0));
+        let code = p["id"]["code"].as_u64().or_else(|| PARAMETER_NAMES.iter().find(|n| n.1 == pname).map(|n| n.0));
         let key = keys
             .iter()
             .find(|k| Some(k.0) == code)
             .ok_or_else(|| unsupported(format!("parameter {pname} of {name}")))?
             .1;
-        let value = p["value"]
-            .as_f64()
-            .ok_or_else(|| unsupported(format!("parameter {pname}")))?;
+        let value = p["value"].as_f64().ok_or_else(|| unsupported(format!("parameter {pname}")))?;
         let value = match &p["unit"] {
             J::Null => value,
             J::String(u) if matches!(u.as_str(), "degree" | "metre" | "unity") => value,
@@ -984,10 +774,8 @@ pub(crate) mod test_crs {
 
     /// A projected CRS by `method` name, its parameters by EPSG name, in degrees and metres.
     pub fn projected(method: &str, ellipsoid: &str, params: &[(&str, f64)]) -> String {
-        let params: Vec<String> = params
-            .iter()
-            .map(|(name, value)| format!(r#"{{"name":"{name}","value":{value}}}"#))
-            .collect();
+        let params: Vec<String> =
+            params.iter().map(|(name, value)| format!(r#"{{"name":"{name}","value":{value}}}"#)).collect();
         format!(
             r#"{{"type":"ProjectedCRS","base_crs":{{"datum":{{"ellipsoid":{{{ellipsoid}}}}}}},"conversion":{{"method":{{"name":"{method}"}},"parameters":[{}]}}}}"#,
             params.join(",")
@@ -1087,11 +875,7 @@ mod tests {
                 [139.76, 35.68],
                 [12179903.70918021, 4430861.430775947],
             ),
-            (
-                "+proj=eqearth +lon_0=150 +R=6371008.8",
-                [-170.0, -70.0],
-                [2600439.895258415, -7692885.397207941],
-            ),
+            ("+proj=eqearth +lon_0=150 +R=6371008.8", [-170.0, -70.0], [2600439.895258415, -7692885.397207941]),
             (
                 "+proj=laea +lat_0=-90 +lon_0=0 +x_0=0 +y_0=0 +a=6378137 +rf=298.257223563 +units=m +no_defs",
                 [-60.0, -75.0],
@@ -1136,19 +920,12 @@ mod tests {
         for &(def, lnglat, xy) in cases {
             let p = Projection::from_proj_string(def).unwrap();
             let f = p.forward(lnglat[0], lnglat[1]);
-            assert!(
-                close(f, xy, 1e-3),
-                "{def}: {lnglat:?} → {f:?}, expected {xy:?}"
-            );
+            assert!(close(f, xy, 1e-3), "{def}: {lnglat:?} → {f:?}, expected {xy:?}");
             let i = p.inverse(xy).unwrap();
-            assert!(
-                close(i, lnglat, 1e-9),
-                "{def}: {xy:?} → {i:?}, expected {lnglat:?}"
-            );
+            assert!(close(i, lnglat, 1e-9), "{def}: {xy:?} → {i:?}, expected {lnglat:?}");
         }
         // Himawari's far side of the Earth.
-        let geos = Projection::from_proj_string("+proj=geos +h=35785863 +lon_0=140.7 +a=6378137 +b=6356752.3")
-            .unwrap();
+        let geos = Projection::from_proj_string("+proj=geos +h=35785863 +lon_0=140.7 +a=6378137 +b=6356752.3").unwrap();
         assert!(geos.forward(-40.0, 0.0)[0].is_nan() && geos.inverse([6.0e6, 0.0]).is_none());
         assert!(Projection::parse(&projected("Robinson", WGS84, &[])).is_err());
         // Past the Equal Earth outline.
@@ -1183,10 +960,7 @@ mod tests {
         .forward(2.35, 48.85);
         assert_eq!(a, b);
         let geographic = r#"{"type":"GeographicCRS","name":"WGS 84","datum":{"type":"GeodeticReferenceFrame","name":"WGS84","ellipsoid":{"name":"WGS 84","semi_major_axis":6378137,"inverse_flattening":298.257223563}}}"#;
-        assert!(matches!(
-            Projection::parse(geographic).unwrap(),
-            Projection::LongLat
-        ));
+        assert!(matches!(Projection::parse(geographic).unwrap(), Projection::LongLat));
         assert!(Projection::parse(r#"{"type":"BoundCRS"}"#).is_err());
         // PROJ's own geos method and satellite height, matched by name.
         let himawari = r#"{"type":"ProjectedCRS","name":"Himawari","base_crs":{"name":"Himawari geographic","datum":{"type":"GeodeticReferenceFrame","name":"Himawari",
@@ -1214,12 +988,23 @@ mod tests {
         assert!(p.forward(1.0, 1.0).iter().all(|v| v.is_finite()));
         // A pole a few ulps off 90° (degrees from radians) is still polar.
         let lat = (90f64.to_radians() * 1.0000000000000002).to_degrees();
-        assert!(Projection::parse(&projected("Polar Stereographic (variant A)", test_crs::WGS84, &[("Latitude of natural origin", lat)])).is_ok());
+        assert!(
+            Projection::parse(&projected(
+                "Polar Stereographic (variant A)",
+                test_crs::WGS84,
+                &[("Latitude of natural origin", lat)]
+            ))
+            .is_ok()
+        );
         // Lambert conformal conic: the cone's gap behind the apex is off the map.
         let lcc = Projection::parse(&projected(
             "Lambert Conic Conformal (2SP)",
             test_crs::WGS84,
-            &[("Latitude of 1st standard parallel", 30.0), ("Latitude of 2nd standard parallel", 60.0), ("Latitude of false origin", 45.0)],
+            &[
+                ("Latitude of 1st standard parallel", 30.0),
+                ("Latitude of 2nd standard parallel", 60.0),
+                ("Latitude of false origin", 45.0),
+            ],
         ))
         .unwrap();
         let apex = lcc.forward(0.0, 90.0);

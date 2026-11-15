@@ -2,7 +2,7 @@
 //! internal `filter-*` operators, then compiled like a boolean data-driven property.
 
 use crate::expression::{self as ex, Expression};
-use serde_json::{json, Value as J};
+use serde_json::{Value as J, json};
 
 #[derive(PartialEq)]
 enum Class {

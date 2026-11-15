@@ -3,7 +3,7 @@
 //! Byte results (needs list, RGBA, PNG, error messages) go to a shared output buffer read via
 //! `out_ptr`/`out_len`; it stays valid until the next call. Inputs are copied in via `alloc`.
 
-use ml2drender::{reproject::ProjectedView, Projection, Renderer, View};
+use ml2drender::{Projection, Renderer, View, reproject::ProjectedView};
 use std::cell::RefCell;
 
 thread_local! {
@@ -113,7 +113,8 @@ pub unsafe extern "C" fn renderer_set_projected_view(
     margin: u32,
 ) -> u32 {
     let projjson = String::from_utf8_lossy(unsafe { bytes(projjson_ptr, projjson_len) }).into_owned();
-    let view = ProjectedView { projjson, bbox: [min_x, min_y, max_x, max_y], bearing, width, height, pixel_ratio, margin };
+    let view =
+        ProjectedView { projjson, bbox: [min_x, min_y, max_x, max_y], bearing, width, height, pixel_ratio, margin };
     match unsafe { &mut *r }.set_projected_view(&view) {
         Ok(()) => 1,
         Err(e) => {

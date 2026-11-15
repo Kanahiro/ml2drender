@@ -3,14 +3,14 @@
 //! Host loop: `new` → while `needs()` is non-empty { fetch each; `provide` } → `render`.
 //! Minimal use: `Renderer::new(style, View::tile(z, x, y, 512))` → one XYZ tile image.
 
-mod hash;
 pub mod expression;
 pub(crate) mod geojson;
+mod hash;
 mod image;
-mod sprite;
 mod mvt;
 mod projection;
 mod render;
+mod sprite;
 mod style;
 mod supercluster;
 mod symbol;
@@ -18,8 +18,8 @@ mod tile;
 pub use projection::Projection;
 pub mod reproject;
 
-use serde_json::Value as J;
 use hash::HashMap;
+use serde_json::Value as J;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use tile::{RenderTile, TileId, Transform};
@@ -104,7 +104,11 @@ enum Data {
     Tiled(TileJson),
     GeoJson(geojson::GeoJsonIndex),
     /// Image source: URL, corner coordinates (tl, tr, br, bl) and the decoded image.
-    Image { url: String, coordinates: [[f64; 2]; 4], texture: Option<Option<Rc<image::Texture>>> },
+    Image {
+        url: String,
+        coordinates: [[f64; 2]; 4],
+        texture: Option<Option<Rc<image::Texture>>>,
+    },
 }
 
 #[derive(Clone)]
@@ -186,7 +190,9 @@ pub fn encode_jpeg(rgba: &[u8], width: u32, height: u32, quality: u8) -> Result<
         return Err(Error::ImageEncoding(format!("{} bytes is not {width}x{height} RGBA", rgba.len())));
     }
     let rgb: Vec<u8> = rgba
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| {
             let a = p[3] as u32;
             [0, 1, 2].map(|i| ((p[i] as u32 * a + 127) / 255) as u8)
@@ -195,9 +201,7 @@ pub fn encode_jpeg(rgba: &[u8], width: u32, height: u32, quality: u8) -> Result<
     let mut bytes = Vec::new();
     let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, quality.clamp(1, 100));
     encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
-    encoder
-        .encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb)
-        .map_err(|e| Error::ImageEncoding(e.to_string()))?;
+    encoder.encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb).map_err(|e| Error::ImageEncoding(e.to_string()))?;
     Ok(bytes)
 }
 
@@ -237,11 +241,16 @@ pub struct Renderer {
 fn tilejson_from(json: &J, overrides: &J) -> TileJson {
     let get = |k: &str| overrides.get(k).filter(|v| !v.is_null()).or_else(|| json.get(k));
     TileJson {
-        tiles: get("tiles").and_then(J::as_array).map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
+        tiles: get("tiles")
+            .and_then(J::as_array)
+            .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
         minzoom: get("minzoom").and_then(J::as_f64).unwrap_or(0.0) as u8,
         maxzoom: get("maxzoom").and_then(J::as_f64).unwrap_or(22.0) as u8,
         tms: get("scheme").and_then(J::as_str) == Some("tms"),
-        bounds: get("bounds").and_then(J::as_array).and_then(|b| Some([b.first()?.as_f64()?, b.get(1)?.as_f64()?, b.get(2)?.as_f64()?, b.get(3)?.as_f64()?])),
+        bounds: get("bounds")
+            .and_then(J::as_array)
+            .and_then(|b| Some([b.first()?.as_f64()?, b.get(1)?.as_f64()?, b.get(2)?.as_f64()?, b.get(3)?.as_f64()?])),
         // Like MapLibre's `loadTileJSON`, `tileSize` and `encoding` may come from the TileJSON
         // too (the style's source options win).
         tile_size: get("tileSize").and_then(J::as_f64).unwrap_or(512.0),
@@ -269,7 +278,8 @@ fn cluster_properties(props: &J) -> supercluster::ClusterProperties {
 /// The source `filter`: features of a FeatureCollection are kept where it evaluates to true
 /// (at zoom 0, against the GeoJSON properties and id).
 fn filter_geojson(data: &J, filter: &J) -> Option<J> {
-    if data["type"] != "FeatureCollection" || !(filter.is_boolean() || filter.as_array().is_some_and(|a| !a.is_empty())) {
+    if data["type"] != "FeatureCollection" || !(filter.is_boolean() || filter.as_array().is_some_and(|a| !a.is_empty()))
+    {
         return None;
     }
     let e = expression::create_expression(filter, &serde_json::json!({"type": "boolean"}), None).ok()?;
@@ -283,7 +293,11 @@ fn filter_geojson(data: &J, filter: &J) -> Option<J> {
             properties: expression::Properties::Object(properties),
             ..Default::default()
         };
-        let mut ctx = expression::EvalCtx { globals: expression::Globals { zoom: 0.0, ..Default::default() }, feature: Some(&feature), ..Default::default() };
+        let mut ctx = expression::EvalCtx {
+            globals: expression::Globals { zoom: 0.0, ..Default::default() },
+            feature: Some(&feature),
+            ..Default::default()
+        };
         matches!(e.evaluate(&mut ctx), expression::Value::Bool(true))
     };
     let features: Vec<J> = data["features"].as_array().into_iter().flatten().filter(|f| keep(f)).cloned().collect();
@@ -297,7 +311,11 @@ fn geojson_index(data: &J, src: &J) -> geojson::GeoJsonIndex {
     let maxzoom = src["maxzoom"].as_f64().unwrap_or(18.0);
     let cluster = src["cluster"].as_bool().unwrap_or(false).then(|| supercluster::Options {
         // `clusterMaxZoom` (0 counts as unset), else one below the source maxzoom.
-        max_zoom: src["clusterMaxZoom"].as_f64().filter(|&z| z != 0.0).map_or(maxzoom - 1.0, expression::value::js_round).clamp(0.0, 30.0) as u8,
+        max_zoom: src["clusterMaxZoom"]
+            .as_f64()
+            .filter(|&z| z != 0.0)
+            .map_or(maxzoom - 1.0, expression::value::js_round)
+            .clamp(0.0, 30.0) as u8,
         min_points: src["clusterMinPoints"].as_f64().filter(|&v| v != 0.0).unwrap_or(2.0).max(2.0) as u32,
         radius: src["clusterRadius"].as_f64().filter(|&v| v != 0.0).unwrap_or(50.0) * scale,
         extent: geojson::EXTENT,
@@ -322,14 +340,21 @@ fn geojson_index(data: &J, src: &J) -> geojson::GeoJsonIndex {
 /// that tile's units (rounded, like MapLibre).
 fn image_tile(coordinates: &[[f64; 2]; 4]) -> (TileId, [[f64; 2]; 4]) {
     let m = coordinates.map(|c| [tile::mercator_x(c[0]), tile::mercator_y(c[1])]);
-    let (min_x, max_x) = (m.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min), m.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max));
-    let (min_y, max_y) = (m.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min), m.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max));
+    let (min_x, max_x) = (
+        m.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
+        m.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max),
+    );
+    let (min_y, max_y) = (
+        m.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min),
+        m.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max),
+    );
     let d = (max_x - min_x).max(max_y - min_y);
     let z = (-d.ln() / std::f64::consts::LN_2).floor().max(0.0) as u8;
     let n = (1u64 << z) as f64;
     let id = TileId { z, x: ((min_x + max_x) / 2.0 * n).floor() as u32, y: ((min_y + max_y) / 2.0 * n).floor() as u32 };
     let round = expression::value::js_round;
-    let corners = m.map(|p| [round((p[0] * n - id.x as f64) * render::EXTENT), round((p[1] * n - id.y as f64) * render::EXTENT)]);
+    let corners =
+        m.map(|p| [round((p[0] * n - id.x as f64) * render::EXTENT), round((p[1] * n - id.y as f64) * render::EXTENT)]);
     (id, corners)
 }
 
@@ -345,7 +370,8 @@ fn image_warp(c: &[[f64; 2]; 4]) -> [f64; 3] {
     let px = (sum[0] * dy - dx * sum[1]) / det;
     let py = (rx * sum[1] - sum[0] * ry) / det;
     let dens = [1.0, 1.0 + px, 1.0 + px + py, 1.0 + py];
-    let fore = dens.iter().cloned().fold(f64::NEG_INFINITY, f64::max) / dens.iter().cloned().fold(f64::INFINITY, f64::min);
+    let fore =
+        dens.iter().cloned().fold(f64::NEG_INFINITY, f64::max) / dens.iter().cloned().fold(f64::INFINITY, f64::min);
     let blend = ((1.0 - 4.0 / fore) / (1.0 - 4.0 / 512.0)).max(0.0);
     if !(1.0..=512.0).contains(&fore) || blend >= 1.0 {
         return [0.0, 0.0, 1.0];
@@ -398,12 +424,33 @@ impl Renderer {
                     data => Data::GeoJson(geojson_index(&data, &src)),
                 },
                 "image" => {
-                    let c = |i: usize| [src["coordinates"][i][0].as_f64().unwrap_or(0.0), src["coordinates"][i][1].as_f64().unwrap_or(0.0)];
-                    Data::Image { url: src["url"].as_str().unwrap_or("").to_string(), coordinates: [c(0), c(1), c(2), c(3)], texture: None }
+                    let c = |i: usize| {
+                        [
+                            src["coordinates"][i][0].as_f64().unwrap_or(0.0),
+                            src["coordinates"][i][1].as_f64().unwrap_or(0.0),
+                        ]
+                    };
+                    Data::Image {
+                        url: src["url"].as_str().unwrap_or("").to_string(),
+                        coordinates: [c(0), c(1), c(2), c(3)],
+                        texture: None,
+                    }
                 }
                 _ => Data::Failed,
             };
-            sources.insert(id, Source { ty, json: src, data, tiles: HashMap::default(), vector_layers: Default::default(), buckets: Default::default(), last_used: Default::default(), all_layers: false });
+            sources.insert(
+                id,
+                Source {
+                    ty,
+                    json: src,
+                    data,
+                    tiles: HashMap::default(),
+                    vector_layers: Default::default(),
+                    buckets: Default::default(),
+                    last_used: Default::default(),
+                    all_layers: false,
+                },
+            );
         }
         let sprites = sprite::Sprites::new(&json["sprite"], view.pixel_ratio);
         let glyphs = symbol::glyphs::Glyphs::new(json["glyphs"].as_str());
@@ -493,7 +540,10 @@ impl Renderer {
     /// `None`, for what `render` draws. A vector source's tiles keep all their layers from then on.
     pub fn set_export_source(&mut self, source: Option<&str>) -> Result<(), Error> {
         if let Some(id) = source {
-            let src = self.sources.get_mut(id).filter(|s| matches!(s.ty.as_str(), "vector" | "geojson" | "raster" | "raster-dem" | "image"));
+            let src = self
+                .sources
+                .get_mut(id)
+                .filter(|s| matches!(s.ty.as_str(), "vector" | "geojson" | "raster" | "raster-dem" | "image"));
             let src = src.ok_or_else(|| Error::Unsupported(format!("no source {id:?} to export")))?;
             if src.ty == "vector" && !src.all_layers {
                 // Decoded with the style's layers only.
@@ -519,7 +569,9 @@ impl Renderer {
     /// Keeps the cached tiles of tickets `oldest` and later, like `render_retaining`.
     pub fn export_tile(&mut self, oldest: u64) -> Result<Vec<u8>, Error> {
         let Some(id) = self.export.clone() else { return Err(Error::Unsupported("no export source set".into())) };
-        let Some((_, warp)) = self.projected.clone() else { return Err(Error::Unsupported("export needs a projected view".into())) };
+        let Some((_, warp)) = self.projected.clone() else {
+            return Err(Error::Unsupported("export needs a projected view".into()));
+        };
         if !self.needs().is_empty() {
             return Err(Error::NotReady);
         }
@@ -536,9 +588,13 @@ impl Renderer {
             }
             _ => {
                 // The Mercator picture of the source, warped.
-                let layer = style::Style::parse(serde_json::json!({"layers": [{"id": id, "type": "raster", "source": id}]})).layers.remove(0);
+                let layer =
+                    style::Style::parse(serde_json::json!({"layers": [{"id": id, "type": "raster", "source": id}]}))
+                        .layers
+                        .remove(0);
                 let t = &self.transform;
-                let (mw, mh) = ((t.width * t.pixel_ratio).round() as usize, (t.height * t.pixel_ratio).round() as usize);
+                let (mw, mh) =
+                    ((t.width * t.pixel_ratio).round() as usize, (t.height * t.pixel_ratio).round() as usize);
                 let mut picture = render::raster::Target::new(mw, mh);
                 self.draw_raster(&mut picture, &layer, &self.ctx(), src, mw, mh);
                 let mut out = render::raster::Target::new(warp.size[0], warp.size[1]);
@@ -565,7 +621,8 @@ impl Renderer {
                 let found = std::iter::once(last).chain(0..order.len()).filter(|&k| k < order.len()).find_map(|k| {
                     let t = resolved[order[k]].0;
                     let n = (1u64 << t.canonical.z) as f64;
-                    let (x, y) = ((m[0] * n - t.wrap as f64 * n - t.canonical.x as f64), (m[1] * n - t.canonical.y as f64));
+                    let (x, y) =
+                        ((m[0] * n - t.wrap as f64 * n - t.canonical.x as f64), (m[1] * n - t.canonical.y as f64));
                     ((0.0..1.0).contains(&x) && (0.0..1.0).contains(&y)).then_some((k, x, y))
                 });
                 if let Some((k, x, y)) = found {
@@ -577,7 +634,12 @@ impl Renderer {
             }
             // Terrarium: (r * 256 + g + b / 256) - 32768.
             let v = (elevation + 32768.0).clamp(0.0, 65535.0 + 255.0 / 256.0);
-            rgba.extend_from_slice(&[(v / 256.0).floor() as u8, (v % 256.0).floor() as u8, ((v.fract()) * 256.0).floor() as u8, 255]);
+            rgba.extend_from_slice(&[
+                (v / 256.0).floor() as u8,
+                (v % 256.0).floor() as u8,
+                ((v.fract()) * 256.0).floor() as u8,
+                255,
+            ]);
         }
         rgba
     }
@@ -590,14 +652,17 @@ impl Renderer {
         let mut layers: Vec<mvt::Layer> = Vec::new();
         // The pieces of polygons the source tiles cut, by layer and properties (ids need not be the
         // same in each tile), with the longest segment of their tiles and their id if they share it.
-        let mut cut: hash::IndexMap<(String, String), (mvt::Feature, Vec<Vec<[f64; 2]>>, f64, Option<J>)> = Default::default();
+        let mut cut: hash::IndexMap<(String, String), (mvt::Feature, Vec<Vec<[f64; 2]>>, f64, Option<J>)> =
+            Default::default();
         for (rt, tl, _) in self.tile_layers(src) {
             let n = (1u64 << rt.canonical.z) as f64;
             let (ox, oy) = (rt.wrap as f64 * n + rt.canonical.x as f64, rt.canonical.y as f64);
             for l in tl.iter().flat_map(|ls| ls.iter()) {
                 let name = if src.ty == "geojson" { &id } else { &l.name };
                 let e = l.extent as f64;
-                let to_world = |g: &[Vec<[f64; 2]>]| -> Vec<Vec<[f64; 2]>> { g.iter().map(|r| r.iter().map(|p| [(ox + p[0] / e) / n, (oy + p[1] / e) / n]).collect()).collect() };
+                let to_world = |g: &[Vec<[f64; 2]>]| -> Vec<Vec<[f64; 2]>> {
+                    g.iter().map(|r| r.iter().map(|p| [(ox + p[0] / e) / n, (oy + p[1] / e) / n]).collect()).collect()
+                };
                 let index = match layers.iter().position(|o| &o.name == name) {
                     Some(i) => i,
                     None => {
@@ -606,7 +671,8 @@ impl Renderer {
                     }
                 };
                 for f in &l.features {
-                    let geom: Vec<Vec<[f64; 2]>> = f.geometry.iter().map(|r| r.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()).collect();
+                    let geom: Vec<Vec<[f64; 2]>> =
+                        f.geometry.iter().map(|r| r.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()).collect();
                     if f.ty == mvt::GeomType::Polygon {
                         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
                         for p in geom.iter().flatten() {
@@ -619,9 +685,16 @@ impl Renderer {
                         // Cut by the tile's edge: merged below with its other pieces, so that the
                         // cuts add no edges.
                         if lo[0] < 0.0 || lo[1] < 0.0 || hi[0] > e || hi[1] > e {
-                            let props = f.properties.to_object().iter().map(|(k, v)| (k.to_string(), v.to_json())).collect::<serde_json::Map<_, _>>();
+                            let props = f
+                                .properties
+                                .to_object()
+                                .iter()
+                                .map(|(k, v)| (k.to_string(), v.to_json()))
+                                .collect::<serde_json::Map<_, _>>();
                             let id = f.id.as_ref().map(|v| v.to_json());
-                            let entry = cut.entry((name.clone(), J::Object(props).to_string())).or_insert_with(|| (mvt::Feature { geometry: vec![], ..f.clone() }, vec![], 0.0, id.clone()));
+                            let entry = cut.entry((name.clone(), J::Object(props).to_string())).or_insert_with(|| {
+                                (mvt::Feature { geometry: vec![], ..f.clone() }, vec![], 0.0, id.clone())
+                            });
                             entry.1.extend(to_world(&geom));
                             entry.2 = f64::max(entry.2, 1.0 / n / 32.0);
                             if entry.3 != id {
@@ -665,7 +738,8 @@ impl Renderer {
         for src in self.sources.values_mut() {
             let last_used = src.last_used.get_mut();
             let Some(excess) = last_used.len().checked_sub(MAX_CACHED_TILES).filter(|&n| n > 0) else { continue };
-            let mut old: Vec<(u64, TileId)> = last_used.iter().filter(|&(_, &t)| t < keep_since).map(|(&id, &t)| (t, id)).collect();
+            let mut old: Vec<(u64, TileId)> =
+                last_used.iter().filter(|&(_, &t)| t < keep_since).map(|(&id, &t)| (t, id)).collect();
             old.sort_unstable();
             let evicted: hash::HashSet<TileId> = old.into_iter().take(excess).map(|(_, id)| id).collect();
             last_used.retain(|id, _| !evicted.contains(id));
@@ -708,7 +782,11 @@ impl Renderer {
         }
         // MapLibre's default `zoomLevelsToOverscale` (4) below the map maxZoom (22): vector
         // tiles up to that zoom are sliced out of the source's maxzoom tile.
-        let maxzoom = if src.ty == "vector" { maxzoom.max((self.max_zoom as i32 - ZOOM_LEVELS_TO_OVERSCALE as i32).max(0) as u8) } else { maxzoom };
+        let maxzoom = if src.ty == "vector" {
+            maxzoom.max((self.max_zoom as i32 - ZOOM_LEVELS_TO_OVERSCALE as i32).max(0) as u8)
+        } else {
+            maxzoom
+        };
         let mut out = BTreeSet::new();
         for (x, y, wrap) in self.transform.covering_tiles(z) {
             let id = TileId { z: z as u8, x: x as u32, y: y as u32 };
@@ -718,7 +796,8 @@ impl Renderer {
                 let (x0, x1) = (canonical.x as f64 / n, (canonical.x + 1) as f64 / n);
                 let (y0, y1) = (canonical.y as f64 / n, (canonical.y + 1) as f64 / n);
                 let (bx0, bx1) = (tile::mercator_x(b[0]), tile::mercator_x(b[2]));
-                let (by0, by1) = (tile::mercator_y(b[3].min(tile::MAX_LAT)), tile::mercator_y(b[1].max(-tile::MAX_LAT)));
+                let (by0, by1) =
+                    (tile::mercator_y(b[3].min(tile::MAX_LAT)), tile::mercator_y(b[1].max(-tile::MAX_LAT)));
                 if x1 <= bx0 || x0 >= bx1 || y1 <= by0 || y0 >= by1 {
                     continue;
                 }
@@ -869,7 +948,15 @@ impl Renderer {
     /// overzoomed).
     /// Each also gets its bucket cache.
     /// Calls `f` with the source's resolved tiles: their clip masks and `layer`'s features.
-    fn with_tiles<R>(&self, ctx: &render::Ctx, src: &Source, layer: &style::Layer, w: usize, h: usize, f: impl FnOnce(&[render::TileFeatures]) -> R) -> R {
+    fn with_tiles<R>(
+        &self,
+        ctx: &render::Ctx,
+        src: &Source,
+        layer: &style::Layer,
+        w: usize,
+        h: usize,
+        f: impl FnOnce(&[render::TileFeatures]) -> R,
+    ) -> R {
         let empty = mvt::Layer { name: String::new(), extent: 4096, features: vec![] };
         let layers_by_tile = self.tile_layers(src);
         let render_tiles: Vec<RenderTile> = layers_by_tile.iter().map(|r| r.0).collect();
@@ -877,7 +964,12 @@ impl Renderer {
         let tiles: Vec<render::TileFeatures> = layers_by_tile
             .iter()
             .zip(masks.iter())
-            .map(|((rt, tl, buckets), mask)| render::TileFeatures { tile: *rt, mask, layer: self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty), buckets: Some(buckets) })
+            .map(|((rt, tl, buckets), mask)| render::TileFeatures {
+                tile: *rt,
+                mask,
+                layer: self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty),
+                buckets: Some(buckets),
+            })
             .collect();
         f(&tiles)
     }
@@ -895,27 +987,36 @@ impl Renderer {
             .map(|(rt, data_id)| {
                 let layers = match &src.data {
                     Data::GeoJson(g) => Some(Rc::clone(
-                        src.vector_layers.borrow_mut().entry((rt.canonical, rt.canonical))
+                        src.vector_layers
+                            .borrow_mut()
+                            .entry((rt.canonical, rt.canonical))
                             .or_insert_with(|| Rc::new(vec![g.tile(rt.canonical.z, rt.canonical.x, rt.canonical.y)])),
                     )),
                     Data::Tiled(_) => match src.tiles.get(&data_id).cloned().flatten() {
                         Some(TileData::Vector(ls)) if data_id == rt.canonical => Some(ls),
                         Some(TileData::Vector(ls)) => Some(Rc::clone(
-                            src.vector_layers.borrow_mut().entry((data_id, rt.canonical))
-                                .or_insert_with(|| Rc::new(ls.iter().map(|l| mvt::slice_layer(l, data_id, rt.canonical)).collect())),
+                            src.vector_layers.borrow_mut().entry((data_id, rt.canonical)).or_insert_with(|| {
+                                Rc::new(ls.iter().map(|l| mvt::slice_layer(l, data_id, rt.canonical)).collect())
+                            }),
                         )),
                         _ => None,
                     },
                     _ => None,
                 };
-                let buckets = Rc::clone(src.buckets.borrow_mut().entry((data_id, rt.canonical, rt.overscaled_z)).or_default());
+                let buckets =
+                    Rc::clone(src.buckets.borrow_mut().entry((data_id, rt.canonical, rt.overscaled_z)).or_default());
                 (rt, layers, buckets)
             })
             .collect()
     }
 
     /// The style layer's source layer within a tile.
-    fn source_layer<'a>(&self, src: &Source, layer: &style::Layer, layers: Option<&'a Vec<mvt::Layer>>) -> Option<&'a mvt::Layer> {
+    fn source_layer<'a>(
+        &self,
+        src: &Source,
+        layer: &style::Layer,
+        layers: Option<&'a Vec<mvt::Layer>>,
+    ) -> Option<&'a mvt::Layer> {
         let ls = layers?;
         match &src.data {
             Data::GeoJson(_) => ls.first(),
@@ -959,17 +1060,27 @@ impl Renderer {
                         // A DEM tile that fails to decode also lets a parent show through.
                         let raster = src.ty == "raster" || src.ty == "raster-dem";
                         let decoded = match (src.ty.as_str(), bytes) {
-                            (_, Some([])) if raster => Some(TileData::Raster(Rc::new(image::Texture::new(&image::Image { w: 1, h: 1, data: vec![0; 4] }, true)))),
-                            ("raster", Some(b)) => image::Image::decode(b).map(|i| TileData::Raster(Rc::new(image::Texture::new(&i, true)))),
-                            ("raster-dem", Some(b)) => image::Image::decode(b).and_then(|i| dem_from(&i, &src.json, tj.encoding.as_deref())).map(|d| TileData::Dem(Rc::new(d))),
+                            (_, Some([])) if raster => Some(TileData::Raster(Rc::new(image::Texture::new(
+                                &image::Image { w: 1, h: 1, data: vec![0; 4] },
+                                true,
+                            )))),
+                            ("raster", Some(b)) => image::Image::decode(b)
+                                .map(|i| TileData::Raster(Rc::new(image::Texture::new(&i, true)))),
+                            ("raster-dem", Some(b)) => image::Image::decode(b)
+                                .and_then(|i| dem_from(&i, &src.json, tj.encoding.as_deref()))
+                                .map(|d| TileData::Dem(Rc::new(d))),
                             _ if raster => None,
                             _ => {
                                 let all = src.all_layers;
                                 let used = |name: &[u8]| {
                                     let name = String::from_utf8_lossy(name);
-                                    all || self.style.layers.iter().any(|l| l.source.as_deref() == Some(id) && l.source_layer.as_deref() == Some(&*name))
+                                    all || self.style.layers.iter().any(|l| {
+                                        l.source.as_deref() == Some(id) && l.source_layer.as_deref() == Some(&*name)
+                                    })
                                 };
-                                Some(TileData::Vector(Rc::new(bytes.and_then(|b| mvt::decode(b, used)).unwrap_or_default())))
+                                Some(TileData::Vector(Rc::new(
+                                    bytes.and_then(|b| mvt::decode(b, used)).unwrap_or_default(),
+                                )))
                             }
                         };
                         src.tiles.insert(t, decoded);
@@ -979,7 +1090,8 @@ impl Renderer {
                 Data::Image { url: u, texture, .. } if u == url && texture.is_none() => {
                     changed = true;
                     // Image sources are uploaded without mipmaps.
-                    *texture = Some(bytes.and_then(image::Image::decode).map(|i| Rc::new(image::Texture::new(&i, false))));
+                    *texture =
+                        Some(bytes.and_then(image::Image::decode).map(|i| Rc::new(image::Texture::new(&i, false))));
                 }
                 _ => {}
             }
@@ -1000,28 +1112,28 @@ impl Renderer {
             return Err(Error::NotReady);
         }
         if let Some((_, w)) = self.projected.as_ref().filter(|(_, w)| w.is_empty()) {
-            return Ok(vec![
-                0;
-                (w.size[0] - 2 * w.margin)
-                    * (w.size[1] - 2 * w.margin)
-                    * 4
-            ]);
+            return Ok(vec![0; (w.size[0] - 2 * w.margin) * (w.size[1] - 2 * w.margin) * 4]);
         }
         self.evict(oldest.min(self.clock));
         let t = &self.transform;
         let (w, h) = ((t.width * t.pixel_ratio).round() as usize, (t.height * t.pixel_ratio).round() as usize);
-        let visible: Vec<bool> = self.style.layers.iter().map(|l| !l.is_hidden(t.zoom, &self.style.global_state)).collect();
+        let visible: Vec<bool> =
+            self.style.layers.iter().map(|l| !l.is_hidden(t.zoom, &self.style.global_state)).collect();
         // In a projected view the Mercator picture (rasters and DEMs) is warped into `out` before
         // each layer drawn directly (and at the end); those layers are drawn with `out_ctx`.
         let warp = self.projected.as_ref().map(|(_, w)| Rc::clone(w));
-        let direct = |l: &style::Layer| warp.is_some() && matches!(l.ty.as_str(), "symbol" | "fill" | "line" | "circle" | "heatmap" | "background");
+        let direct = |l: &style::Layer| {
+            warp.is_some() && matches!(l.ty.as_str(), "symbol" | "fill" | "line" | "circle" | "heatmap" | "background")
+        };
         // The Mercator picture, unless a projected view has no layer drawn in it.
         let mercator_drawn = warp.is_none() || self.style.layers.iter().zip(&visible).any(|(l, v)| *v && !direct(l));
-        let mut target = if mercator_drawn { render::raster::Target::new(w, h) } else { render::raster::Target::new(0, 0) };
+        let mut target =
+            if mercator_drawn { render::raster::Target::new(w, h) } else { render::raster::Target::new(0, 0) };
         let ctx = self.ctx();
         // Triangles skip the margin, which is cropped. Not the Mercator picture of a projected
         // view: the warp reads it around each output pixel.
-        let inner = |t: &mut render::raster::Target, m: usize| t.clip = [m, m, t.w.saturating_sub(m), t.h.saturating_sub(m)];
+        let inner =
+            |t: &mut render::raster::Target, m: usize| t.clip = [m, m, t.w.saturating_sub(m), t.h.saturating_sub(m)];
         if warp.is_none() {
             inner(&mut target, (self.view.margin as f64 * t.pixel_ratio).round() as usize);
         }
@@ -1031,7 +1143,8 @@ impl Renderer {
             o
         });
         let out_transform = warp.as_ref().map(|w| t.reprojected(Rc::clone(w)));
-        let out_ctx = out_transform.as_ref().map(|ot| render::Ctx::new(ot, &self.style.global_state, &self.sprites.images));
+        let out_ctx =
+            out_transform.as_ref().map(|ot| render::Ctx::new(ot, &self.style.global_state, &self.sprites.images));
         let out_ctx = out_ctx.as_ref().unwrap_or(&ctx);
         let (symbol_layers, leader_of, placements) = self.place_symbols(out_ctx);
         // Heatmaps drawn so far: MapLibre draws them without depth test, so they stay on top of
@@ -1051,7 +1164,10 @@ impl Renderer {
         let mut last_bucket_use: HashMap<(&str, &str), usize> = HashMap::default();
         if !self.keep_buckets {
             for (i, layer) in self.style.layers.iter().enumerate() {
-                if visible[i] && matches!(layer.ty.as_str(), "fill" | "line") && let Some(src) = layer.source.as_deref() {
+                if visible[i]
+                    && matches!(layer.ty.as_str(), "fill" | "line")
+                    && let Some(src) = layer.source.as_deref()
+                {
                     last_bucket_use.insert((src, layer.layout_group.as_str()), i);
                 }
             }
@@ -1109,11 +1225,20 @@ impl Renderer {
                 continue;
             }
             let clip = main.clip;
-            let mut offscreen = layer_opacity.filter(|o| *o < 1.0).map(|_| render::raster::Target { clip, ..render::raster::Target::new(lw, lh) });
+            let mut offscreen = layer_opacity
+                .filter(|o| *o < 1.0)
+                .map(|_| render::raster::Target { clip, ..render::raster::Target::new(lw, lh) });
             let dest = offscreen.as_mut().unwrap_or(&mut *main);
             self.with_tiles(lctx, src, layer, lw, lh, |tiles| match layer.ty.as_str() {
                 "fill" => {
-                    render::draw_fill(dest, layer, lctx, tiles, raw, if opaque_drawn[i] { render::Pass::Translucent } else { render::Pass::All });
+                    render::draw_fill(
+                        dest,
+                        layer,
+                        lctx,
+                        tiles,
+                        raw,
+                        if opaque_drawn[i] { render::Pass::Translucent } else { render::Pass::All },
+                    );
                 }
                 "line" => {
                     let source_maxzoom = match &src.data {
@@ -1123,7 +1248,16 @@ impl Renderer {
                     };
                     let has_gradient = raw["paint"].get("line-gradient").is_some();
                     let has_pattern = raw["paint"].get("line-pattern").is_some();
-                    render::draw_line(dest, layer, lctx, tiles, source_maxzoom, self.max_zoom, has_gradient, has_pattern)
+                    render::draw_line(
+                        dest,
+                        layer,
+                        lctx,
+                        tiles,
+                        source_maxzoom,
+                        self.max_zoom,
+                        has_gradient,
+                        has_pattern,
+                    )
                 }
                 "circle" => render::draw_circle(dest, layer, lctx, tiles),
                 "heatmap" => {
@@ -1133,7 +1267,8 @@ impl Renderer {
                 }
                 _ => {}
             });
-            if let Some(&last) = last_bucket_use.get(&(layer.source.as_deref().unwrap_or(""), layer.layout_group.as_str()))
+            if let Some(&last) =
+                last_bucket_use.get(&(layer.source.as_deref().unwrap_or(""), layer.layout_group.as_str()))
                 && last == i
             {
                 let projected = format!("{}\0projected", layer.layout_group);
@@ -1162,11 +1297,7 @@ impl Renderer {
         }
         let (rgba, w, margin) = match (warp, out) {
             (Some(warp), Some(out)) => (out.into_unpremultiplied(), warp.size[0], warp.margin),
-            _ => (
-                target.into_unpremultiplied(),
-                w,
-                (self.view.margin as f64 * t.pixel_ratio).round() as usize,
-            ),
+            _ => (target.into_unpremultiplied(), w, (self.view.margin as f64 * t.pixel_ratio).round() as usize),
         };
         Ok(crop(rgba, w, margin))
     }
@@ -1189,7 +1320,8 @@ impl Renderer {
         let no_mask = render::raster::Mask::empty();
         // Layers with identical layout share one bucket (`groupByLayout`): it is laid out and
         // placed once, for the first layer, and drawn by each with its own paint.
-        let mut symbol_layers: Vec<(&style::Layer, &serde_json::Value, Vec<Rc<symbol::layout::SymbolBucket>>)> = Vec::new();
+        let mut symbol_layers: Vec<(&style::Layer, &serde_json::Value, Vec<Rc<symbol::layout::SymbolBucket>>)> =
+            Vec::new();
         let mut leader_of: HashMap<&str, usize> = HashMap::default();
         for layer in &self.style.layers {
             if layer.ty != "symbol" || layer.is_hidden(t.zoom, &self.style.global_state) {
@@ -1245,7 +1377,13 @@ impl Renderer {
         let lowest = visible.iter().position(|v| *v);
         let occlusion = self.style.layers.len() < u16::MAX as usize
             && !self.style.layers.iter().zip(visible).any(|(l, v)| *v && l.ty == "heatmap")
-            && self.style.layers.iter().zip(visible).enumerate().any(|(i, (l, v))| *v && Some(i) > lowest && matches!(l.ty.as_str(), "background" | "fill"));
+            && self
+                .style
+                .layers
+                .iter()
+                .zip(visible)
+                .enumerate()
+                .any(|(i, (l, v))| *v && Some(i) > lowest && matches!(l.ty.as_str(), "background" | "fill"));
         if occlusion {
             target.occ = vec![0; target.w * target.h];
             target.cull = true;
@@ -1259,7 +1397,9 @@ impl Renderer {
                     "background" => render::draw_background(target, layer, ctx, raw, render::Pass::Opaque),
                     "fill" if self.layer_opacity(layer).is_none_or(|o| o >= 1.0) => {
                         let Some(src) = layer.source.as_deref().and_then(|s| self.sources.get(s)) else { continue };
-                        self.with_tiles(ctx, src, layer, target.w, target.h, |tiles| render::draw_fill(target, layer, ctx, tiles, raw, render::Pass::Opaque))
+                        self.with_tiles(ctx, src, layer, target.w, target.h, |tiles| {
+                            render::draw_fill(target, layer, ctx, tiles, raw, render::Pass::Opaque)
+                        })
                     }
                     _ => false,
                 };
@@ -1269,8 +1409,16 @@ impl Renderer {
         opaque_drawn
     }
 
-    fn draw_raster(&self, target: &mut render::raster::Target, layer: &style::Layer, ctx: &render::Ctx, src: &Source, w: usize, h: usize) {
-        use render::raster_layer::{draw_quad, Quad, RasterParams};
+    fn draw_raster(
+        &self,
+        target: &mut render::raster::Target,
+        layer: &style::Layer,
+        ctx: &render::Ctx,
+        src: &Source,
+        w: usize,
+        h: usize,
+    ) {
+        use render::raster_layer::{Quad, RasterParams, draw_quad};
         let params = RasterParams::new(layer, ctx);
         if let Data::Image { coordinates, texture: Some(Some(tex)), .. } = &src.data {
             let (id, corners) = image_tile(coordinates);
@@ -1280,9 +1428,11 @@ impl Renderer {
                 tl[0] + br[0] == tr[0] + bl[0] && tl[1] + br[1] == tr[1] + bl[1]
             };
             // World copies of the image tile that may be visible.
-            let corners_world = [[0.0, 0.0], [w as f64, 0.0], [0.0, h as f64], [w as f64, h as f64]].map(|p| ctx.transform.screen_to_world(p));
+            let corners_world = [[0.0, 0.0], [w as f64, 0.0], [0.0, h as f64], [w as f64, h as f64]]
+                .map(|p| ctx.transform.screen_to_world(p));
             let ws = ctx.transform.world_size;
-            let (x0, x1) = corners_world.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p[0]), b.max(p[0])));
+            let (x0, x1) =
+                corners_world.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p[0]), b.max(p[0])));
             for wrap in (x0 / ws).floor() as i32 - 1..=(x1 / ws).floor() as i32 + 1 {
                 let tile = RenderTile { overscaled_z: id.z, wrap, canonical: id };
                 let q = Quad { tile, corners, warp, subdivided: warp[2] > 0.0 && !parallelogram };
@@ -1325,7 +1475,11 @@ impl Renderer {
                 let world_x = |t: &RenderTile| t.wrap as i64 * n + t.canonical.x as i64;
                 for (j, u) in tiles.iter().enumerate() {
                     let (dx, dy) = (world_x(u) - world_x(t), u.canonical.y as i64 - t.canonical.y as i64);
-                    let neighbor = u.overscaled_z == t.overscaled_z && u.canonical.z == t.canonical.z && dx.abs() <= 1 && dy.abs() <= 1 && (dx, dy) != (0, 0);
+                    let neighbor = u.overscaled_z == t.overscaled_z
+                        && u.canonical.z == t.canonical.z
+                        && dx.abs() <= 1
+                        && dy.abs() <= 1
+                        && (dx, dy) != (0, 0);
                     if let (true, Some(b)) = (neighbor, raw[j]) {
                         dem.backfill(b, dx as isize, dy as isize);
                     }
@@ -1335,7 +1489,15 @@ impl Renderer {
             .collect()
     }
 
-    fn draw_dem_layer(&self, target: &mut render::raster::Target, layer: &style::Layer, ctx: &render::Ctx, src: &Source, w: usize, h: usize) {
+    fn draw_dem_layer(
+        &self,
+        target: &mut render::raster::Target,
+        layer: &style::Layer,
+        ctx: &render::Ctx,
+        src: &Source,
+        w: usize,
+        h: usize,
+    ) {
         let hillshade = (layer.ty == "hillshade").then(|| render::dem::HillshadeParams::new(layer, ctx));
         let ramp = (layer.ty == "color-relief").then(|| render::dem::ColorRamp::new(layer, ctx));
         let resolved = self.resolve(src).0;
@@ -1391,14 +1553,23 @@ mod tests {
         let mut renderer = Renderer::new(style, View::tile(0, 0, 0, 128)).unwrap();
         let urls = |r: &Renderer| r.needs().into_iter().map(|n| n.url).collect::<Vec<_>>();
         assert_eq!(urls(&renderer), ["/a", "/b"]);
-        renderer.provide("/a", Some(br#"{"type":"Feature","properties":{"name":"A"},"geometry":{"type":"Point","coordinates":[0,0]}}"#));
+        renderer.provide(
+            "/a",
+            Some(br#"{"type":"Feature","properties":{"name":"A"},"geometry":{"type":"Point","coordinates":[0,0]}}"#),
+        );
         let expected = ["/b", "/glyphs/Test Font/0-255"];
         assert_eq!(urls(&renderer), expected);
         assert_eq!(urls(&renderer), expected);
         renderer.provide("/glyphs/Test Font/0-255", None);
         assert_eq!(urls(&renderer), ["/b"]);
         // Later source data can introduce a range after earlier glyphs have settled.
-        renderer.provide("/b", Some(r#"{"type":"Feature","properties":{"name":"あ"},"geometry":{"type":"Point","coordinates":[0,0]}}"#.as_bytes()));
+        renderer.provide(
+            "/b",
+            Some(
+                r#"{"type":"Feature","properties":{"name":"あ"},"geometry":{"type":"Point","coordinates":[0,0]}}"#
+                    .as_bytes(),
+            ),
+        );
         assert_eq!(urls(&renderer), ["/glyphs/Test Font/12288-12543"]);
         renderer.provide("/glyphs/Test Font/12288-12543", None);
         assert!(renderer.needs().is_empty());
@@ -1409,7 +1580,8 @@ mod tests {
     fn glyph_ranges_are_requested_again_for_code_points_not_kept() {
         // A range file with glyphs "A" and "B" (1x1 px).
         let field = |n: u8, bytes: &[u8]| [&[n << 3 | 2, bytes.len() as u8][..], bytes].concat();
-        let glyph = |c: u8| field(3, &[&[1 << 3, c][..], &field(2, &[0; 49]), &[3 << 3, 1, 4 << 3, 1, 7 << 3, 2]].concat());
+        let glyph =
+            |c: u8| field(3, &[&[1 << 3, c][..], &field(2, &[0; 49]), &[3 << 3, 1, 4 << 3, 1, 7 << 3, 2]].concat());
         let range = field(1, &[glyph(b'A'), glyph(b'B')].concat());
         let style = r#"{"version":8,"glyphs":"/glyphs/{fontstack}/{range}","sources":{"a":{"type":"geojson","data":{"type":"Point","coordinates":[0,0]}}},"layers":[{"id":"a","type":"symbol","source":"a","layout":{"text-field":["step",["zoom"],"A",1,"B"],"text-font":["Test Font"]}}]}"#;
         let mut renderer = Renderer::new(style, View::tile(0, 0, 0, 512)).unwrap();
@@ -1446,13 +1618,26 @@ mod tests {
         let parent = TileId { z: 1, x: 0, y: 0 };
         let child = TileId { z: 2, x: 1, y: 1 };
         for (id, x) in [("a", 3072), ("b", 2560)] {
-            let layer = mvt::Layer { name: "points".into(), extent: 4096, features: vec![mvt::Feature {
-                id: None, ty: mvt::GeomType::Point, properties: Default::default(), geometry: vec![vec![[x, 3072]]],
-            }] };
+            let layer = mvt::Layer {
+                name: "points".into(),
+                extent: 4096,
+                features: vec![mvt::Feature {
+                    id: None,
+                    ty: mvt::GeomType::Point,
+                    properties: Default::default(),
+                    geometry: vec![vec![[x, 3072]]],
+                }],
+            };
             renderer.sources.get_mut(id).unwrap().tiles.insert(parent, Some(TileData::Vector(Rc::new(vec![layer]))));
         }
         let layers = |id: &str, tile: TileId| {
-            renderer.tile_layers(&renderer.sources[id]).into_iter().find(|(t, _, _)| t.canonical == tile).unwrap().1.unwrap()
+            renderer
+                .tile_layers(&renderer.sources[id])
+                .into_iter()
+                .find(|(t, _, _)| t.canonical == tile)
+                .unwrap()
+                .1
+                .unwrap()
         };
         let a = layers("a", child);
         assert!(Rc::ptr_eq(&a, &layers("a", child)));
@@ -1468,8 +1653,13 @@ mod tests {
 
         // Once zoom is clamped to the source zoom, use the original decoded tile.
         renderer.set_max_zoom(1.0);
-        let unsliced = renderer.tile_layers(&renderer.sources["a"]).into_iter()
-            .find(|(t, _, _)| t.canonical == parent).unwrap().1.unwrap();
+        let unsliced = renderer
+            .tile_layers(&renderer.sources["a"])
+            .into_iter()
+            .find(|(t, _, _)| t.canonical == parent)
+            .unwrap()
+            .1
+            .unwrap();
         assert_eq!(unsliced[0].features[0].geometry, vec![vec![[3072, 3072]]]);
     }
 
@@ -1489,10 +1679,14 @@ mod tests {
         let style = r##"{"version":8,"sources":{"p":{"type":"geojson","data":{"type":"Point","coordinates":[0,0]}}},"layers":[{"id":"bg","type":"background","paint":{"background-color":"rgba(32,64,128,0.5)"}},{"id":"point","type":"circle","source":"p","paint":{"circle-radius":10,"circle-color":"rgba(255,0,0,0.5)"}}]}"##;
         for pixel_ratio in [1.0, 1.5, 2.0] {
             for margin in [0, 8] {
-                let view = View { center: [0.0, 0.0], zoom: 1.0, bearing: 0.0, width: 63, height: 47, pixel_ratio, margin };
+                let view =
+                    View { center: [0.0, 0.0], zoom: 1.0, bearing: 0.0, width: 63, height: 47, pixel_ratio, margin };
                 let mut renderer = Renderer::new(style, view).unwrap();
                 let rgba = renderer.render().unwrap();
-                let (width, height) = ((view.width as f64 * pixel_ratio).round() as u32, (view.height as f64 * pixel_ratio).round() as u32);
+                let (width, height) = (
+                    (view.width as f64 * pixel_ratio).round() as u32,
+                    (view.height as f64 * pixel_ratio).round() as u32,
+                );
                 let png = encode_png(&rgba, width, height).unwrap();
                 let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
                 let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
@@ -1573,11 +1767,15 @@ mod tests {
         let style = r##"{"version":8,"sources":{"dem":{"type":"raster-dem","tiles":["/dem/{z}/{x}/{y}.png"],"tileSize":64,"maxzoom":10}},"layers":[{"id":"bg","type":"background","paint":{"background-color":"white"}},{"id":"shade","type":"hillshade","source":"dem"}]}"##;
         // A curved elevation surface must produce visible, varying shading. This exercises
         // the entire source/provide/draw path, rather than only the DEM slope calculation.
-        let data: Vec<u8> = (0..64).flat_map(|_| (0..64).flat_map(|x| {
-            let elevation = (x as f64 / 63.0 * std::f64::consts::PI).sin() * 4000.0;
-            let packed = ((elevation + 10000.0) * 10.0).round() as u32;
-            [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8, 255]
-        })).collect();
+        let data: Vec<u8> = (0..64)
+            .flat_map(|_| {
+                (0..64).flat_map(|x| {
+                    let elevation = (x as f64 / 63.0 * std::f64::consts::PI).sin() * 4000.0;
+                    let packed = ((elevation + 10000.0) * 10.0).round() as u32;
+                    [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8, 255]
+                })
+            })
+            .collect();
         let png = encode_png(&data, 64, 64).unwrap();
         for margin in [0, 8] {
             let view = View { margin, ..View::tile(10, 512, 512, 64) };
@@ -1590,15 +1788,25 @@ mod tests {
             let rgba = renderer.render().unwrap();
             assert_eq!(rgba.len(), 64 * 64 * 4);
             let center_row = &rgba[32 * 64 * 4..33 * 64 * 4];
-            assert!(center_row.as_chunks::<4>().0.iter().any(|p| *p != [255; 4]), "Hillshade must change the white background");
-            assert!(center_row.as_chunks::<4>().0.iter().any(|p| p != &center_row[..4]), "A curved DEM must have varying shading");
+            assert!(
+                center_row.as_chunks::<4>().0.iter().any(|p| *p != [255; 4]),
+                "Hillshade must change the white background"
+            );
+            assert!(
+                center_row.as_chunks::<4>().0.iter().any(|p| p != &center_row[..4]),
+                "A curved DEM must have varying shading"
+            );
         }
     }
 
     #[test]
     fn background_only() {
         let style = r##"{"version":8,"sources":{},"layers":[{"id":"bg","type":"background","paint":{"background-color":"#ff0000"}}]}"##;
-        let mut r = Renderer::new(style, View { center: [0.0, 0.0], zoom: 0.0, bearing: 0.0, width: 4, height: 4, pixel_ratio: 1.0, margin: 0 }).unwrap();
+        let mut r = Renderer::new(
+            style,
+            View { center: [0.0, 0.0], zoom: 0.0, bearing: 0.0, width: 4, height: 4, pixel_ratio: 1.0, margin: 0 },
+        )
+        .unwrap();
         assert!(r.needs().is_empty());
         let px = r.render().unwrap();
         assert_eq!(&px[..4], &[255, 0, 0, 255]);
@@ -1725,7 +1933,10 @@ mod tests {
                 let view = View { margin, pixel_ratio: ratio, ..View::tile(2, 1, 1, 512) };
                 let mut renderer = Renderer::new(style, view).unwrap();
                 let suffix = if ratio > 1.0 { "@2x" } else { "" };
-                renderer.provide(&format!("/sprite{suffix}.json"), Some(br#"{"marker":{"x":0,"y":0,"width":32,"height":32,"pixelRatio":1}}"#));
+                renderer.provide(
+                    &format!("/sprite{suffix}.json"),
+                    Some(br#"{"marker":{"x":0,"y":0,"width":32,"height":32,"pixelRatio":1}}"#),
+                );
                 renderer.provide(&format!("/sprite{suffix}.png"), Some(&png));
                 assert!(renderer.needs().is_empty());
                 let rgba = renderer.render().unwrap();
@@ -1744,8 +1955,18 @@ mod tests {
     fn exports_sources_as_projected_vector_tiles() {
         use expression::Value;
         // Longlat 0°–10° on 4096 units: (x°, y°) is at (409.6 x, 409.6 (10 - y)).
-        let view = reproject::ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], bearing: 0.0, width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
-        let near = |p: [i32; 2], lng: f64, lat: f64| (p[0] as f64 - 409.6 * lng).abs() < 2.0 && (p[1] as f64 - 409.6 * (10.0 - lat)).abs() < 2.0;
+        let view = reproject::ProjectedView {
+            projjson: test_crs::geographic(),
+            bbox: [0.0, 0.0, 10.0, 10.0],
+            bearing: 0.0,
+            width: 512,
+            height: 512,
+            pixel_ratio: 1.0,
+            margin: 0,
+        };
+        let near = |p: [i32; 2], lng: f64, lat: f64| {
+            (p[0] as f64 - 409.6 * lng).abs() < 2.0 && (p[1] as f64 - 409.6 * (10.0 - lat)).abs() < 2.0
+        };
         let style = r#"{"version":8,"sources":{
             "g":{"type":"geojson","data":{"type":"FeatureCollection","features":[
                 {"type":"Feature","properties":{"k":"square"},"geometry":{"type":"Polygon","coordinates":[[[2,2],[8,2],[8,8],[2,8],[2,2]]]}}]}},
@@ -1774,20 +1995,34 @@ mod tests {
         for n in needs {
             let zxy: Vec<u32> = n.url[2..].split('/').map(|v| v.parse().unwrap()).collect();
             let (z, x, y) = (2f64.powi(zxy[0] as i32), zxy[1] as f64, zxy[2] as f64);
-            let at = |lng: f64, lat: f64| [((tile::mercator_x(lng) * z - x) * 4096.0).round() as i32, ((tile::mercator_y(lat) * z - y) * 4096.0).round() as i32];
+            let at = |lng: f64, lat: f64| {
+                [
+                    ((tile::mercator_x(lng) * z - x) * 4096.0).round() as i32,
+                    ((tile::mercator_y(lat) * z - y) * 4096.0).round() as i32,
+                ]
+            };
             let feature = |ty, geometry| mvt::Feature { id: None, ty, properties: Default::default(), geometry };
             let layer = |name: &str, f| mvt::Layer { name: name.into(), extent: 4096, features: vec![f] };
             // A square across 0°, a tile boundary at every zoom: each tile has its part, with a buffer,
             // and an id of its own (like OpenMapTiles' oceans).
             let square = [vec![at(-3.0, 2.0), at(-3.0, 8.0), at(3.0, 8.0), at(3.0, 2.0), at(-3.0, 2.0)]];
-            let square: Vec<Vec<[f64; 2]>> = square.iter().map(|r| r.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()).collect();
+            let square: Vec<Vec<[f64; 2]>> =
+                square.iter().map(|r| r.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()).collect();
             let clip = |axis| mvt::clip_axis(&square, mvt::GeomType::Polygon, -128.0, 4224.0, axis);
             let square: Vec<Vec<[i32; 2]>> = mvt::clip_axis(&clip(0), mvt::GeomType::Polygon, -128.0, 4224.0, 1)
-                .iter().map(|r| r.iter().map(|p| [p[0].round() as i32, p[1].round() as i32]).collect()).collect();
+                .iter()
+                .map(|r| r.iter().map(|p| [p[0].round() as i32, p[1].round() as i32]).collect())
+                .collect();
             let tile = mvt::encode(&[
                 layer("used", feature(mvt::GeomType::LineString, vec![vec![at(1.0, 5.0), at(9.0, 5.0)]])),
                 layer("other", feature(mvt::GeomType::Point, vec![vec![at(5.0, 5.0)]])),
-                layer("polygon", mvt::Feature { id: Some(expression::Value::Number(zxy[1] as f64)), ..feature(mvt::GeomType::Polygon, square) }),
+                layer(
+                    "polygon",
+                    mvt::Feature {
+                        id: Some(expression::Value::Number(zxy[1] as f64)),
+                        ..feature(mvt::GeomType::Polygon, square)
+                    },
+                ),
             ]);
             r.provide(&n.url, Some(&tile));
         }
@@ -1796,7 +2031,8 @@ mod tests {
         let get = |name: &str| layers.iter().find(|l| l.name == name).unwrap();
         assert!(get("other").features.iter().flat_map(|f| f.geometry.iter().flatten()).all(|&p| near(p, 5.0, 5.0)));
         // Cut at the source's tile seams; together the line still runs from 1° to 9°.
-        let line: Vec<[i32; 2]> = get("used").features.iter().flat_map(|f| f.geometry.iter().flatten().copied()).collect();
+        let line: Vec<[i32; 2]> =
+            get("used").features.iter().flat_map(|f| f.geometry.iter().flatten().copied()).collect();
         assert!(line.iter().all(|&p| (p[1] as f64 - 409.6 * 5.0).abs() < 3.0));
         let xs = line.iter().map(|p| p[0]);
         assert!(near([xs.clone().min().unwrap(), 2048], 1.0, 5.0) && near([xs.max().unwrap(), 2048], 9.0, 5.0));
@@ -1808,7 +2044,8 @@ mod tests {
         let ring = &polygon[0].geometry[0];
         assert!(!ring.windows(2).any(|w| w[0][0] == 0 && w[1][0] == 0), "{ring:?}");
         assert!(ring.iter().any(|&p| near(p, 3.0, 8.0)) && ring.iter().any(|&p| near(p, 3.0, 2.0)));
-        let area: i64 = ring.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum();
+        let area: i64 =
+            ring.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum();
         assert!(area > 0, "{ring:?}");
 
         // Rendering again needs the style's resources, not the export's.
@@ -1819,7 +2056,15 @@ mod tests {
     #[test]
     fn exports_rasters_images_and_dems_on_the_output_grid() {
         // Longlat 0°–10° on 100 px: pixel x is at longitude (x + 0.5) / 10.
-        let view = reproject::ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], bearing: 0.0, width: 100, height: 100, pixel_ratio: 1.0, margin: 0 };
+        let view = reproject::ProjectedView {
+            projjson: test_crs::geographic(),
+            bbox: [0.0, 0.0, 10.0, 10.0],
+            bearing: 0.0,
+            width: 100,
+            height: 100,
+            pixel_ratio: 1.0,
+            margin: 0,
+        };
         let style = r#"{"version":8,"sources":{
             "r":{"type":"raster","tiles":["r/{z}/{x}/{y}"],"tileSize":256},
             "i":{"type":"image","url":"image.png","coordinates":[[2,8],[8,8],[8,2],[2,2]]},
@@ -1873,14 +2118,26 @@ mod tests {
 
     #[test]
     fn exports_follow_the_edge_of_a_geostationary_view() {
-        let polygon = |w: f64, s: f64, e: f64, n: f64| format!(r#"{{"type":"geojson","data":{{"type":"Polygon","coordinates":[[[{w},{s}],[{e},{s}],[{e},{n}],[{w},{n}],[{w},{s}]]]}}}}"#);
+        let polygon = |w: f64, s: f64, e: f64, n: f64| {
+            format!(
+                r#"{{"type":"geojson","data":{{"type":"Polygon","coordinates":[[[{w},{s}],[{e},{s}],[{e},{n}],[{w},{n}],[{w},{s}]]]}}}}"#
+            )
+        };
         let style = format!(
             r#"{{"version":8,"sources":{{"band":{},"world":{},"line":{{"type":"geojson","data":{{"type":"LineString","coordinates":[[30,0],[100,0]]}}}}}},"layers":[]}}"#,
             polygon(30.0, -10.0, 100.0, 10.0),
             r#"{"type":"geojson","data":{"type":"Polygon","coordinates":[[[-180,-85],[180,-85],[180,85],[-180,85],[-180,-85]],[[130,-10],[130,10],[150,10],[150,-10],[130,-10]]]}}"#,
         );
         let r = 5_500_000.0;
-        let view = reproject::ProjectedView { projjson: test_crs::himawari(), bbox: [-r, -r, r, r], bearing: 0.0, width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
+        let view = reproject::ProjectedView {
+            projjson: test_crs::himawari(),
+            bbox: [-r, -r, r, r],
+            bearing: 0.0,
+            width: 512,
+            height: 512,
+            pixel_ratio: 1.0,
+            margin: 0,
+        };
         let mut renderer = Renderer::new(&style, View::tile(0, 0, 0, 512)).unwrap();
         renderer.set_projected_view(&view).unwrap();
         let mut export = |source: &str| {
@@ -1890,7 +2147,10 @@ mod tests {
             layers.into_iter().flat_map(|l| l.features).flat_map(|f| f.geometry).collect::<Vec<_>>()
         };
         let dist = |p: [i32; 2]| ((p[0] as f64 - 2048.0).powi(2) + (p[1] as f64 - 2048.0).powi(2)).sqrt();
-        let area = |ring: &[[i32; 2]]| ring.windows(2).map(|w| w[0][0] as f64 * w[1][1] as f64 - w[1][0] as f64 * w[0][1] as f64).sum::<f64>() / 2.0;
+        let area = |ring: &[[i32; 2]]| {
+            ring.windows(2).map(|w| w[0][0] as f64 * w[1][1] as f64 - w[1][0] as f64 * w[0][1] as f64).sum::<f64>()
+                / 2.0
+        };
         // The world, all of it off the map but around it, is the disk the satellite sees, with its
         // hole after it (readers take the first ring's orientation for outer rings).
         let world = export("world");
@@ -1907,7 +2167,11 @@ mod tests {
         assert!(band[0].iter().all(|&p| dist(p) <= limb + 2.0));
         assert!(band[0].iter().filter(|&&p| dist(p) > limb - 2.0).count() >= 3, "{:?}", band[0]);
         // Around the equator on the west limb (vertices half a pixel off the edge apart).
-        assert!(band[0].iter().any(|&p| dist(p) > limb - 5.0 && p[0] < 2048 && (p[1] - 2048).abs() < 150), "{:?}", band[0]);
+        assert!(
+            band[0].iter().any(|&p| dist(p) > limb - 5.0 && p[0] < 2048 && (p[1] - 2048).abs() < 150),
+            "{:?}",
+            band[0]
+        );
         assert!(area(&band[0]) > 0.0);
         // A line ends at the limb (its parts in each source tile).
         let line = export("line");
@@ -1948,7 +2212,8 @@ mod tests {
         // Zoom 1 on 256 px: 128 px of 2πR / 1024 m around the origin.
         let h = 128.0 * 2.0 * std::f64::consts::PI * 6378137.0 / 1024.0;
         let different = |bearing: f64, projected_bearing: f64| {
-            let camera = View { center: [0.0, 0.0], zoom: 1.0, bearing, width: 256, height: 256, pixel_ratio: 1.0, margin: 0 };
+            let camera =
+                View { center: [0.0, 0.0], zoom: 1.0, bearing, width: 256, height: 256, pixel_ratio: 1.0, margin: 0 };
             let expected = render(&mut Renderer::new(style, camera).unwrap());
             let mut r = Renderer::new(style, View::tile(0, 0, 0, 512)).unwrap();
             let view = reproject::ProjectedView {
@@ -1990,14 +2255,7 @@ mod tests {
             }
             for need in r.needs() {
                 let json = br#"{"marker":{"x":0,"y":0,"width":8,"height":8,"pixelRatio":1}}"#;
-                r.provide(
-                    &need.url,
-                    Some(if need.url.ends_with(".json") {
-                        json
-                    } else {
-                        &png
-                    }),
-                );
+                r.provide(&need.url, Some(if need.url.ends_with(".json") { json } else { &png }));
             }
             r.render().unwrap()
         };
@@ -2065,16 +2323,17 @@ mod tests {
             margin: 0,
         };
         let rgba = render(&mut r, Some(&edge));
-        assert_eq!(
-            (at(&rgba, 10, 5.5, 1.5)[3], at(&rgba, 10, 5.5, 8.5)),
-            (0, white)
-        );
+        assert_eq!((at(&rgba, 10, 5.5, 1.5)[3], at(&rgba, 10, 5.5, 8.5)), (0, white));
         // UTM 31N (central meridian 3°), 2 km per CSS px at pixel ratio 2: the icon stays a
         // 16-device-pixel square at the projected point.
         let utm = test_crs::projected(
             "Transverse Mercator",
             test_crs::WGS84,
-            &[("Longitude of natural origin", 3.0), ("Scale factor at natural origin", 0.9996), ("False easting", 500_000.0)],
+            &[
+                ("Longitude of natural origin", 3.0),
+                ("Scale factor at natural origin", 0.9996),
+                ("False easting", 500_000.0),
+            ],
         );
         let p = reproject::ProjectedView {
             projjson: utm.clone(),
@@ -2100,11 +2359,7 @@ mod tests {
             (0.0, -10.0, red),
             (0.0, 10.0, red),
         ] {
-            assert_eq!(
-                at(&rgba, w, cx + dx, cy + dy),
-                c,
-                "UTM icon ({dx}, {dy}) around ({cx}, {cy})"
-            );
+            assert_eq!(at(&rgba, w, cx + dx, cy + dy), c, "UTM icon ({dx}, {dy}) around ({cx}, {cy})");
         }
         // Back to a Mercator camera.
         r.set_view(View::tile(0, 0, 0, 64));
@@ -2133,30 +2388,14 @@ mod tests {
         renderer.set_projected_view(&view).unwrap();
         for need in renderer.needs() {
             let json = br#"{"marker":{"x":0,"y":0,"width":8,"height":8,"pixelRatio":1}}"#;
-            renderer.provide(
-                &need.url,
-                Some(if need.url.ends_with(".json") {
-                    json
-                } else {
-                    &png
-                }),
-            );
+            renderer.provide(&need.url, Some(if need.url.ends_with(".json") { json } else { &png }));
         }
         let rgba = renderer.render().unwrap();
-        let at =
-            |x: usize, y: usize| -> [u8; 4] { rgba[(y * 128 + x) * 4..][..4].try_into().unwrap() };
+        let at = |x: usize, y: usize| -> [u8; 4] { rgba[(y * 128 + x) * 4..][..4].try_into().unwrap() };
         // The disk (about 0.8 of the box wide) is drawn, space around it is empty, the icon under
         // the satellite is at the center and the one on the far side nowhere.
-        assert_eq!(
-            (at(64, 64), at(64, 20), at(2, 2)),
-            ([0, 0, 255, 255], [255, 255, 255, 255], [0, 0, 0, 0])
-        );
-        assert_eq!(
-            rgba.as_chunks::<4>().0.iter()
-                .filter(|p| **p == [0, 0, 255, 255])
-                .count(),
-            64
-        );
+        assert_eq!((at(64, 64), at(64, 20), at(2, 2)), ([0, 0, 255, 255], [255, 255, 255, 255], [0, 0, 0, 0]));
+        assert_eq!(rgba.as_chunks::<4>().0.iter().filter(|p| **p == [0, 0, 255, 255]).count(), 64);
     }
 
     #[test]
@@ -2224,10 +2463,7 @@ mod tests {
         for mercator in [false, true, false] {
             let rgba_shared = if mercator {
                 shared.set_view(View::tile(1, 1, 0, 256));
-                let fresh = Renderer::new(style, View::tile(1, 1, 0, 256))
-                    .unwrap()
-                    .render()
-                    .unwrap();
+                let fresh = Renderer::new(style, View::tile(1, 1, 0, 256)).unwrap().render().unwrap();
                 assert_eq!(shared.render().unwrap(), fresh);
                 continue;
             } else {
@@ -2237,8 +2473,7 @@ mod tests {
             assert!(rgba_shared == rgba);
         }
         let warp = &renderer.projected.as_ref().unwrap().1;
-        let at =
-            |x: usize, y: usize| -> [u8; 4] { rgba[(y * 256 + x) * 4..][..4].try_into().unwrap() };
+        let at = |x: usize, y: usize| -> [u8; 4] { rgba[(y * 256 + x) * 4..][..4].try_into().unwrap() };
         let run = |x0: usize, y0: usize, dx: usize, dy: usize, hit: &dyn Fn([u8; 4]) -> bool| {
             (0..256)
                 .filter(|&k| {
@@ -2249,27 +2484,13 @@ mod tests {
         };
         let blue = |p: [u8; 4]| p[2] > 200 && p[0] < 128;
         let red = |p: [u8; 4]| p[0] > 200 && p[2] < 128;
-        let [lx, ly] =
-            warp.world_to_screen([tile::mercator_x(200.7 - 360.0), tile::mercator_y(0.0)]);
-        assert!(
-            lx > 200.0 && lx < 250.0,
-            "line toward the eastern limb: {lx}"
-        );
+        let [lx, ly] = warp.world_to_screen([tile::mercator_x(200.7 - 360.0), tile::mercator_y(0.0)]);
+        assert!(lx > 200.0 && lx < 250.0, "line toward the eastern limb: {lx}");
         let line = run(0, ly as usize, 1, 0, &blue);
-        assert!(
-            (5..=7).contains(&line),
-            "line {line} px wide at ({lx}, {ly})"
-        );
-        let [cx, cy] =
-            warp.world_to_screen([tile::mercator_x(190.0 - 360.0), tile::mercator_y(25.0)]);
-        let (across, down) = (
-            run(0, cy as usize, 1, 0, &red),
-            run(cx as usize, 0, 0, 1, &red),
-        );
-        assert!(
-            (11..=13).contains(&across) && (11..=13).contains(&down),
-            "circle {across}×{down} px at ({cx}, {cy})"
-        );
+        assert!((5..=7).contains(&line), "line {line} px wide at ({lx}, {ly})");
+        let [cx, cy] = warp.world_to_screen([tile::mercator_x(190.0 - 360.0), tile::mercator_y(25.0)]);
+        let (across, down) = (run(0, cy as usize, 1, 0, &red), run(cx as usize, 0, 0, 1, &red));
+        assert!((11..=13).contains(&across) && (11..=13).contains(&down), "circle {across}×{down} px at ({cx}, {cy})");
         // A polygon over many tiles of a Japan Plane Rectangular view: no seams between tiles.
         let style = r##"{"version":8,"sources":{"g":{"type":"geojson","data":{"type":"Polygon","coordinates":[[[130,30],[150,30],[150,42],[130,42],[130,30]]]}}},
             "layers":[{"id":"bg","type":"background","paint":{"background-color":"#fff"}},{"id":"f","type":"fill","source":"g","paint":{"fill-color":"#f00"}}]}"##;
@@ -2379,26 +2600,15 @@ mod tests {
         r.set_projected_view(&view).unwrap();
         assert!(r.needs().is_empty());
         let rgba = r.render().unwrap();
-        let [_, y] = r
-            .projected
-            .as_ref()
-            .unwrap()
-            .1
-            .world_to_screen([tile::mercator_x(175.0), tile::mercator_y(10.0)]);
+        let [_, y] = r.projected.as_ref().unwrap().1.world_to_screen([tile::mercator_x(175.0), tile::mercator_y(10.0)]);
         let blue: Vec<usize> = (0..w)
             .filter(|&x| {
                 let p = &rgba[(y as usize * w + x) * 4..][..4];
                 p[2] > 200 && p[0] < 128
             })
             .collect();
-        assert!(
-            blue.iter().any(|&x| x < w / 10) && blue.iter().any(|&x| x > w * 9 / 10),
-            "{blue:?}"
-        );
-        assert!(
-            blue.iter().all(|&x| x < w / 10 || x > w * 9 / 10),
-            "line across the map: {blue:?}"
-        );
+        assert!(blue.iter().any(|&x| x < w / 10) && blue.iter().any(|&x| x > w * 9 / 10), "{blue:?}");
+        assert!(blue.iter().all(|&x| x < w / 10 || x > w * 9 / 10), "line across the map: {blue:?}");
     }
 
     #[test]
@@ -2409,9 +2619,7 @@ mod tests {
             "layers":[{"id":"f","type":"fill","source":"g","paint":{"fill-color":"#f00"}},
             {"id":"c","type":"circle","source":"g","paint":{"circle-color":"#00f","circle-radius":3}}]}"##;
         let crs = test_crs::projected("Equal Earth", test_crs::WGS84, &[("Longitude of natural origin", 150.0)]);
-        let [x, y] = projection::Projection::parse(&crs)
-            .unwrap()
-            .forward(-100.0, 20.0);
+        let [x, y] = projection::Projection::parse(&crs).unwrap().forward(-100.0, 20.0);
         let d = 300_000.0;
         let view = reproject::ProjectedView {
             projjson: crs.clone(),
@@ -2450,14 +2658,7 @@ mod tests {
             renderer.set_projected_view(view).unwrap();
             for need in renderer.needs() {
                 let json = br#"{"stripe":{"x":0,"y":0,"width":8,"height":8,"pixelRatio":1}}"#;
-                renderer.provide(
-                    &need.url,
-                    Some(if need.url.ends_with(".json") {
-                        json
-                    } else {
-                        &png
-                    }),
-                );
+                renderer.provide(&need.url, Some(if need.url.ends_with(".json") { json } else { &png }));
             }
             renderer.render().unwrap()
         };
@@ -2474,10 +2675,7 @@ mod tests {
             "layers":[{"id":"f","type":"fill","source":"g","paint":{"fill-pattern":"stripe"}},{"id":"b","type":"background","paint":{"background-pattern":"stripe"}}]}"##,
         );
         let (limb, center) = (changes(&fill, 12, &red), changes(&fill, 104, &red));
-        assert!(
-            center >= 4 && limb.abs_diff(center) <= 1,
-            "fill-pattern changes: limb {limb}, center {center}"
-        );
+        assert!(center >= 4 && limb.abs_diff(center) <= 1, "fill-pattern changes: limb {limb}, center {center}");
         // Split into two tiles (each with its own Mercator zoom), the pattern runs on across the seam.
         let half = |x0: f64, x1: f64| reproject::ProjectedView {
             bbox: [x0, -r, x1, r],
@@ -2486,34 +2684,19 @@ mod tests {
             ..view.clone()
         };
         let style = r##"{"version":8,"sprite":"/sprite","sources":{},"layers":[{"id":"b","type":"background","paint":{"background-pattern":"stripe"}}]}"##;
-        let (whole, left, right) = (
-            render(style),
-            render_view(style, &half(-r, 0.0)),
-            render_view(style, &half(0.0, r)),
-        );
+        let (whole, left, right) =
+            (render(style), render_view(style, &half(-r, 0.0)), render_view(style, &half(0.0, r)));
         let tiled = |x: usize| {
-            if x < 128 {
-                &left[(128 * 128 + x) * 4..][..4]
-            } else {
-                &right[(128 * 128 + x - 128) * 4..][..4]
-            }
+            if x < 128 { &left[(128 * 128 + x) * 4..][..4] } else { &right[(128 * 128 + x - 128) * 4..][..4] }
         };
-        let differ = (0..256)
-            .filter(|&x| red(&whole[(128 * 256 + x) * 4..][..4]) != red(tiled(x)))
-            .count();
-        assert!(
-            differ <= 2,
-            "{differ} pixels of the equator differ between tiled and whole renders"
-        );
+        let differ = (0..256).filter(|&x| red(&whole[(128 * 256 + x) * 4..][..4]) != red(tiled(x))).count();
+        assert!(differ <= 2, "{differ} pixels of the equator differ between tiled and whole renders");
         let dashes = render(
             r##"{"version":8,"sources":{"g":{"type":"geojson","data":{"type":"LineString","coordinates":[[60,0],[220,0]]}}},
             "layers":[{"id":"bg","type":"background","paint":{"background-color":"#fff"}},{"id":"l","type":"line","source":"g","paint":{"line-color":"#f00","line-width":2,"line-dasharray":[2,2]}}]}"##,
         );
         let dash = |p: &[u8]| p[1] < 128;
         let (limb, center) = (changes(&dashes, 12, &dash), changes(&dashes, 104, &dash));
-        assert!(
-            center >= 4 && limb.abs_diff(center) <= 1,
-            "dash changes: limb {limb}, center {center}"
-        );
+        assert!(center >= 4 && limb.abs_diff(center) <= 1, "dash changes: limb {limb}, center {center}");
     }
 }

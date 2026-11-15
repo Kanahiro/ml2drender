@@ -4,8 +4,8 @@
 use super::anchors::P;
 use super::layout::{PlacedSymbol, SymbolBucket};
 use super::shaping::WritingMode;
-use crate::render::{Ctx, EXTENT};
 use crate::hash::HashMap;
+use crate::render::{Ctx, EXTENT};
 
 /// A placed glyph: label-plane point, rotation and the path walked to reach it.
 pub struct PlacedGlyph {
@@ -62,7 +62,13 @@ fn line_intersection(a1: P, a2: P, b1: P, b2: P) -> Option<P> {
 impl<'a> LineProjector<'a> {
     /// `translation` in tile units.
     pub fn new(ctx: &Ctx, bucket: &'a SymbolBucket, translation: P) -> Self {
-        LineProjector { bucket, origin: ctx.tile_origin(&bucket.tile), scale: ctx.tile_px(&bucket.tile) / EXTENT, transform: ctx.transform.clone(), translation }
+        LineProjector {
+            bucket,
+            origin: ctx.tile_origin(&bucket.tile),
+            scale: ctx.tile_px(&bucket.tile) / EXTENT,
+            transform: ctx.transform.clone(),
+            translation,
+        }
     }
 
     /// Tile units → label plane (CSS px).
@@ -82,7 +88,18 @@ impl<'a> LineProjector<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn offset_intersection(&self, index: usize, normal: P, current: P, start: usize, end: usize, offset_prev: P, line_offset_y: f64, direction: isize, cache: &mut Cache) -> P {
+    fn offset_intersection(
+        &self,
+        index: usize,
+        normal: P,
+        current: P,
+        start: usize,
+        end: usize,
+        offset_prev: P,
+        line_offset_y: f64,
+        direction: isize,
+        cache: &mut Cache,
+    ) -> P {
         if let Some(p) = cache.offsets.get(&index) {
             return *p;
         }
@@ -94,14 +111,29 @@ impl<'a> LineProjector<'a> {
         }
         let next = self.vertex(next_index as usize, cache);
         let n = offset_normal(sub(next, current), line_offset_y, direction as f64);
-        let r = line_intersection(offset_prev, offset_current, [current[0] + n[0], current[1] + n[1]], [next[0] + n[0], next[1] + n[1]]).unwrap_or(offset_current);
+        let r = line_intersection(
+            offset_prev,
+            offset_current,
+            [current[0] + n[0], current[1] + n[1]],
+            [next[0] + n[0], next[1] + n[1]],
+        )
+        .unwrap_or(offset_current);
         cache.offsets.insert(index, r);
         r
     }
 
     /// `placeGlyphAlongLine`.
     #[allow(clippy::too_many_arguments)]
-    pub fn place_glyph(&self, sym: &PlacedSymbol, offset_x: f64, line_offset_x: f64, line_offset_y: f64, flip: bool, rotate_to_line: bool, cache: &mut Cache) -> Option<PlacedGlyph> {
+    pub fn place_glyph(
+        &self,
+        sym: &PlacedSymbol,
+        offset_x: f64,
+        line_offset_x: f64,
+        line_offset_y: f64,
+        flip: bool,
+        rotate_to_line: bool,
+        cache: &mut Cache,
+    ) -> Option<PlacedGlyph> {
         let segment = sym.segment? as isize;
         let (start, end) = (sym.line_start as isize, (sym.line_start + sym.line_length) as isize);
         let combined = if flip { offset_x - line_offset_x } else { offset_x + line_offset_x };
@@ -144,7 +176,17 @@ impl<'a> LineProjector<'a> {
                     offset_normal(prev_to_current, line_offset_y, direction as f64)
                 };
                 let op = *offset_previous.get_or_insert([previous[0] + normal[0], previous[1] + normal[1]]);
-                let oi = self.offset_intersection(index as usize, normal, current, start as usize, end as usize, op, line_offset_y, direction, cache);
+                let oi = self.offset_intersection(
+                    index as usize,
+                    normal,
+                    current,
+                    start as usize,
+                    end as usize,
+                    op,
+                    line_offset_y,
+                    direction,
+                    cache,
+                );
                 offset_intersection = Some(oi);
                 path.push(op);
                 segment_vec = sub(oi, op);
@@ -161,20 +203,36 @@ impl<'a> LineProjector<'a> {
 
     /// `placeGlyphsAlongLine` + the keep-upright retry of `updateLineLabels`: per-quad
     /// (point, angle).
-    pub fn place_symbol(&self, sym: &PlacedSymbol, font_size: f64, keep_upright: bool, rotate_to_line: bool) -> LinePlacement {
+    pub fn place_symbol(
+        &self,
+        sym: &PlacedSymbol,
+        font_size: f64,
+        keep_upright: bool,
+        rotate_to_line: bool,
+    ) -> LinePlacement {
         let mut cache = Cache::default();
         match self.place_glyphs(sym, font_size, false, keep_upright, rotate_to_line, &mut cache) {
             Ok(g) => LinePlacement::Placed(g),
-            Err(Change::Flip) => match self.place_glyphs(sym, font_size, true, keep_upright, rotate_to_line, &mut cache) {
-                Ok(g) => LinePlacement::Placed(g),
-                Err(_) => LinePlacement::Hidden,
-            },
+            Err(Change::Flip) => {
+                match self.place_glyphs(sym, font_size, true, keep_upright, rotate_to_line, &mut cache) {
+                    Ok(g) => LinePlacement::Placed(g),
+                    Err(_) => LinePlacement::Hidden,
+                }
+            }
             Err(Change::Vertical) => LinePlacement::UseVertical,
             Err(Change::NoRoom) => LinePlacement::Hidden,
         }
     }
 
-    fn place_glyphs(&self, sym: &PlacedSymbol, font_size: f64, flip: bool, keep_upright: bool, rotate_to_line: bool, cache: &mut Cache) -> Result<Vec<(P, f64)>, Change> {
+    fn place_glyphs(
+        &self,
+        sym: &PlacedSymbol,
+        font_size: f64,
+        flip: bool,
+        keep_upright: bool,
+        rotate_to_line: bool,
+        cache: &mut Cache,
+    ) -> Result<Vec<(P, f64)>, Change> {
         let font_scale = font_size / 24.0;
         let (lox, loy) = (sym.line_offset[0] * font_scale, sym.line_offset[1] * font_scale);
         let offsets: Vec<f64> = sym.quads.iter().map(|q| q.glyph_offset[0] as f32 as f64).collect();
@@ -189,15 +247,22 @@ impl<'a> LineProjector<'a> {
         };
         let no_room = Change::NoRoom;
         if n > 1 {
-            let first = self.place_glyph(sym, font_scale * offsets[0], lox, loy, flip, rotate_to_line, cache).ok_or(no_room)?;
-            let last = self.place_glyph(sym, font_scale * offsets[n - 1], lox, loy, flip, rotate_to_line, cache).ok_or(Change::NoRoom)?;
-            if keep_upright && !flip
-                && let Some(c) = orientation_change(first.point, last.point) {
-                    return Err(c);
-                }
+            let first =
+                self.place_glyph(sym, font_scale * offsets[0], lox, loy, flip, rotate_to_line, cache).ok_or(no_room)?;
+            let last = self
+                .place_glyph(sym, font_scale * offsets[n - 1], lox, loy, flip, rotate_to_line, cache)
+                .ok_or(Change::NoRoom)?;
+            if keep_upright
+                && !flip
+                && let Some(c) = orientation_change(first.point, last.point)
+            {
+                return Err(c);
+            }
             let mut out = vec![(first.point, first.angle)];
             for &o in &offsets[1..n - 1] {
-                let g = self.place_glyph(sym, font_scale * o, lox, loy, flip, rotate_to_line, cache).ok_or(Change::NoRoom)?;
+                let g = self
+                    .place_glyph(sym, font_scale * o, lox, loy, flip, rotate_to_line, cache)
+                    .ok_or(Change::NoRoom)?;
                 out.push((g.point, g.angle));
             }
             out.push((last.point, last.angle));
@@ -211,7 +276,17 @@ impl<'a> LineProjector<'a> {
                     return Err(c);
                 }
             }
-            let g = self.place_glyph(sym, font_scale * offsets.first().copied().unwrap_or(0.0), lox, loy, flip, rotate_to_line, cache).ok_or(Change::NoRoom)?;
+            let g = self
+                .place_glyph(
+                    sym,
+                    font_scale * offsets.first().copied().unwrap_or(0.0),
+                    lox,
+                    loy,
+                    flip,
+                    rotate_to_line,
+                    cache,
+                )
+                .ok_or(Change::NoRoom)?;
             Ok(vec![(g.point, g.angle); n.max(1)])
         }
     }
@@ -236,7 +311,13 @@ fn sym_anchor(sym: &PlacedSymbol) -> P {
 }
 
 /// `placeFirstAndLastGlyph` path for collision circles (label plane, unflipped).
-pub fn label_path(ctx: &Ctx, bucket: &SymbolBucket, sym: &PlacedSymbol, font_size: f64, translation: P) -> Option<Vec<P>> {
+pub fn label_path(
+    ctx: &Ctx,
+    bucket: &SymbolBucket,
+    sym: &PlacedSymbol,
+    font_size: f64,
+    translation: P,
+) -> Option<Vec<P>> {
     let proj = LineProjector::new(ctx, bucket, translation);
     let font_scale = font_size / 24.0;
     let (lox, loy) = (sym.line_offset[0] * font_scale, sym.line_offset[1] * font_scale);

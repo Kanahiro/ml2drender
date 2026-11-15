@@ -2,11 +2,11 @@
 //! `function/index.ts` `createFunction`). The expression conversion in `convert.rs` is only
 //! what the expression tests exercise; rendering uses these semantics.
 
-use super::color::{Color, ColorSpace};
-use super::value::{js_number_to_string, Value};
 use super::Feature;
-use serde_json::Value as J;
+use super::color::{Color, ColorSpace};
+use super::value::{Value, js_number_to_string};
 use crate::hash::HashMap;
+use serde_json::Value as J;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -111,7 +111,8 @@ impl LegacyFunction {
             Some(_) => return None,
         };
         let parse = has_parse_fn(spec);
-        let spec_default = spec.get("default").and_then(|d| if parse { parse_output(d, spec) } else { Some(Value::from_json(d)) });
+        let spec_default =
+            spec.get("default").and_then(|d| if parse { parse_output(d, spec) } else { Some(Value::from_json(d)) });
         let default = match params.get("default") {
             Some(d) if parse && is_truthy(d) => parse_output(d, spec),
             Some(d) if !parse => Some(Value::from_json(d)),
@@ -246,10 +247,14 @@ impl LegacyFunction {
                 let v = match (self.spec_type.as_str(), input) {
                     ("color", Value::String(s)) => Color::parse(s).map(Value::Color),
                     ("color", _) => None,
-                    ("formatted", v) => Some(Value::Formatted(Rc::new(super::value::Formatted::from_string(v.to_js_string())))),
+                    ("formatted", v) => {
+                        Some(Value::Formatted(Rc::new(super::value::Formatted::from_string(v.to_js_string()))))
+                    }
                     ("resolvedImage", v) => {
                         let name = v.to_js_string();
-                        (!name.is_empty()).then(|| Value::ResolvedImage(Rc::new(super::value::ResolvedImage { name, available: false })))
+                        (!name.is_empty()).then(|| {
+                            Value::ResolvedImage(Rc::new(super::value::ResolvedImage { name, available: false }))
+                        })
                     }
                     ("padding", v) => super::expr::parse_padding(v),
                     ("colorArray", v) => super::expr::parse_color_array(v),
@@ -313,11 +318,14 @@ fn interpolate(spec_type: &str, a: &Value, b: &Value, t: f64, space: ColorSpace)
         ("numberArray", Value::NumberArray(x), Value::NumberArray(y)) if x.len() == y.len() => {
             Value::NumberArray(Rc::new(x.iter().zip(y.iter()).map(|(p, q)| lerp(*p, *q)).collect()))
         }
-        ("colorArray", Value::ColorArray(x), Value::ColorArray(y)) if x.len() == y.len() => {
-            Value::ColorArray(Rc::new(x.iter().zip(y.iter()).map(|(p, q)| Color::interpolate(p, q, t, space)).collect()))
-        }
+        ("colorArray", Value::ColorArray(x), Value::ColorArray(y)) if x.len() == y.len() => Value::ColorArray(Rc::new(
+            x.iter().zip(y.iter()).map(|(p, q)| Color::interpolate(p, q, t, space)).collect(),
+        )),
         ("array", Value::Array(x), Value::Array(y)) => Value::Array(Rc::new(
-            x.iter().zip(y.iter()).map(|(p, q)| Value::Number(lerp(p.as_f64().unwrap_or(f64::NAN), q.as_f64().unwrap_or(f64::NAN)))).collect(),
+            x.iter()
+                .zip(y.iter())
+                .map(|(p, q)| Value::Number(lerp(p.as_f64().unwrap_or(f64::NAN), q.as_f64().unwrap_or(f64::NAN))))
+                .collect(),
         )),
         _ => a.clone(),
     }

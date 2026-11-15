@@ -4,11 +4,11 @@ use super::color::ColorSpace;
 use super::compound::{self, Sig};
 use super::expr::*;
 use super::geometry;
-use super::types::{check_subtype, Type};
+use super::types::{Type, check_subtype};
 use super::value::Value;
+use crate::hash::HashMap;
 use serde_json::Value as J;
 use std::cell::RefCell;
-use crate::hash::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,9 +46,43 @@ pub struct ParseCtx {
 }
 
 pub const SPECIAL_FORMS: &[&str] = &[
-    "==", "!=", ">", "<", ">=", "<=", "array", "at", "boolean", "case", "coalesce", "collator", "format", "image", "in", "index-of",
-    "interpolate", "interpolate-hcl", "interpolate-lab", "length", "let", "literal", "match", "number", "number-format", "object",
-    "semiliteral", "slice", "step", "string", "to-boolean", "to-color", "to-number", "to-string", "var", "within", "distance",
+    "==",
+    "!=",
+    ">",
+    "<",
+    ">=",
+    "<=",
+    "array",
+    "at",
+    "boolean",
+    "case",
+    "coalesce",
+    "collator",
+    "format",
+    "image",
+    "in",
+    "index-of",
+    "interpolate",
+    "interpolate-hcl",
+    "interpolate-lab",
+    "length",
+    "let",
+    "literal",
+    "match",
+    "number",
+    "number-format",
+    "object",
+    "semiliteral",
+    "slice",
+    "step",
+    "string",
+    "to-boolean",
+    "to-color",
+    "to-number",
+    "to-string",
+    "var",
+    "within",
+    "distance",
     "global-state",
 ];
 
@@ -74,7 +108,12 @@ impl ParseCtx {
         ParseCtx { path: vec![], key: String::new(), scope: None, errors: Default::default(), expected }
     }
 
-    fn concat(&self, index: Option<usize>, expected: Option<Type>, bindings: Option<Vec<(String, Rc<Expr>)>>) -> ParseCtx {
+    fn concat(
+        &self,
+        index: Option<usize>,
+        expected: Option<Type>,
+        bindings: Option<Vec<(String, Rc<Expr>)>>,
+    ) -> ParseCtx {
         let mut path = self.path.clone();
         if let Some(i) = index {
             path.push(i);
@@ -89,7 +128,13 @@ impl ParseCtx {
 
     /// Same path and scope, fresh error list, no expected type.
     fn fresh(&self) -> ParseCtx {
-        ParseCtx { path: self.path.clone(), key: self.key.clone(), scope: self.scope.clone(), errors: Default::default(), expected: None }
+        ParseCtx {
+            path: self.path.clone(),
+            key: self.key.clone(),
+            scope: self.scope.clone(),
+            errors: Default::default(),
+            expected: None,
+        }
     }
 
     pub fn error(&self, message: impl Into<String>, keys: &[usize]) {
@@ -116,7 +161,14 @@ impl ParseCtx {
         self.concat(Some(index), expected, None).parse_impl(expr, None)
     }
 
-    fn parse_with(&self, expr: &J, index: usize, expected: Option<Type>, bindings: Option<Vec<(String, Rc<Expr>)>>, ann: Option<Annotation>) -> Option<Expr> {
+    fn parse_with(
+        &self,
+        expr: &J,
+        index: usize,
+        expected: Option<Type>,
+        bindings: Option<Vec<(String, Rc<Expr>)>>,
+        ann: Option<Annotation>,
+    ) -> Option<Expr> {
         self.concat(Some(index), expected, bindings).parse_impl(expr, ann)
     }
 
@@ -144,7 +196,12 @@ impl ParseCtx {
                     );
                 };
                 if !is_expression_name(op) {
-                    return self.fail(format!("Unknown expression \"{op}\". If you wanted a literal array, use [\"literal\", [...]]."), &[0]);
+                    return self.fail(
+                        format!(
+                            "Unknown expression \"{op}\". If you wanted a literal array, use [\"literal\", [...]]."
+                        ),
+                        &[0],
+                    );
                 }
                 let mut parsed = self.parse_form(op, args)?;
                 if let Some(expected) = &self.expected {
@@ -164,8 +221,12 @@ impl ParseCtx {
                         return None;
                     }
                 }
-                if !matches!(parsed.node, Node::Literal(_)) && parsed.ty != Type::ResolvedImage && is_constant(&parsed) {
-                    match parsed.evaluate(&EvalCtx { globals: Globals { zoom: f64::NAN, ..Default::default() }, ..Default::default() }) {
+                if !matches!(parsed.node, Node::Literal(_)) && parsed.ty != Type::ResolvedImage && is_constant(&parsed)
+                {
+                    match parsed.evaluate(&EvalCtx {
+                        globals: Globals { zoom: f64::NAN, ..Default::default() },
+                        ..Default::default()
+                    }) {
                         Ok(v) => parsed = Expr::literal(parsed.ty, v),
                         Err(e) => return self.fail(e.message, &[]),
                     }
@@ -208,7 +269,10 @@ impl ParseCtx {
 
     fn parse_literal(&self, args: &[J]) -> Option<Expr> {
         if args.len() != 2 {
-            return self.fail(format!("'literal' expression requires exactly one argument, but found {} instead.", args.len() - 1), &[]);
+            return self.fail(
+                format!("'literal' expression requires exactly one argument, but found {} instead.", args.len() - 1),
+                &[],
+            );
         }
         let v = Value::from_json(&args[1]);
         let mut ty = v.type_of();
@@ -222,7 +286,13 @@ impl ParseCtx {
 
     fn parse_semiliteral(&self, args: &[J]) -> Option<Expr> {
         if args.len() != 2 {
-            return self.fail(format!("'semiliteral' expression requires exactly one argument, but found {} instead.", args.len() - 1), &[]);
+            return self.fail(
+                format!(
+                    "'semiliteral' expression requires exactly one argument, but found {} instead.",
+                    args.len() - 1
+                ),
+                &[],
+            );
         }
         let J::Array(items) = &args[1] else {
             let v = Value::from_json(&args[1]);
@@ -266,7 +336,10 @@ impl ParseCtx {
                         i += 1;
                         t
                     }
-                    None => return self.fail("The item type argument of \"array\" must be one of string, number, boolean", &[1]),
+                    None => {
+                        return self
+                            .fail("The item type argument of \"array\" must be one of string, number, boolean", &[1]);
+                    }
                 }
             } else {
                 Type::Value
@@ -275,7 +348,9 @@ impl ParseCtx {
             if args.len() > 3 {
                 match &args[2] {
                     J::Null => {}
-                    J::Number(x) if x.as_f64().is_some_and(|f| f >= 0.0 && f == f.floor()) => n = Some(x.as_f64().unwrap() as usize),
+                    J::Number(x) if x.as_f64().is_some_and(|f| f >= 0.0 && f == f.floor()) => {
+                        n = Some(x.as_f64().unwrap() as usize)
+                    }
                     _ => return self.fail("The length argument to \"array\" must be a positive integer literal", &[2]),
                 }
                 i += 1;
@@ -325,16 +400,22 @@ impl ParseCtx {
             return self.fail("Expected two or three arguments.", &[]);
         }
         let comparable = |t: &Type| match op {
-            CmpOp::Eq | CmpOp::Ne => matches!(t, Type::Boolean | Type::String | Type::Number | Type::Null | Type::Value),
+            CmpOp::Eq | CmpOp::Ne => {
+                matches!(t, Type::Boolean | Type::String | Type::Number | Type::Null | Type::Value)
+            }
             _ => matches!(t, Type::String | Type::Number | Type::Value),
         };
         let mut lhs = self.parse_at(&args[1], 1, Some(Type::Value))?;
         if !comparable(&lhs.ty) {
-            return self.concat(Some(1), None, None).fail(format!("\"{}\" comparisons are not supported for type '{}'.", op.name(), lhs.ty), &[]);
+            return self
+                .concat(Some(1), None, None)
+                .fail(format!("\"{}\" comparisons are not supported for type '{}'.", op.name(), lhs.ty), &[]);
         }
         let mut rhs = self.parse_at(&args[2], 2, Some(Type::Value))?;
         if !comparable(&rhs.ty) {
-            return self.concat(Some(2), None, None).fail(format!("\"{}\" comparisons are not supported for type '{}'.", op.name(), rhs.ty), &[]);
+            return self
+                .concat(Some(2), None, None)
+                .fail(format!("\"{}\" comparisons are not supported for type '{}'.", op.name(), rhs.ty), &[]);
         }
         if lhs.ty.kind() != rhs.ty.kind() && lhs.ty != Type::Value && rhs.ty != Type::Value {
             return self.fail(format!("Cannot compare types '{}' and '{}'.", lhs.ty, rhs.ty), &[]);
@@ -368,7 +449,10 @@ impl ParseCtx {
         let input = self.parse_at(&args[2], 2, Some(Type::array(self.expected.clone().unwrap_or(Type::Value), None)));
         let (index, input) = (index?, input?);
         let Type::Array(item, _) = &input.ty else { return None };
-        Some(Expr { ty: (**item).clone(), node: Node::At { index: Box::new(index), input: Box::new(input), key: self.key.clone() } })
+        Some(Expr {
+            ty: (**item).clone(),
+            node: Node::At { index: Box::new(index), input: Box::new(input), key: self.key.clone() },
+        })
     }
 
     fn parse_in(&self, op: &str, args: &[J]) -> Option<Expr> {
@@ -385,16 +469,25 @@ impl ParseCtx {
         let (needle, haystack) = (needle?, haystack?);
         if !matches!(needle.ty, Type::Boolean | Type::String | Type::Number | Type::Null | Type::Value) {
             return self.fail(
-                format!("Expected first argument to be of type boolean, string, number or null, but found {} instead", needle.ty),
+                format!(
+                    "Expected first argument to be of type boolean, string, number or null, but found {} instead",
+                    needle.ty
+                ),
                 &[],
             );
         }
         let key = self.key.clone();
         if !is_index_of {
-            return Some(Expr { ty: Type::Boolean, node: Node::In { needle: Box::new(needle), haystack: Box::new(haystack), key } });
+            return Some(Expr {
+                ty: Type::Boolean,
+                node: Node::In { needle: Box::new(needle), haystack: Box::new(haystack), key },
+            });
         }
         let from = if args.len() == 4 { Some(Box::new(self.parse_at(&args[3], 3, Some(Type::Number))?)) } else { None };
-        Some(Expr { ty: Type::Number, node: Node::IndexOf { needle: Box::new(needle), haystack: Box::new(haystack), from, key } })
+        Some(Expr {
+            ty: Type::Number,
+            node: Node::IndexOf { needle: Box::new(needle), haystack: Box::new(haystack), from, key },
+        })
     }
 
     fn parse_slice(&self, args: &[J]) -> Option<Expr> {
@@ -405,10 +498,16 @@ impl ParseCtx {
         let begin = self.parse_at(&args[2], 2, Some(Type::Number));
         let (input, begin) = (input?, begin?);
         if !matches!(input.ty, Type::Array(..) | Type::String | Type::Value) {
-            return self.fail(format!("Expected first argument to be of type array or string, but found {} instead", input.ty), &[]);
+            return self.fail(
+                format!("Expected first argument to be of type array or string, but found {} instead", input.ty),
+                &[],
+            );
         }
         let end = if args.len() == 4 { Some(Box::new(self.parse_at(&args[3], 3, Some(Type::Number))?)) } else { None };
-        Some(Expr { ty: input.ty.clone(), node: Node::Slice { input: Box::new(input), begin: Box::new(begin), end, key: self.key.clone() } })
+        Some(Expr {
+            ty: input.ty.clone(),
+            node: Node::Slice { input: Box::new(input), begin: Box::new(begin), end, key: self.key.clone() },
+        })
     }
 
     fn parse_length(&self, args: &[J]) -> Option<Expr> {
@@ -417,7 +516,8 @@ impl ParseCtx {
         }
         let input = self.parse_at(&args[1], 1, None)?;
         if !matches!(input.ty, Type::Array(..) | Type::String | Type::Value) {
-            return self.fail(format!("Expected argument of type string or array, but found {} instead.", input.ty), &[]);
+            return self
+                .fail(format!("Expected argument of type string or array, but found {} instead.", input.ty), &[]);
         }
         Some(Expr { ty: Type::Number, node: Node::Length { input: Box::new(input), key: self.key.clone() } })
     }
@@ -460,7 +560,8 @@ impl ParseCtx {
             parsed.push(p);
         }
         let out = out?;
-        let needs_annotation = expected.as_ref().is_some_and(|e| parsed.iter().any(|a| check_subtype(e, &a.ty).is_some()));
+        let needs_annotation =
+            expected.as_ref().is_some_and(|e| parsed.iter().any(|a| check_subtype(e, &a.ty).is_some()));
         Some(Expr { ty: if needs_annotation { Type::Value } else { out }, node: Node::Coalesce(parsed) })
     }
 
@@ -481,7 +582,13 @@ impl ParseCtx {
             bindings.push((name.to_string(), Rc::new(value)));
             i += 2;
         }
-        let result = self.parse_with(&args[args.len() - 1], args.len() - 1, self.expected.clone(), Some(bindings.clone()), None)?;
+        let result = self.parse_with(
+            &args[args.len() - 1],
+            args.len() - 1,
+            self.expected.clone(),
+            Some(bindings.clone()),
+            None,
+        )?;
         Some(Expr { ty: result.ty.clone(), node: Node::Let { bindings, result: Box::new(result) } })
     }
 
@@ -559,7 +666,10 @@ impl ParseCtx {
         if input.ty != Type::Value && self.concat(Some(1), None, None).check_subtype(&input_type, &input.ty) {
             return None;
         }
-        Some(Expr { ty: out?, node: Node::Match { input_type, input: Box::new(input), cases, outputs, otherwise: Box::new(otherwise) } })
+        Some(Expr {
+            ty: out?,
+            node: Node::Match { input_type, input: Box::new(input), cases, outputs, otherwise: Box::new(otherwise) },
+        })
     }
 
     fn parse_step(&self, args: &[J]) -> Option<Expr> {
@@ -608,9 +718,13 @@ impl ParseCtx {
                 None => return self.fail("Exponential interpolation requires a numeric base.", &[1, 1]),
             },
             Some("cubic-bezier") => {
-                let cp: Vec<f64> = interpolation[1..].iter().filter_map(|v| num(v).filter(|t| (0.0..=1.0).contains(t))).collect();
+                let cp: Vec<f64> =
+                    interpolation[1..].iter().filter_map(|v| num(v).filter(|t| (0.0..=1.0).contains(t))).collect();
                 if interpolation.len() != 5 || cp.len() != 4 {
-                    return self.fail("Cubic bezier interpolation requires four numeric arguments with values between 0 and 1.", &[1]);
+                    return self.fail(
+                        "Cubic bezier interpolation requires four numeric arguments with values between 0 and 1.",
+                        &[1],
+                    );
                 }
                 Interpolation::CubicBezier([cp[0], cp[1], cp[2], cp[3]])
             }
@@ -635,7 +749,11 @@ impl ParseCtx {
             "interpolate-lab" => ColorSpace::Lab,
             _ => ColorSpace::Rgb,
         };
-        let mut out = if space != ColorSpace::Rgb && self.expected != Some(Type::ColorArray) { Some(Type::Color) } else { self.output_type() };
+        let mut out = if space != ColorSpace::Rgb && self.expected != Some(Type::ColorArray) {
+            Some(Type::Color)
+        } else {
+            self.output_type()
+        };
         let (mut labels, mut outputs) = (Vec::new(), Vec::new());
         let mut i = 3;
         while i < args.len() {
@@ -659,14 +777,30 @@ impl ParseCtx {
         }
         let out = out?;
         let ok = match &out {
-            Type::Number | Type::ProjectionDefinition | Type::Color | Type::Padding | Type::NumberArray | Type::ColorArray | Type::VariableAnchorOffsetCollection => true,
+            Type::Number
+            | Type::ProjectionDefinition
+            | Type::Color
+            | Type::Padding
+            | Type::NumberArray
+            | Type::ColorArray
+            | Type::VariableAnchorOffsetCollection => true,
             Type::Array(item, Some(_)) => **item == Type::Number,
             _ => false,
         };
         if !ok {
             return self.fail(format!("Type {out} is not interpolatable."), &[]);
         }
-        Some(Expr { ty: out, node: Node::Interpolate { space, interpolation, input: Box::new(input), labels, outputs, key: self.key.clone() } })
+        Some(Expr {
+            ty: out,
+            node: Node::Interpolate {
+                space,
+                interpolation,
+                input: Box::new(input),
+                labels,
+                outputs,
+                key: self.key.clone(),
+            },
+        })
     }
 
     fn parse_collator(&self, args: &[J]) -> Option<Expr> {
@@ -683,7 +817,11 @@ impl ParseCtx {
         };
         Some(Expr {
             ty: Type::Collator,
-            node: Node::Collator { case_sensitive: Box::new(case_sensitive), diacritic_sensitive: Box::new(diacritic_sensitive), locale },
+            node: Node::Collator {
+                case_sensitive: Box::new(case_sensitive),
+                diacritic_sensitive: Box::new(diacritic_sensitive),
+                locale,
+            },
         })
     }
 
@@ -707,7 +845,10 @@ impl ParseCtx {
         }
         let min = opt("min-fraction-digits", Type::Number).ok()?;
         let max = opt("max-fraction-digits", Type::Number).ok()?;
-        Some(Expr { ty: Type::String, node: Node::NumberFormat { number: Box::new(number), locale, currency, unit, min, max } })
+        Some(Expr {
+            ty: Type::String,
+            node: Node::NumberFormat { number: Box::new(number), locale, currency, unit, min, max },
+        })
     }
 
     fn parse_format(&self, args: &[J]) -> Option<Expr> {
@@ -734,7 +875,10 @@ impl ParseCtx {
                 if let Some(J::String(va)) = o.get("vertical-align")
                     && !["bottom", "center", "top"].contains(&va.as_str())
                 {
-                    return self.fail(format!("'vertical-align' must be one of: 'bottom', 'center', 'top' but found '{va}' instead."), &[]);
+                    return self.fail(
+                        format!("'vertical-align' must be one of: 'bottom', 'center', 'top' but found '{va}' instead."),
+                        &[],
+                    );
                 }
                 let vertical_align = opt("vertical-align", Type::String).ok()?;
                 let last = sections.last_mut().unwrap();
@@ -749,7 +893,13 @@ impl ParseCtx {
                     return self.fail("Formatted text type must be 'string', 'value', 'image' or 'null'.", &[]);
                 }
                 next_may_be_object = true;
-                sections.push(FormatSection { content, scale: None, font: None, text_color: None, vertical_align: None });
+                sections.push(FormatSection {
+                    content,
+                    scale: None,
+                    font: None,
+                    text_color: None,
+                    vertical_align: None,
+                });
             }
         }
         Some(Expr { ty: Type::Formatted, node: Node::Format(sections) })
@@ -778,21 +928,30 @@ impl ParseCtx {
 
     fn parse_within(&self, args: &[J]) -> Option<Expr> {
         if args.len() != 2 {
-            return self.fail(format!("'within' expression requires exactly one argument, but found {} instead.", args.len() - 1), &[]);
+            return self.fail(
+                format!("'within' expression requires exactly one argument, but found {} instead.", args.len() - 1),
+                &[],
+            );
         }
         match geometry::within_polygons(&args[1]) {
             Some(p) => Some(Expr { ty: Type::Boolean, node: Node::Within(p) }),
-            None => self.fail("'within' expression requires valid geojson object that contains polygon geometry type.", &[]),
+            None => {
+                self.fail("'within' expression requires valid geojson object that contains polygon geometry type.", &[])
+            }
         }
     }
 
     fn parse_distance(&self, args: &[J]) -> Option<Expr> {
         if args.len() != 2 {
-            return self.fail(format!("'distance' expression requires exactly one argument, but found {} instead.", args.len() - 1), &[]);
+            return self.fail(
+                format!("'distance' expression requires exactly one argument, but found {} instead.", args.len() - 1),
+                &[],
+            );
         }
         match geometry::distance_geometries(&args[1]) {
             Some(g) => Some(Expr { ty: Type::Number, node: Node::Distance(g) }),
-            None => self.fail("'distance' expression requires valid geojson object that contains polygon geometry type.", &[]),
+            None => self
+                .fail("'distance' expression requires valid geojson object that contains polygon geometry type.", &[]),
         }
     }
 
@@ -836,14 +995,21 @@ impl ParseCtx {
                 ctx.concat(Some(i + 1), None, None).check_subtype(expected, &a.ty);
             }
             if ctx.errors.borrow().is_empty() {
-                return Some(Expr { ty: def.ty.clone(), node: Node::Compound { name: op.to_string(), f: *f, args: parsed, key: self.key.clone() } });
+                return Some(Expr {
+                    ty: def.ty.clone(),
+                    node: Node::Compound { name: op.to_string(), f: *f, args: parsed, key: self.key.clone() },
+                });
             }
         }
         if overloads.len() == 1 {
             let errs = sig_ctx.unwrap().errors.borrow().clone();
             self.errors.borrow_mut().extend(errs);
         } else {
-            let shown: Vec<&Sig> = if overloads.is_empty() { available.iter().map(|(s, _)| s).collect() } else { overloads.iter().map(|(s, _)| s).collect() };
+            let shown: Vec<&Sig> = if overloads.is_empty() {
+                available.iter().map(|(s, _)| s).collect()
+            } else {
+                overloads.iter().map(|(s, _)| s).collect()
+            };
             let signatures = shown.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" | ");
             let mut actual = Vec::new();
             for (i, a) in args.iter().enumerate().skip(1) {
@@ -851,7 +1017,10 @@ impl ParseCtx {
                 let p = self.parse_at(a, 1 + actual.len(), None)?;
                 actual.push(p.ty.to_string());
             }
-            self.error(format!("Expected arguments of type {signatures}, but found ({}) instead.", actual.join(", ")), &[]);
+            self.error(
+                format!("Expected arguments of type {signatures}, but found ({}) instead.", actual.join(", ")),
+                &[],
+            );
         }
         None
     }
@@ -889,7 +1058,10 @@ pub fn is_constant(e: &Expr) -> bool {
     });
     children
         && is_feature_constant(e)
-        && is_global_property_constant(e, &["zoom", "heatmap-density", "elevation", "line-progress", "accumulated", "is-supported-script"])
+        && is_global_property_constant(
+            e,
+            &["zoom", "heatmap-density", "elevation", "line-progress", "accumulated", "is-supported-script"],
+        )
 }
 
 pub fn is_feature_constant(e: &Expr) -> bool {
@@ -898,7 +1070,9 @@ pub fn is_feature_constant(e: &Expr) -> bool {
             if (name == "get" || name == "has") && args.len() == 1 {
                 return false;
             }
-            if matches!(name.as_str(), "feature-state" | "properties" | "geometry-type" | "id") || name.starts_with("filter-") {
+            if matches!(name.as_str(), "feature-state" | "properties" | "geometry-type" | "id")
+                || name.starts_with("filter-")
+            {
                 return false;
             }
         }

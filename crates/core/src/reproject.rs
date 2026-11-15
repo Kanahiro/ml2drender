@@ -99,16 +99,12 @@ impl Warp {
         let m = margin as f64;
         let b = [b[0] - m * ux, b[1] - m * uy, b[2] + m * ux, b[3] + m * uy];
         let (cols, rows) = (size[0].div_ceil(GRID) + 1, size[1].div_ceil(GRID) + 1);
-        let grid: Vec<(f64, f64)> = (0..rows)
-            .flat_map(|j| (0..cols).map(move |i| ((i * GRID) as f64, (j * GRID) as f64)))
-            .collect();
+        let grid: Vec<(f64, f64)> =
+            (0..rows).flat_map(|j| (0..cols).map(move |i| ((i * GRID) as f64, (j * GRID) as f64))).collect();
         // The reference point longitudes are unwrapped around: the center or else, e.g. for a tile
         // on the edge of a world projection, the node nearest to it in the domain.
         let (cx, cy) = (size[0] as f64 / 2.0, size[1] as f64 / 2.0);
-        let css_size = [
-            size[0] as f64 / view.pixel_ratio,
-            size[1] as f64 / view.pixel_ratio,
-        ];
+        let css_size = [size[0] as f64 / view.pixel_ratio, size[1] as f64 / view.pixel_ratio];
         let mut warp = Warp {
             proj,
             bbox: b,
@@ -131,9 +127,7 @@ impl Warp {
             c
         })
         .flatten();
-        let reference = std::iter::once((cx, cy))
-            .chain(candidates)
-            .find_map(|(x, y)| in_domain(x, y));
+        let reference = std::iter::once((cx, cy)).chain(candidates).find_map(|(x, y)| in_domain(x, y));
         let Some([reference_lng, _]) = reference else {
             return Ok((warp, None));
         };
@@ -146,7 +140,8 @@ impl Warp {
         // The zoom styles are evaluated and tiles are chosen at: CRS units per pixel read as Web
         // Mercator at the equator (OGC scale denominators), so all tiles of a grid level share it
         // wherever they are. A local scale would change across the view and seam neighboring tiles.
-        let turn = if matches!(warp.proj, Projection::LongLat) { 360.0 } else { 2.0 * std::f64::consts::PI * 6378137.0 };
+        let turn =
+            if matches!(warp.proj, Projection::LongLat) { 360.0 } else { 2.0 * std::f64::consts::PI * 6378137.0 };
         let mut zoom = (turn / (512.0 * (ux * uy).sqrt() * view.pixel_ratio)).log2();
         // The nodes' box along the axes of the Mercator view, which has the view's bearing.
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -156,12 +151,7 @@ impl Warp {
         }
         // ponytail: one zoom for the whole view; far from the center (e.g. continental views) the
         // picture is resampled up or down. Bound the Mercator render to 16× the output area.
-        let css = |zoom: f64| {
-            [
-                (x1 - x0) * 512.0 * 2f64.powf(zoom),
-                (y1 - y0) * 512.0 * 2f64.powf(zoom),
-            ]
-        };
+        let css = |zoom: f64| [(x1 - x0) * 512.0 * 2f64.powf(zoom), (y1 - y0) * 512.0 * 2f64.powf(zoom)];
         let [w, h] = css(zoom);
         let max_area = 16.0 * css_size[0] * css_size[1];
         if w * h > max_area {
@@ -173,10 +163,7 @@ impl Warp {
         let (rx, ry) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
         let (mx, my) = (rx * cos + ry * sin, ry * cos - rx * sin);
         let mercator = View {
-            center: [
-                mx * 360.0 - 180.0,
-                tile::mercator_lat(my),
-            ],
+            center: [mx * 360.0 - 180.0, tile::mercator_lat(my)],
             zoom,
             bearing: view.bearing,
             // A pixel of padding on each side for bilinear sampling.
@@ -210,10 +197,7 @@ impl Warp {
         let [x, y] = self.unturned([x, y]);
         let b = self.bbox;
         self.proj
-            .inverse([
-                b[0] + x / self.size[0] as f64 * (b[2] - b[0]),
-                b[3] - y / self.size[1] as f64 * (b[3] - b[1]),
-            ])
+            .inverse([b[0] + x / self.size[0] as f64 * (b[2] - b[0]), b[3] - y / self.size[1] as f64 * (b[3] - b[1])])
             .filter(|p| p[1].abs() <= tile::MAX_LAT)
     }
 
@@ -267,10 +251,7 @@ impl Warp {
     /// neighboring tiles, and turns with the map.
     pub fn pixel_grid(&self) -> PixelGrid {
         let b = self.bbox;
-        let (ux, uy) = (
-            (b[2] - b[0]) / self.size[0] as f64,
-            (b[3] - b[1]) / self.size[1] as f64,
-        );
+        let (ux, uy) = ((b[2] - b[0]) / self.size[0] as f64, (b[3] - b[1]) / self.size[1] as f64);
         // Of the output at bearing 0, whose pixel `q` is the output's `turned(q)`.
         let origin = [b[0] / ux, -b[3] / uy];
         let [x, y] = self.unturned([0.0; 2]);
@@ -307,22 +288,15 @@ impl Warp {
                     let gx = (x as f64 + 0.5) / g;
                     let (i, fx) = (gx as usize, gx.fract());
                     let k = j * self.cols + i;
-                    let [a, b, c, d] = [
-                        self.nodes[k],
-                        self.nodes[k + 1],
-                        self.nodes[k + self.cols],
-                        self.nodes[k + self.cols + 1],
-                    ];
-                    let lerp = |q: usize| {
-                        (a[q] * (1.0 - fx) + b[q] * fx) * (1.0 - fy)
-                            + (c[q] * (1.0 - fx) + d[q] * fx) * fy
-                    };
+                    let [a, b, c, d] =
+                        [self.nodes[k], self.nodes[k + 1], self.nodes[k + self.cols], self.nodes[k + self.cols + 1]];
+                    let lerp =
+                        |q: usize| (a[q] * (1.0 - fx) + b[q] * fx) * (1.0 - fy) + (c[q] * (1.0 - fx) + d[q] * fx) * fy;
                     let m = [lerp(0), lerp(1)];
                     // A cell across the cut where longitudes unwrap (e.g. the meridian opposite
                     // a polar view's reference point) spans about a world: exact too.
                     let xs = [a[0], b[0], c[0], d[0]];
-                    let span = xs.iter().fold(f64::MIN, |s, &v| s.max(v))
-                        - xs.iter().fold(f64::MAX, |s, &v| s.min(v));
+                    let span = xs.iter().fold(f64::MIN, |s, &v| s.max(v)) - xs.iter().fold(f64::MAX, |s, &v| s.min(v));
                     out.push(if m[0].is_finite() && span <= 0.5 {
                         m
                     } else if [a, b, c, d].iter().any(|n| n[0].is_finite()) {
@@ -341,7 +315,14 @@ impl Warp {
     /// `segment` long so that they curve, projected, then clipped to the output with `buffer` around.
     /// Lines end where they leave the projection's domain (e.g. a geostationary view's far side), and
     /// polygons follow its edge from where they leave to where they come back (see `rejoin`).
-    pub(crate) fn project(&self, ty: mvt::GeomType, mut geom: Vec<Vec<[f64; 2]>>, segment: f64, extent: f64, buffer: f64) -> Vec<Vec<[i32; 2]>> {
+    pub(crate) fn project(
+        &self,
+        ty: mvt::GeomType,
+        mut geom: Vec<Vec<[f64; 2]>>,
+        segment: f64,
+        extent: f64,
+        buffer: f64,
+    ) -> Vec<Vec<[i32; 2]>> {
         use mvt::{GeomType, clip_axis};
         let m = self.margin as f64;
         let scale = [extent / (self.size[0] as f64 - 2.0 * m), extent / (self.size[1] as f64 - 2.0 * m)];
@@ -362,7 +343,9 @@ impl Warp {
             GeomType::Point => projected.extend(geom.iter().flatten().filter_map(|&p| self.on_map(p)).map(|s| vec![s])),
             GeomType::LineString => {
                 for line in &geom {
-                    projected.extend(self.visible_runs(&crate::render::densify(line, segment), false).into_iter().map(|r| r.points));
+                    projected.extend(
+                        self.visible_runs(&crate::render::densify(line, segment), false).into_iter().map(|r| r.points),
+                    );
                 }
             }
             GeomType::Polygon => {
@@ -389,7 +372,8 @@ impl Warp {
                 *p = [(p[0] - m) * scale[0], (p[1] - m) * scale[1]];
             }
         }
-        let clipped = clip_axis(&clip_axis(&projected, ty, -buffer, extent + buffer, 0), ty, -buffer, extent + buffer, 1);
+        let clipped =
+            clip_axis(&clip_axis(&projected, ty, -buffer, extent + buffer, 0), ty, -buffer, extent + buffer, 1);
         clipped.iter().map(|r| r.iter().map(|p| [p[0].round() as i32, p[1].round() as i32]).collect()).collect()
     }
 
@@ -490,9 +474,14 @@ impl Warp {
                 return vec![];
             }
             let start = self.edge_at(center, 0.0);
-            let mut ring: Vec<[f64; 2]> = std::iter::once(start).chain((1..64).map(|k| self.edge_at(center, TAU * k as f64 / 64.0))).collect();
+            let mut ring: Vec<[f64; 2]> =
+                std::iter::once(start).chain((1..64).map(|k| self.edge_at(center, TAU * k as f64 / 64.0))).collect();
             // Refined like an arc between each pair.
-            ring = ring.iter().zip(ring.iter().cycle().skip(1)).flat_map(|(&a, &b)| std::iter::once(a).chain(arc(a, b))).collect();
+            ring = ring
+                .iter()
+                .zip(ring.iter().cycle().skip(1))
+                .flat_map(|(&a, &b)| std::iter::once(a).chain(arc(a, b)))
+                .collect();
             ring.push(start);
             return vec![ring];
         }
@@ -561,7 +550,11 @@ struct Run {
 fn mvt_order(rings: Vec<Vec<[f64; 2]>>) -> Vec<Vec<[f64; 2]>> {
     type Ring = Vec<[f64; 2]>;
     let area = |r: &[[f64; 2]]| r.windows(2).map(|w| w[0][0] * w[1][1] - w[1][0] * w[0][1]).sum::<f64>();
-    let bounds = |r: &[[f64; 2]]| r.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, p| [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]);
+    let bounds = |r: &[[f64; 2]]| {
+        r.iter().fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, p| {
+            [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]
+        })
+    };
     // Outer rings with their area, bounds and holes.
     let mut outers: Vec<(f64, [f64; 4], Ring, Vec<Ring>)> = Vec::new();
     let mut holes: Vec<Ring> = Vec::new();
@@ -613,15 +606,8 @@ fn sample(t: &Target, x: f64, y: f64) -> Rgba {
         }
         t.px[yi as usize * t.w + xi as usize].map(|c| c as f32 / 255.0)
     };
-    let (a, b, c, d) = (
-        at(x0, y0),
-        at(x0 + 1.0, y0),
-        at(x0, y0 + 1.0),
-        at(x0 + 1.0, y0 + 1.0),
-    );
-    std::array::from_fn(|k| {
-        (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy
-    })
+    let (a, b, c, d) = (at(x0, y0), at(x0 + 1.0, y0), at(x0, y0 + 1.0), at(x0 + 1.0, y0 + 1.0));
+    std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
 }
 
 #[cfg(test)]
@@ -631,7 +617,15 @@ mod tests {
 
     #[test]
     fn holes_across_the_output_edge_stay_after_their_outer_ring() {
-        let view = ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], bearing: 0.0, width: 512, height: 512, pixel_ratio: 1.0, margin: 0 };
+        let view = ProjectedView {
+            projjson: test_crs::geographic(),
+            bbox: [0.0, 0.0, 10.0, 10.0],
+            bearing: 0.0,
+            width: 512,
+            height: 512,
+            pixel_ratio: 1.0,
+            margin: 0,
+        };
         let (warp, _) = Warp::new(&view).unwrap();
         let m = |lng: f64, lat: f64| [tile::mercator_x(lng), tile::mercator_y(lat)];
         // MVT orientation: the outer ring clockwise on screen, the hole counterclockwise. The hole
@@ -640,7 +634,9 @@ mod tests {
         let outer = vec![m(-5.0, 15.0), m(15.0, 15.0), m(15.0, -5.0), m(-5.0, -5.0), m(-5.0, 15.0)];
         let hole = vec![m(3.0, -2.0), m(7.0, -2.0), m(7.0, 1.0), m(3.0, 1.0), m(3.0, -2.0)];
         let rings = warp.project(mvt::GeomType::Polygon, vec![outer, hole], 1.0 / 32.0, 4096.0, 128.0);
-        let area = |r: &[[i32; 2]]| r.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum::<i64>();
+        let area = |r: &[[i32; 2]]| {
+            r.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum::<i64>()
+        };
         assert_eq!(rings.iter().map(|r| area(r).signum()).collect::<Vec<_>>(), [1, -1], "{rings:?}");
     }
 
@@ -649,12 +645,32 @@ mod tests {
         // A world of Equal Earth, and a ring (MVT orientation) across 180° with a bay from the west
         // that reaches past it: clipped, its crossings (60°, -60°, 20°, 30°) join back and forth
         // along the edge, where the bay cuts what is left in two.
-        let view = ProjectedView { projjson: test_crs::projected("Equal Earth", test_crs::WGS84, &[]), bbox: [-1.8e7, -9e6, 1.8e7, 9e6], bearing: 0.0, width: 512, height: 256, pixel_ratio: 1.0, margin: 0 };
+        let view = ProjectedView {
+            projjson: test_crs::projected("Equal Earth", test_crs::WGS84, &[]),
+            bbox: [-1.8e7, -9e6, 1.8e7, 9e6],
+            bearing: 0.0,
+            width: 512,
+            height: 256,
+            pixel_ratio: 1.0,
+            margin: 0,
+        };
         let (warp, _) = Warp::new(&view).unwrap();
         let m = |lng: f64, lat: f64| [tile::mercator_x(lng), tile::mercator_y(lat)];
-        let ring = vec![m(170.0, 60.0), m(190.0, 60.0), m(190.0, -60.0), m(170.0, -60.0), m(170.0, 20.0), m(185.0, 20.0), m(185.0, 30.0), m(170.0, 30.0), m(170.0, 60.0)];
+        let ring = vec![
+            m(170.0, 60.0),
+            m(190.0, 60.0),
+            m(190.0, -60.0),
+            m(170.0, -60.0),
+            m(170.0, 20.0),
+            m(185.0, 20.0),
+            m(185.0, 30.0),
+            m(170.0, 30.0),
+            m(170.0, 60.0),
+        ];
         let rings = warp.project(mvt::GeomType::Polygon, vec![ring], 1.0 / 512.0, 4096.0, 128.0);
-        let area = |r: &[[i32; 2]]| r.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum::<i64>();
+        let area = |r: &[[i32; 2]]| {
+            r.windows(2).map(|w| w[0][0] as i64 * w[1][1] as i64 - w[1][0] as i64 * w[0][1] as i64).sum::<i64>()
+        };
         assert_eq!(rings.iter().map(|r| area(r).signum()).collect::<Vec<_>>(), [1, 1], "{rings:?}");
     }
 
@@ -687,7 +703,15 @@ mod tests {
     #[test]
     fn a_bearing_turns_the_view_around_its_center() {
         // Longlat 0°–10° at 10 px per degree, turned so that east is up.
-        let view = ProjectedView { projjson: test_crs::geographic(), bbox: [0.0, 0.0, 10.0, 10.0], bearing: 90.0, width: 100, height: 100, pixel_ratio: 1.0, margin: 0 };
+        let view = ProjectedView {
+            projjson: test_crs::geographic(),
+            bbox: [0.0, 0.0, 10.0, 10.0],
+            bearing: 90.0,
+            width: 100,
+            height: 100,
+            pixel_ratio: 1.0,
+            margin: 0,
+        };
         let (warp, mercator) = Warp::new(&view).unwrap();
         let s = warp.world_to_screen([tile::mercator_x(7.5), tile::mercator_y(4.0)]);
         assert!((s[0] - 60.0).abs() < 1e-6 && (s[1] - 25.0).abs() < 1e-6, "{s:?}");
@@ -696,7 +720,11 @@ mod tests {
         // Rasters are drawn by a Mercator camera turned the same way, which sees the whole output.
         assert_eq!(mercator.unwrap().bearing, 90.0);
         let polar = ProjectedView {
-            projjson: test_crs::projected("Polar Stereographic (variant B)", test_crs::WGS84, &[("Latitude of standard parallel", 70.0), ("Longitude of origin", -45.0)]),
+            projjson: test_crs::projected(
+                "Polar Stereographic (variant B)",
+                test_crs::WGS84,
+                &[("Latitude of standard parallel", 70.0), ("Longitude of origin", -45.0)],
+            ),
             bbox: [0.0, -3e6, 2e6, -2e6],
             bearing: 40.0,
             width: 200,
@@ -709,7 +737,10 @@ mod tests {
         let t = Transform::new(m.center, m.zoom, m.bearing, m.width as f64, m.height as f64, m.pixel_ratio);
         for n in warp.pixel_world() {
             let s = t.world_to_screen([n[0] * t.world_size, n[1] * t.world_size]);
-            assert!(s[0] >= 0.0 && s[0] <= m.width as f64 && s[1] >= 0.0 && s[1] <= m.height as f64, "{n:?} at {s:?} of {m:?}");
+            assert!(
+                s[0] >= 0.0 && s[0] <= m.width as f64 && s[1] >= 0.0 && s[1] <= m.height as f64,
+                "{n:?} at {s:?} of {m:?}"
+            );
         }
     }
 

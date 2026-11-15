@@ -3,8 +3,8 @@
 mod filter;
 
 use crate::expression::{self as ex, CanonicalTileId, EvalCtx, Expression, Feature, Globals, Object, Value};
-use serde_json::Value as J;
 use crate::hash::HashMap;
+use serde_json::Value as J;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -32,7 +32,12 @@ impl PropValue {
             PropValue::Constant(v) => v.clone(),
             PropValue::Expr(e) => {
                 let mut ctx = EvalCtx {
-                    globals: Globals { zoom: f64::NAN, line_progress: Some(progress), global_state: Some(global_state.clone()), ..Default::default() },
+                    globals: Globals {
+                        zoom: f64::NAN,
+                        line_progress: Some(progress),
+                        global_state: Some(global_state.clone()),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 };
                 e.evaluate(&mut ctx)
@@ -62,7 +67,13 @@ impl PropValue {
     pub fn eval_globals(&self, mut globals: Globals) -> Value {
         match self {
             PropValue::Constant(v) => v.clone(),
-            PropValue::Expr(e) => e.evaluate(&mut EvalCtx { globals: { globals.global_state.get_or_insert_with(Default::default); globals }, ..Default::default() }),
+            PropValue::Expr(e) => e.evaluate(&mut EvalCtx {
+                globals: {
+                    globals.global_state.get_or_insert_with(Default::default);
+                    globals
+                },
+                ..Default::default()
+            }),
             PropValue::Function(f) => f.evaluate(globals.zoom, None),
         }
     }
@@ -75,7 +86,13 @@ impl PropValue {
         }
     }
 
-    pub fn eval(&self, zoom: f64, feature: Option<&Feature>, canonical: Option<CanonicalTileId>, global_state: &Rc<Object>) -> Value {
+    pub fn eval(
+        &self,
+        zoom: f64,
+        feature: Option<&Feature>,
+        canonical: Option<CanonicalTileId>,
+        global_state: &Rc<Object>,
+    ) -> Value {
         match self {
             PropValue::Constant(v) => v.clone(),
             PropValue::Expr(e) => {
@@ -98,7 +115,9 @@ fn compile_property(value: &J, spec: &J, global_state: &J) -> Option<PropValue> 
         return ex::function::LegacyFunction::new(value, spec).map(|f| PropValue::Function(Rc::new(f)));
     }
     if ex::is_expression(value) {
-        return ex::create_property_expression(value, spec, Some(global_state)).ok().map(|e| PropValue::Expr(Rc::new(e)));
+        return ex::create_property_expression(value, spec, Some(global_state))
+            .ok()
+            .map(|e| PropValue::Expr(Rc::new(e)));
     }
     let v = Value::from_json(value);
     let v = match (spec["type"].as_str(), &v) {
@@ -108,7 +127,9 @@ fn compile_property(value: &J, spec: &J, global_state: &J) -> Option<PropValue> 
             let e = ex::create_property_expression(&serde_json::json!(["literal", value]), spec, None).ok()?;
             e.evaluate(&mut EvalCtx { globals: Globals { zoom: 0.0, ..Default::default() }, ..Default::default() })
         }
-        (Some("formatted"), Value::String(s)) => Value::Formatted(Rc::new(ex::value::Formatted::from_string(s.to_string()))),
+        (Some("formatted"), Value::String(s)) => {
+            Value::Formatted(Rc::new(ex::value::Formatted::from_string(s.to_string())))
+        }
         _ => v,
     };
     Some(PropValue::Constant(v))
@@ -150,7 +171,9 @@ pub struct Style {
 
 fn contains_op(v: &J, ops: &[&str]) -> bool {
     match v {
-        J::Array(a) => a.first().and_then(J::as_str).is_some_and(|s| ops.contains(&s)) || a.iter().any(|x| contains_op(x, ops)),
+        J::Array(a) => {
+            a.first().and_then(J::as_str).is_some_and(|s| ops.contains(&s)) || a.iter().any(|x| contains_op(x, ops))
+        }
         J::Object(o) => o.values().any(|x| contains_op(x, ops)),
         _ => false,
     }
@@ -200,7 +223,8 @@ impl Style {
                         d if ex::is_expression(d) => compile_property(d, pspec, &state_json),
                         _ => None,
                     };
-                    let value = compiled.or_else(default).unwrap_or_else(|| PropValue::Constant(ex::default_value(pspec)));
+                    let value =
+                        compiled.or_else(default).unwrap_or_else(|| PropValue::Constant(ex::default_value(pspec)));
                     map.insert(name.clone(), value);
                 }
             }

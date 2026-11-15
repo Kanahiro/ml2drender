@@ -23,7 +23,15 @@ pub struct View {
 
 impl From<View> for ml2drender::View {
     fn from(v: View) -> Self {
-        ml2drender::View { center: [v.lng, v.lat], zoom: v.zoom, bearing: v.bearing, width: v.width, height: v.height, pixel_ratio: v.pixel_ratio, margin: v.margin }
+        ml2drender::View {
+            center: [v.lng, v.lat],
+            zoom: v.zoom,
+            bearing: v.bearing,
+            width: v.width,
+            height: v.height,
+            pixel_ratio: v.pixel_ratio,
+            margin: v.margin,
+        }
     }
 }
 
@@ -47,7 +55,8 @@ type Shared = Arc<Mutex<Movable>>;
 fn with<T>(shared: &Shared, f: impl FnOnce(&mut ml2drender::Renderer) -> T) -> Result<T> {
     let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut guard.0))).map_err(|panic| {
-        let message = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned());
+        let message =
+            panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned());
         Error::from_reason(format!("renderer panicked: {}", message.unwrap_or_default()))
     })
 }

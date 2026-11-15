@@ -79,7 +79,10 @@ impl Image {
 
 fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
     use zune_jpeg::zune_core::{colorspace::ColorSpace, options::DecoderOptions};
-    let mut dec = zune_jpeg::JpegDecoder::new_with_options(bytes, DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA));
+    let mut dec = zune_jpeg::JpegDecoder::new_with_options(
+        bytes,
+        DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA),
+    );
     let data = dec.decode().ok()?;
     let (w, h) = dec.dimensions()?;
     Some(Image { w, h, data })
@@ -90,7 +93,11 @@ fn decode_webp(bytes: &[u8]) -> Option<Image> {
     let (w, h) = dec.dimensions();
     let mut buf = vec![0; dec.output_buffer_size()?];
     dec.read_image(&mut buf).ok()?;
-    let data = if dec.has_alpha() { buf } else { buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect() };
+    let data = if dec.has_alpha() {
+        buf
+    } else {
+        buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect()
+    };
     Some(Image { w: w as usize, h: h as usize, data })
 }
 
@@ -104,7 +111,9 @@ fn decode_png(bytes: &[u8]) -> Option<Image> {
     let data = match info.color_type {
         png::ColorType::Rgba => buf,
         png::ColorType::Rgb => buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => buf.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::GrayscaleAlpha => {
+            buf.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect()
+        }
         png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return None,
     };
@@ -133,7 +142,9 @@ impl Texture {
     pub fn new(img: &Image, mipmaps: bool) -> Texture {
         let px = img
             .data
-            .as_chunks::<4>().0.iter()
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| {
                 // round(c·a / 255) in integers: c·a / 255 is never a tie.
                 let m = |c: u8| ((c as u32 * p[3] as u32 + 127) / 255) as u8;
@@ -192,17 +203,35 @@ impl Texture {
                     #[inline(always)]
                     fn texel(l: &Level, x: i64, y: i64) -> v128 {
                         let p = l.px[(y.clamp(0, l.h as i64 - 1) as usize) * l.w + x.clamp(0, l.w as i64 - 1) as usize];
-                        f32x4_div(f32x4_convert_u32x4(u32x4_extend_low_u16x8(u16x8_extend_low_u8x16(u32x4(u32::from_ne_bytes(p), 0, 0, 0)))), f32x4_splat(255.0))
+                        f32x4_div(
+                            f32x4_convert_u32x4(u32x4_extend_low_u16x8(u16x8_extend_low_u8x16(u32x4(
+                                u32::from_ne_bytes(p),
+                                0,
+                                0,
+                                0,
+                            )))),
+                            f32x4_splat(255.0),
+                        )
                     }
-                    let (a, b, c, d) = (texel(l, x0, y0), texel(l, x0 + 1, y0), texel(l, x0, y0 + 1), texel(l, x0 + 1, y0 + 1));
-                    let (gx, hx, gy, hy) = (f32x4_splat(1.0 - fx), f32x4_splat(fx), f32x4_splat(1.0 - fy), f32x4_splat(fy));
+                    let (a, b, c, d) =
+                        (texel(l, x0, y0), texel(l, x0 + 1, y0), texel(l, x0, y0 + 1), texel(l, x0 + 1, y0 + 1));
+                    let (gx, hx, gy, hy) =
+                        (f32x4_splat(1.0 - fx), f32x4_splat(fx), f32x4_splat(1.0 - fy), f32x4_splat(fy));
                     let lerp = |p, q| f32x4_add(f32x4_mul(p, gx), f32x4_mul(q, hx));
                     let r = f32x4_add(f32x4_mul(lerp(a, b), gy), f32x4_mul(lerp(c, d), hy));
-                    return [f32x4_extract_lane::<0>(r), f32x4_extract_lane::<1>(r), f32x4_extract_lane::<2>(r), f32x4_extract_lane::<3>(r)];
+                    return [
+                        f32x4_extract_lane::<0>(r),
+                        f32x4_extract_lane::<1>(r),
+                        f32x4_extract_lane::<2>(r),
+                        f32x4_extract_lane::<3>(r),
+                    ];
                 }
                 #[allow(unreachable_code)]
-                let (a, b, c, d) = (texel(l, x0, y0), texel(l, x0 + 1, y0), texel(l, x0, y0 + 1), texel(l, x0 + 1, y0 + 1));
-                std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
+                let (a, b, c, d) =
+                    (texel(l, x0, y0), texel(l, x0 + 1, y0), texel(l, x0, y0 + 1), texel(l, x0 + 1, y0 + 1));
+                std::array::from_fn(|k| {
+                    (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy
+                })
             }
         }
     }

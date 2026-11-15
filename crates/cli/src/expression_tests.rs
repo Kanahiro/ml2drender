@@ -1,9 +1,9 @@
 //! Runs maplibre-style-spec expression tests (fixtures/expression), mirroring
 //! test/integration/expression/expression.test.ts upstream.
 
-use crate::{find_files, read_json, Tally};
+use crate::{Tally, find_files, read_json};
 use ml2drender::expression::{self as ex, create_property_expression};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -38,7 +38,10 @@ pub fn run(root: &Path, filter: Option<&str>) {
         }
     }
 
-    let mut md = format!("## Expression tests\n\n{}\n\n| group | pass | fail | skip | pass rate |\n|---|---|---|---|---|\n", overall.line());
+    let mut md = format!(
+        "## Expression tests\n\n{}\n\n| group | pass | fail | skip | pass rate |\n|---|---|---|---|---|\n",
+        overall.line()
+    );
     for (g, tally) in &by_group {
         md += &tally.row(g);
     }
@@ -120,7 +123,11 @@ fn fixture_feature(f: &Value, canonical: &Value) -> (ex::Feature, Option<ex::Can
         ex::Value::Object(o) => o,
         _ => Default::default(),
     };
-    let mut feature = ex::Feature { id: f.get("id").map(ex::Value::from_json), properties: ex::Properties::Object(properties), ..Default::default() };
+    let mut feature = ex::Feature {
+        id: f.get("id").map(ex::Value::from_json),
+        properties: ex::Properties::Object(properties),
+        ..Default::default()
+    };
     let geom = &f["geometry"];
     let name = |t: &str| -> &'static str {
         match t {
@@ -141,12 +148,19 @@ fn fixture_feature(f: &Value, canonical: &Value) -> (ex::Feature, Option<ex::Can
                     let tiles = 2f64.powi(c.z as i32);
                     let (lng, lat) = (p[0].as_f64().unwrap_or(0.0), p[1].as_f64().unwrap_or(0.0));
                     let x = (180.0 + lng) / 360.0;
-                    let y = (180.0 - (180.0 / std::f64::consts::PI) * (std::f64::consts::PI / 4.0 + lat * std::f64::consts::PI / 360.0).tan().ln()) / 360.0;
-                    let round = |v: f64| { let f = v.floor(); if v - f >= 0.5 { f + 1.0 } else { f } };
+                    let y = (180.0
+                        - (180.0 / std::f64::consts::PI)
+                            * (std::f64::consts::PI / 4.0 + lat * std::f64::consts::PI / 360.0).tan().ln())
+                        / 360.0;
+                    let round = |v: f64| {
+                        let f = v.floor();
+                        if v - f >= 0.5 { f + 1.0 } else { f }
+                    };
                     [round(x * tiles * 8192.0) - c.x as f64 * 8192.0, round(y * tiles * 8192.0) - c.y as f64 * 8192.0]
                 };
                 let line = |l: &Value| -> Vec<[f64; 2]> { l.as_array().into_iter().flatten().map(point).collect() };
-                let lines = |ls: &Value| -> Vec<Vec<[f64; 2]>> { ls.as_array().into_iter().flatten().map(line).collect() };
+                let lines =
+                    |ls: &Value| -> Vec<Vec<[f64; 2]>> { ls.as_array().into_iter().flatten().map(line).collect() };
                 let c = &geom["coordinates"];
                 let (ty, g) = match t {
                     "Point" => ("Point", vec![vec![point(c)]]),
@@ -169,9 +183,13 @@ fn fixture_feature(f: &Value, canonical: &Value) -> (ex::Feature, Option<ex::Can
 /// Upstream `deepEqual` with numbers compared after `stripPrecision` to 6 significant figures.
 fn deep_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => strip_precision(x.as_f64().unwrap()) == strip_precision(y.as_f64().unwrap()),
+        (Value::Number(x), Value::Number(y)) => {
+            strip_precision(x.as_f64().unwrap()) == strip_precision(y.as_f64().unwrap())
+        }
         (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(a, b)| deep_equal(a, b)),
-        (Value::Object(x), Value::Object(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| deep_equal(v, w))),
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| deep_equal(v, w)))
+        }
         _ => a == b,
     }
 }

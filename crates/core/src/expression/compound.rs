@@ -139,7 +139,12 @@ pub fn definition(name: &str) -> Option<Definition> {
         "to-rgba" => one(Type::array(NUMBER, Some(4)), vec![COLOR], |ctx, a, _| {
             let Value::Color(c) = a[0].evaluate(ctx)? else { return Ok(Value::Null) };
             let [r, g, b, al] = c.rgb();
-            Ok(Value::Array(Rc::new(vec![Value::Number(r * 255.0), Value::Number(g * 255.0), Value::Number(b * 255.0), Value::Number(al)])))
+            Ok(Value::Array(Rc::new(vec![
+                Value::Number(r * 255.0),
+                Value::Number(g * 255.0),
+                Value::Number(b * 255.0),
+                Value::Number(al),
+            ])))
         }),
         "rgb" => one(COLOR, vec![NUMBER, NUMBER, NUMBER], rgba),
         "rgba" => one(COLOR, vec![NUMBER, NUMBER, NUMBER, NUMBER], rgba),
@@ -180,9 +185,15 @@ pub fn definition(name: &str) -> Option<Definition> {
         "geometry-type" => one(STRING, vec![], |ctx, _, _| Ok(geometry_type(ctx))),
         "id" => one(VALUE, vec![], |ctx, _, _| Ok(feature_id(ctx))),
         "zoom" => one(NUMBER, vec![], |ctx, _, _| Ok(Value::Number(ctx.globals.zoom))),
-        "heatmap-density" => one(NUMBER, vec![], |ctx, _, _| Ok(Value::Number(ctx.globals.heatmap_density.filter(|v| *v != 0.0 && !v.is_nan()).unwrap_or(0.0)))),
-        "elevation" => one(NUMBER, vec![], |ctx, _, _| Ok(Value::Number(ctx.globals.elevation.filter(|v| *v != 0.0 && !v.is_nan()).unwrap_or(0.0)))),
-        "line-progress" => one(NUMBER, vec![], |ctx, _, _| Ok(Value::Number(ctx.globals.line_progress.filter(|v| *v != 0.0 && !v.is_nan()).unwrap_or(0.0)))),
+        "heatmap-density" => one(NUMBER, vec![], |ctx, _, _| {
+            Ok(Value::Number(ctx.globals.heatmap_density.filter(|v| *v != 0.0 && !v.is_nan()).unwrap_or(0.0)))
+        }),
+        "elevation" => one(NUMBER, vec![], |ctx, _, _| {
+            Ok(Value::Number(ctx.globals.elevation.filter(|v| *v != 0.0 && !v.is_nan()).unwrap_or(0.0)))
+        }),
+        "line-progress" => one(NUMBER, vec![], |ctx, _, _| {
+            Ok(Value::Number(ctx.globals.line_progress.filter(|v| *v != 0.0 && !v.is_nan()).unwrap_or(0.0)))
+        }),
         "accumulated" => one(VALUE, vec![], |ctx, _, _| Ok(ctx.globals.accumulated.clone().unwrap_or(Value::Null))),
         "+" => va(NUMBER, NUMBER, |ctx, a, _| {
             let mut r = 0.0;
@@ -241,17 +252,39 @@ pub fn definition(name: &str) -> Option<Definition> {
         "round" => one(NUMBER, vec![NUMBER], math1!(|v: f64| if v < 0.0 { -js_round(-v) } else { js_round(v) })),
         "floor" => one(NUMBER, vec![NUMBER], math1!(f64::floor)),
         "ceil" => one(NUMBER, vec![NUMBER], math1!(f64::ceil)),
-        "filter-==" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| Ok(Value::Bool(filter_prop(ctx, &a[0]).strict_eq(&lit(&a[1]))))),
-        "filter-id-==" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(feature_id(ctx).strict_eq(&lit(&a[0]))))),
-        "filter-type-==" => one(BOOLEAN, vec![STRING], |ctx, a, _| Ok(Value::Bool(geometry_type(ctx).strict_eq(&lit(&a[0]))))),
-        "filter-<" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_lt())))),
-        "filter-id-<" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_lt())))),
-        "filter->" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_gt())))),
-        "filter-id->" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_gt())))),
-        "filter-<=" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_le())))),
-        "filter-id-<=" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_le())))),
-        "filter->=" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_ge())))),
-        "filter-id->=" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_ge())))),
+        "filter-==" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| {
+            Ok(Value::Bool(filter_prop(ctx, &a[0]).strict_eq(&lit(&a[1]))))
+        }),
+        "filter-id-==" => {
+            one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(feature_id(ctx).strict_eq(&lit(&a[0])))))
+        }
+        "filter-type-==" => {
+            one(BOOLEAN, vec![STRING], |ctx, a, _| Ok(Value::Bool(geometry_type(ctx).strict_eq(&lit(&a[0])))))
+        }
+        "filter-<" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| {
+            Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_lt())))
+        }),
+        "filter-id-<" => one(BOOLEAN, vec![VALUE], |ctx, a, _| {
+            Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_lt())))
+        }),
+        "filter->" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| {
+            Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_gt())))
+        }),
+        "filter-id->" => one(BOOLEAN, vec![VALUE], |ctx, a, _| {
+            Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_gt())))
+        }),
+        "filter-<=" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| {
+            Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_le())))
+        }),
+        "filter-id-<=" => one(BOOLEAN, vec![VALUE], |ctx, a, _| {
+            Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_le())))
+        }),
+        "filter->=" => one(BOOLEAN, vec![STRING, VALUE], |ctx, a, _| {
+            Ok(Value::Bool(filter_cmp(&filter_prop(ctx, &a[0]), &lit(&a[1]), |o| o.is_ge())))
+        }),
+        "filter-id->=" => one(BOOLEAN, vec![VALUE], |ctx, a, _| {
+            Ok(Value::Bool(filter_cmp(&feature_id(ctx), &lit(&a[0]), |o| o.is_ge())))
+        }),
         "filter-has" => one(BOOLEAN, vec![VALUE], |ctx, a, _| Ok(Value::Bool(has_prop(ctx, &lit_key(&a[0]))))),
         "filter-has-id" => one(BOOLEAN, vec![], |ctx, _, _| Ok(Value::Bool(!feature_id(ctx).is_null()))),
         "filter-type-in" => one(BOOLEAN, vec![Type::array(STRING, None)], |ctx, a, _| {
@@ -269,7 +302,9 @@ pub fn definition(name: &str) -> Option<Definition> {
         "all" => Some(Definition {
             ty: BOOLEAN,
             overloads: vec![
-                (Sig::Fixed(vec![BOOLEAN, BOOLEAN]), |ctx, a, _| Ok(Value::Bool(a[0].evaluate(ctx)?.truthy() && a[1].evaluate(ctx)?.truthy()))),
+                (Sig::Fixed(vec![BOOLEAN, BOOLEAN]), |ctx, a, _| {
+                    Ok(Value::Bool(a[0].evaluate(ctx)?.truthy() && a[1].evaluate(ctx)?.truthy()))
+                }),
                 (Sig::Varargs(BOOLEAN), |ctx, a, _| {
                     for e in a {
                         if !e.evaluate(ctx)?.truthy() {
@@ -283,7 +318,9 @@ pub fn definition(name: &str) -> Option<Definition> {
         "any" => Some(Definition {
             ty: BOOLEAN,
             overloads: vec![
-                (Sig::Fixed(vec![BOOLEAN, BOOLEAN]), |ctx, a, _| Ok(Value::Bool(a[0].evaluate(ctx)?.truthy() || a[1].evaluate(ctx)?.truthy()))),
+                (Sig::Fixed(vec![BOOLEAN, BOOLEAN]), |ctx, a, _| {
+                    Ok(Value::Bool(a[0].evaluate(ctx)?.truthy() || a[1].evaluate(ctx)?.truthy()))
+                }),
                 (Sig::Varargs(BOOLEAN), |ctx, a, _| {
                     for e in a {
                         if e.evaluate(ctx)?.truthy() {

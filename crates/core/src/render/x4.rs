@@ -73,7 +73,10 @@ pub fn triangle<const N: usize>(
                 keep = v128_and(
                     keep,
                     match m.rect_run(y, x, x + 4) {
-                        Some(r) => v128_and(u32x4_ge(k.lanes, u32x4_splat((r.start - x) as u32)), u32x4_lt(k.lanes, u32x4_splat((r.end - x) as u32))),
+                        Some(r) => v128_and(
+                            u32x4_ge(k.lanes, u32x4_splat((r.start - x) as u32)),
+                            u32x4_lt(k.lanes, u32x4_splat((r.end - x) as u32)),
+                        ),
                         None => {
                             let lane = |j: usize| if j < n as usize && m.get(x + j, y) { u32::MAX } else { 0 };
                             u32x4(lane(0), lane(1), lane(2), lane(3))
@@ -134,7 +137,11 @@ fn blend(t: &mut Target, i: usize, c: &[v128; 4], draw: v128, k: &K) {
         } else {
             let channel = u8x16_swizzle(d, k.channel[j]);
             let dst = f32x4_convert_u32x4(channel);
-            v128_bitselect(f32x4_mul(src, f255), f32x4_mul(f32x4_add(src, f32x4_mul(f32x4_div(dst, f255), inv)), f255), opaque)
+            v128_bitselect(
+                f32x4_mul(src, f255),
+                f32x4_mul(f32x4_add(src, f32x4_mul(f32x4_div(dst, f255), inv)), f255),
+                opaque,
+            )
         };
         let tr = f32x4_trunc(x);
         let up = f32x4_ge(f32x4_abs(f32x4_sub(x, tr)), k.half);
@@ -190,7 +197,14 @@ pub struct Circle {
 }
 
 impl Circle {
-    pub fn new(fill: Rgba, stroke: Rgba, radius: f32, stroke_width: f32, aa_blur: f32, interior: Option<Rgba>) -> Circle {
+    pub fn new(
+        fill: Rgba,
+        stroke: Rgba,
+        radius: f32,
+        stroke_width: f32,
+        aa_blur: f32,
+        interior: Option<Rgba>,
+    ) -> Circle {
         let f = |x: f32| f32x4_splat(std::hint::black_box(x));
         let stroke_t = !(stroke_width < 0.01);
         Circle {
@@ -229,7 +243,8 @@ impl Circle {
             Some(s) => s.eval(f32x4_sub(len, self.edge), k),
             None => k.zero,
         };
-        let c: [v128; 4] = std::array::from_fn(|j| f32x4_mul(opacity_t, f32x4_add(self.fill[j], f32x4_mul(self.diff[j], color_t))));
+        let c: [v128; 4] =
+            std::array::from_fn(|j| f32x4_mul(opacity_t, f32x4_add(self.fill[j], f32x4_mul(self.diff[j], color_t))));
         let visible = c.iter().fold(k.zero, |a, cj| v128_or(a, f32x4_ge(*cj, self.min)));
         let mut s = Shaded { draw: v128_and(inside, visible), c, uniform: None };
         if let Some((c, draw, _)) = &self.interior {
@@ -260,7 +275,14 @@ pub struct Line {
 impl Line {
     pub fn new(c: Rgba, outset: f32, inset: f32, blur2: f32) -> Line {
         let f = |x: f32| f32x4_splat(std::hint::black_box(x));
-        Line { outset: f(outset), inset: f(inset - blur2), blur2: f(blur2), one: f(1.0), c: c.map(f), uniform: raster::opaque_pixel(c) }
+        Line {
+            outset: f(outset),
+            inset: f(inset - blur2),
+            blur2: f(blur2),
+            one: f(1.0),
+            c: c.map(f),
+            uniform: raster::opaque_pixel(c),
+        }
     }
 
     /// The scalar shader `shade` stands for.

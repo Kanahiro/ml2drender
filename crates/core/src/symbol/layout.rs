@@ -2,16 +2,16 @@
 //! evaluation, shaping, anchors, quads and collision boxes for one tile of one layer.
 
 use super::anchors::{self, Anchor, P};
-use super::glyphs::{Glyphs, BORDER};
-use super::shaping::{self, PositionedIcon, Shaping, Tex, WritingMode, IMAGE_PADDING, ONE_EM, SHAPING_DEFAULT_OFFSET};
+use super::glyphs::{BORDER, Glyphs};
+use super::shaping::{self, IMAGE_PADDING, ONE_EM, PositionedIcon, SHAPING_DEFAULT_OFFSET, Shaping, Tex, WritingMode};
 use super::unicode;
-use crate::expression::value::{js_round, Formatted};
+use crate::expression::value::{Formatted, js_round};
 use crate::expression::{Kind, Value};
+use crate::hash::HashMap;
 use crate::mvt::GeomType;
-use crate::render::{num, num2, BucketFeature, Ctx, TileFeatures, EXTENT};
+use crate::render::{BucketFeature, Ctx, EXTENT, TileFeatures, num, num2};
 use crate::style::{Layer, PropValue};
 use crate::tile::RenderTile;
-use crate::hash::HashMap;
 
 const SIZE_PACK_FACTOR: f64 = 128.0;
 const MAX_PACKED_SIZE: f64 = 255.0 * SIZE_PACK_FACTOR;
@@ -52,10 +52,15 @@ impl SizeData {
                     upper += 1;
                 }
                 let upper = upper.min(stops.len().saturating_sub(1));
-                SizeData::Composite { min_zoom: stops.get(lower).copied().unwrap_or(0.0), max_zoom: stops.get(upper).copied().unwrap_or(0.0), interp }
+                SizeData::Composite {
+                    min_zoom: stops.get(lower).copied().unwrap_or(0.0),
+                    max_zoom: stops.get(upper).copied().unwrap_or(0.0),
+                    interp,
+                }
             }
             Kind::Camera => {
-                let sizes = stops.iter().map(|&z| eval(if z == f64::NEG_INFINITY { stops[1] - 1.0 } else { z })).collect();
+                let sizes =
+                    stops.iter().map(|&z| eval(if z == f64::NEG_INFINITY { stops[1] - 1.0 } else { z })).collect();
                 SizeData::Camera { stops, sizes, layout_size: eval(tile_zoom + 1.0), interp }
             }
         }
@@ -75,7 +80,9 @@ impl SizeData {
                 let t = interp.map_or(0.0, |i| i.factor(zoom, stops[lower], stops[upper]).clamp(0.0, 1.0));
                 (0.0, (sizes[lower] + (sizes[upper] - sizes[lower]) * t).min(*layout_size))
             }
-            SizeData::Composite { min_zoom, max_zoom, interp } => (interp.map_or(0.0, |i| i.factor(zoom, *min_zoom, *max_zoom).clamp(0.0, 1.0)), 0.0),
+            SizeData::Composite { min_zoom, max_zoom, interp } => {
+                (interp.map_or(0.0, |i| i.factor(zoom, *min_zoom, *max_zoom).clamp(0.0, 1.0)), 0.0)
+            }
         }
     }
 
@@ -94,7 +101,9 @@ impl SizeData {
         let (t, u) = self.for_zoom(zoom);
         match self {
             SizeData::Source => packed[0] / SIZE_PACK_FACTOR,
-            SizeData::Composite { .. } => packed[0] / SIZE_PACK_FACTOR + (packed[1] / SIZE_PACK_FACTOR - packed[0] / SIZE_PACK_FACTOR) * t,
+            SizeData::Composite { .. } => {
+                packed[0] / SIZE_PACK_FACTOR + (packed[1] / SIZE_PACK_FACTOR - packed[0] / SIZE_PACK_FACTOR) * t
+            }
             _ => u,
         }
     }
@@ -209,15 +218,31 @@ impl Resolved {
     pub fn new(layer: &Layer, ctx: &Ctx, tile: &RenderTile) -> Resolved {
         let s = |n: &str| ctx.layout(layer, n, None, tile).as_str().unwrap_or("").to_string();
         let placement = s("symbol-placement");
-        let auto = |v: String| if v == "auto" { if placement != "point" { "map".into() } else { "viewport".into() } } else { v };
+        let auto = |v: String| {
+            if v == "auto" { if placement != "point" { "map".into() } else { "viewport".into() } } else { v }
+        };
         let text_rotation_alignment = auto(s("text-rotation-alignment"));
-        let icon_rotation_alignment = if layer.layout("icon-rotation-alignment").is_constant() { auto(s("icon-rotation-alignment")) } else { auto("auto".into()) };
-        let pitch = |v: String, rot: &str| if v == "auto" { if rot == "map" { "map".into() } else { "viewport".into() } } else { v };
+        let icon_rotation_alignment = if layer.layout("icon-rotation-alignment").is_constant() {
+            auto(s("icon-rotation-alignment"))
+        } else {
+            auto("auto".into())
+        };
+        let pitch = |v: String, rot: &str| {
+            if v == "auto" { if rot == "map" { "map".into() } else { "viewport".into() } } else { v }
+        };
         let text_pitch_alignment = pitch(s("text-pitch-alignment"), &text_rotation_alignment);
         let icon_pitch_alignment = pitch(s("icon-pitch-alignment"), &icon_rotation_alignment);
         let z_order = s("symbol-z-order");
         let sort_by_key = z_order != "viewport-y" && !layer.layout("symbol-sort-key").is_constant();
-        Resolved { placement, text_rotation_alignment, text_pitch_alignment, icon_rotation_alignment, icon_pitch_alignment, z_order, sort_by_key }
+        Resolved {
+            placement,
+            text_rotation_alignment,
+            text_pitch_alignment,
+            icon_rotation_alignment,
+            icon_pitch_alignment,
+            z_order,
+            sort_by_key,
+        }
     }
 
     pub fn text_along_line(&self) -> bool {
@@ -273,15 +298,24 @@ pub struct FeatureText {
 }
 
 /// The text of a feature (`text-field` with tokens and `text-transform`), if the layer has text.
-pub fn feature_text(layer: &Layer, ctx: &Ctx, tile: &RenderTile, raw: &serde_json::Value, f: &BucketFeature) -> FeatureText {
+pub fn feature_text(
+    layer: &Layer,
+    ctx: &Ctx,
+    tile: &RenderTile,
+    raw: &serde_json::Value,
+    f: &BucketFeature,
+) -> FeatureText {
     let font = ctx.layout(layer, "text-font", Some(f), tile);
     let font_stack = match &font {
         Value::Array(a) => a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join(","),
         _ => String::new(),
     };
     let field = layer.layout("text-field");
-    let has_text = !(field.is_constant() && matches!(ctx.layout(layer, "text-field", None, tile), Value::Formatted(ref t) if t.is_empty()))
-        && !(layer.layout("text-font").is_constant() && font_stack.is_empty() && matches!(&font, Value::Array(a) if a.is_empty()));
+    let has_text = !(field.is_constant()
+        && matches!(ctx.layout(layer, "text-field", None, tile), Value::Formatted(ref t) if t.is_empty()))
+        && !(layer.layout("text-font").is_constant()
+            && font_stack.is_empty()
+            && matches!(&font, Value::Array(a) if a.is_empty()));
     if !has_text {
         return FeatureText { text: None, font_stack };
     }
@@ -306,11 +340,19 @@ pub fn feature_text(layer: &Layer, ctx: &Ctx, tile: &RenderTile, raw: &serde_jso
     FeatureText { text: Some(text), font_stack }
 }
 
-fn feature_icon(layer: &Layer, ctx: &Ctx, tile: &RenderTile, raw: &serde_json::Value, f: &BucketFeature) -> Option<String> {
+fn feature_icon(
+    layer: &Layer,
+    ctx: &Ctx,
+    tile: &RenderTile,
+    raw: &serde_json::Value,
+    f: &BucketFeature,
+) -> Option<String> {
     let prop = layer.layout("icon-image");
     let name = match ctx.layout(layer, "icon-image", Some(f), tile) {
         Value::ResolvedImage(i) => i.name.clone(),
-        Value::String(s) if resolves_tokens(&raw["layout"]["icon-image"], prop) => resolve_tokens(&f.feature.properties, &s),
+        Value::String(s) if resolves_tokens(&raw["layout"]["icon-image"], prop) => {
+            resolve_tokens(&f.feature.properties, &s)
+        }
         Value::String(s) => s.to_string(),
         _ => return None,
     };
@@ -318,7 +360,13 @@ fn feature_icon(layer: &Layer, ctx: &Ctx, tile: &RenderTile, raw: &serde_json::V
 }
 
 /// Glyph ranges a tile's features need: `(font stack, range)`.
-pub fn glyph_dependencies(layer: &Layer, ctx: &Ctx, tf: &TileFeatures, raw: &serde_json::Value, out: &mut crate::symbol::glyphs::Dependencies) {
+pub fn glyph_dependencies(
+    layer: &Layer,
+    ctx: &Ctx,
+    tf: &TileFeatures,
+    raw: &serde_json::Value,
+    out: &mut crate::symbol::glyphs::Dependencies,
+) {
     let res = Resolved::new(layer, ctx, &tf.tile);
     let keep_upright = ctx.layout(layer, "text-keep-upright", None, &tf.tile).truthy();
     let allow_vertical = res.placement == "point"
@@ -328,7 +376,8 @@ pub fn glyph_dependencies(layer: &Layer, ctx: &Ctx, tf: &TileFeatures, raw: &ser
         let Some(text) = ft.text else { continue };
         let unformatted: String = text.sections.iter().map(|s| s.text.as_str()).collect();
         // Vertical labels may swap punctuation for its vertical form.
-        let vertical_forms = ((res.text_along_line() && keep_upright) || allow_vertical) && unicode::allows_vertical_writing_mode(&unformatted);
+        let vertical_forms = ((res.text_along_line() && keep_upright) || allow_vertical)
+            && unicode::allows_vertical_writing_mode(&unformatted);
         for s in text.sections.iter().filter(|s| s.image.is_none()) {
             let stack = s.font_stack.as_ref().unwrap_or(&ft.font_stack);
             let cps = match out.get_mut(stack) {
@@ -429,7 +478,9 @@ impl Builder<'_> {
 
     fn populate(&self, bucket: &mut SymbolBucket, tf: &TileFeatures, res: &Resolved) {
         let tile = tf.tile;
-        let has_icon = !self.layer.layout("icon-image").is_constant() || self.lay("icon-image", None, &tile).as_str().is_some_and(|s| !s.is_empty()) || matches!(self.lay("icon-image", None, &tile), Value::ResolvedImage(_));
+        let has_icon = !self.layer.layout("icon-image").is_constant()
+            || self.lay("icon-image", None, &tile).as_str().is_some_and(|s| !s.is_empty())
+            || matches!(self.lay("icon-image", None, &tile), Value::ResolvedImage(_));
         let point = res.placement == "point";
         let sort_prop = res.sort_by_key.then_some("symbol-sort-key");
         let mut features = Vec::new();
@@ -448,7 +499,12 @@ impl Builder<'_> {
         if res.placement == "line" {
             let items: Vec<(Option<String>, Vec<P>)> = features
                 .iter()
-                .map(|s| (s.text.as_ref().map(|t| t.sections.iter().map(|s| s.text.as_str()).collect()), s.f.geometry.first().cloned().unwrap_or_default()))
+                .map(|s| {
+                    (
+                        s.text.as_ref().map(|t| t.sections.iter().map(|s| s.text.as_str()).collect()),
+                        s.f.geometry.first().cloned().unwrap_or_default(),
+                    )
+                })
                 .collect();
             let merged = anchors::merge_lines(&items);
             features = features
@@ -512,7 +568,11 @@ impl Builder<'_> {
                     [o[0] * ONE_EM, o[1] * ONE_EM]
                 };
             }
-            let mut justify = if along_line { "center".to_string() } else { lay("text-justify").as_str().unwrap_or("center").to_string() };
+            let mut justify = if along_line {
+                "center".to_string()
+            } else {
+                lay("text-justify").as_str().unwrap_or("center").to_string()
+            };
             let max_width = if res.placement == "point" { num(&lay("text-max-width")) * ONE_EM } else { f64::INFINITY };
             let shape_mode = |anchor: &str, justify: &str, mode: WritingMode, allow_vertical: bool| {
                 shaping::shape_text(
@@ -535,7 +595,11 @@ impl Builder<'_> {
             let shape = |anchor: &str, justify: &str| shape_mode(anchor, justify, WritingMode::Horizontal, false);
             let can_vertical = unicode::allows_vertical_writing_mode(&unformatted);
             // Vertical point labels (`text-writing-mode`) use left justification.
-            let point_vertical = || (bucket.allow_vertical_placement && can_vertical).then(|| shape_mode(&text_anchor, "left", WritingMode::Vertical, true)).flatten();
+            let point_vertical = || {
+                (bucket.allow_vertical_placement && can_vertical)
+                    .then(|| shape_mode(&text_anchor, "left", WritingMode::Vertical, true))
+                    .flatten()
+            };
             let static_j = |j: &str| -> &'static str {
                 match j {
                     "left" => "left",
@@ -585,7 +649,8 @@ impl Builder<'_> {
         let mut is_sdf_icon = false;
         if let Some(img) = feature.icon.as_ref().and_then(|n| self.ctx.images.get(n)) {
             let offset = num2(&lay("icon-offset"));
-            shaped_icon = Some(shaping::shape_icon(img.clone(), offset, lay("icon-anchor").as_str().unwrap_or("center")));
+            shaped_icon =
+                Some(shaping::shape_icon(img.clone(), offset, lay("icon-anchor").as_str().unwrap_or("center")));
             is_sdf_icon = img.sdf;
             if sdf_icons.is_none() {
                 *sdf_icons = Some(is_sdf_icon);
@@ -670,12 +735,24 @@ impl Builder<'_> {
         match res.placement.as_str() {
             "line" => {
                 for line in anchors::clip_line(geometry, 0.0, 0.0, EXTENT, EXTENT) {
-                    let found = anchors::line_anchors(&line, symbol_min_distance, text_max_angle, window, label_length, text_max_box_scale, overscaling, EXTENT);
+                    let found = anchors::line_anchors(
+                        &line,
+                        symbol_min_distance,
+                        text_max_angle,
+                        window,
+                        label_length,
+                        text_max_box_scale,
+                        overscaling,
+                        EXTENT,
+                    );
                     for anchor in found {
                         let too_close = match &default_shaping {
                             Some(s) => {
                                 let others = compare_text.entry(s.text.clone()).or_default();
-                                let close = others.iter().rev().any(|o| anchors::dist(*o, [anchor.x, anchor.y]) < text_repeat_distance);
+                                let close = others
+                                    .iter()
+                                    .rev()
+                                    .any(|o| anchors::dist(*o, [anchor.x, anchor.y]) < text_repeat_distance);
                                 if !close {
                                     others.push([anchor.x, anchor.y]);
                                 }
@@ -691,7 +768,9 @@ impl Builder<'_> {
             }
             "line-center" => {
                 for line in geometry.iter().filter(|l| l.len() > 1) {
-                    if let Some(anchor) = anchors::center_anchor(line, text_max_angle, window, label_length * text_max_box_scale) {
+                    if let Some(anchor) =
+                        anchors::center_anchor(line, text_max_angle, window, label_length * text_max_box_scale)
+                    {
                         add(bucket, line, anchor);
                     }
                 }
@@ -724,21 +803,22 @@ impl Builder<'_> {
     fn variable_anchor_offset(&self, f: &BucketFeature, tile: &RenderTile) -> Option<Vec<(String, P)>> {
         let raw = &self.raw["layout"];
         if raw.get("text-variable-anchor-offset").is_some_and(|v| !v.is_null())
-            && let Value::VariableAnchorOffsetCollection(v) = self.lay("text-variable-anchor-offset", Some(f), tile) {
-                let mut out = Vec::new();
-                for pair in v.chunks(2) {
-                    let anchor = pair[0].as_str().unwrap_or("center").to_string();
-                    let o = num2(&pair[1]);
-                    let mut offset = [o[0] * ONE_EM, o[1] * ONE_EM];
-                    if anchor.starts_with("top") {
-                        offset[1] -= BASELINE_OFFSET;
-                    } else if anchor.starts_with("bottom") {
-                        offset[1] += BASELINE_OFFSET;
-                    }
-                    out.push((anchor, offset));
+            && let Value::VariableAnchorOffsetCollection(v) = self.lay("text-variable-anchor-offset", Some(f), tile)
+        {
+            let mut out = Vec::new();
+            for pair in v.chunks(2) {
+                let anchor = pair[0].as_str().unwrap_or("center").to_string();
+                let o = num2(&pair[1]);
+                let mut offset = [o[0] * ONE_EM, o[1] * ONE_EM];
+                if anchor.starts_with("top") {
+                    offset[1] -= BASELINE_OFFSET;
+                } else if anchor.starts_with("bottom") {
+                    offset[1] += BASELINE_OFFSET;
                 }
-                return Some(out);
+                out.push((anchor, offset));
             }
+            return Some(out);
+        }
         if !raw.get("text-variable-anchor").is_some_and(|v| !v.is_null()) {
             return None;
         }
@@ -752,13 +832,25 @@ impl Builder<'_> {
             let o = num2(&self.lay("text-offset", Some(f), tile));
             [o[0] * ONE_EM, o[1] * ONE_EM]
         };
-        Some(anchors.into_iter().map(|a| {
-            let o = evaluate_variable_offset(&a, offset);
-            (a, o)
-        }).collect())
+        Some(
+            anchors
+                .into_iter()
+                .map(|a| {
+                    let o = evaluate_variable_offset(&a, offset);
+                    (a, o)
+                })
+                .collect(),
+        )
     }
 
-    fn add_symbol(&self, bucket: &mut SymbolBucket, feature: &SymbolFeature, anchor: Anchor, line: &[P], c: &AddSymbol) {
+    fn add_symbol(
+        &self,
+        bucket: &mut SymbolBucket,
+        feature: &SymbolFeature,
+        anchor: Anchor,
+        line: &[P],
+        c: &AddSymbol,
+    ) {
         let tile = bucket.tile;
         let zoom = tile.overscaled_z as f64;
         let f = &feature.f;
@@ -773,9 +865,25 @@ impl Builder<'_> {
         let mut vertical_icon_box = None;
         if let (true, Some(v)) = (allow_vertical, c.vertical) {
             let rot = text_rotate + 90.0;
-            vertical_text_box = collision_box(&anchor, CollisionShape::Text(v), c.text_box_scale, [c.text_padding; 4], c.text_along_line, rot, &mut circle_diameter);
+            vertical_text_box = collision_box(
+                &anchor,
+                CollisionShape::Text(v),
+                c.text_box_scale,
+                [c.text_padding; 4],
+                c.text_along_line,
+                rot,
+                &mut circle_diameter,
+            );
             if let Some(vi) = c.vertical_icon {
-                vertical_icon_box = collision_box(&anchor, CollisionShape::Icon(vi), c.icon_box_scale, c.icon_padding, c.text_along_line, rot, &mut circle_diameter);
+                vertical_icon_box = collision_box(
+                    &anchor,
+                    CollisionShape::Icon(vi),
+                    c.icon_box_scale,
+                    c.icon_padding,
+                    c.text_along_line,
+                    rot,
+                    &mut circle_diameter,
+                );
             }
         }
         let symbol = |quads: Vec<Quad>, size: [f64; 2], line_offset: P, writing_mode: WritingMode| PlacedSymbol {
@@ -795,7 +903,15 @@ impl Builder<'_> {
         let mut num_icon_vertices = 0;
         if let Some(icon) = c.shaped_icon {
             let quads = icon_quads(icon, icon_rotate, c.is_sdf_icon, c.has_icon_text_fit);
-            icon_box = collision_box(&anchor, CollisionShape::Icon(icon), c.icon_box_scale, c.icon_padding, false, icon_rotate, &mut circle_diameter);
+            icon_box = collision_box(
+                &anchor,
+                CollisionShape::Icon(icon),
+                c.icon_box_scale,
+                c.icon_padding,
+                false,
+                icon_rotate,
+                &mut circle_diameter,
+            );
             num_icon_vertices = quads.len() * 4;
             bucket.icon.push(symbol(quads, icon_size, c.icon_offset, WritingMode::Horizontal));
             icon_index = Some(bucket.icon.len() - 1);
@@ -814,7 +930,15 @@ impl Builder<'_> {
         for (j, shaping) in c.horizontal {
             if text_box.is_none() && text_circle.is_none() {
                 let mut d = None;
-                text_box = collision_box(&anchor, CollisionShape::Text(shaping), c.text_box_scale, [c.text_padding; 4], c.text_along_line, text_rotate, &mut d);
+                text_box = collision_box(
+                    &anchor,
+                    CollisionShape::Text(shaping),
+                    c.text_box_scale,
+                    [c.text_padding; 4],
+                    c.text_along_line,
+                    text_rotate,
+                    &mut d,
+                );
                 text_circle = Some(d);
             }
             let single = shaping.lines.len() == 1;
@@ -875,7 +999,14 @@ impl Builder<'_> {
     }
 
     /// Packed `a_size` for source/composite sizes.
-    fn packed_size(&self, data: &SizeData, prop: &PropValue, f: &BucketFeature, tile: &RenderTile, zoom: f64) -> [f64; 2] {
+    fn packed_size(
+        &self,
+        data: &SizeData,
+        prop: &PropValue,
+        f: &BucketFeature,
+        tile: &RenderTile,
+        zoom: f64,
+    ) -> [f64; 2] {
         let pack = |v: f64| js_round(v * SIZE_PACK_FACTOR).min(MAX_PACKED_SIZE);
         let at = |z: f64| num(&prop.eval(z, Some(&f.feature), Some(Ctx::canonical(tile)), self.ctx.global_state));
         match data {
@@ -983,11 +1114,21 @@ enum CollisionShape<'a> {
 }
 
 /// `CollisionFeature`: one Int16 box, or (along lines) just the circle diameter.
-fn collision_box(anchor: &Anchor, shape: CollisionShape, scale: f64, padding: [f64; 4], align_line: bool, rotate: f64, circle: &mut Option<f64>) -> Option<CollisionBox> {
+fn collision_box(
+    anchor: &Anchor,
+    shape: CollisionShape,
+    scale: f64,
+    padding: [f64; 4],
+    align_line: bool,
+    rotate: f64,
+    circle: &mut Option<f64>,
+) -> Option<CollisionBox> {
     let (mut b, collision_padding) = match shape {
         CollisionShape::Text(s) => ([s.left, s.top, s.right, s.bottom], None),
         CollisionShape::Icon(i) => {
-            let b = if i.image.content.is_some() && (i.image.text_fit_width.is_some() || i.image.text_fit_height.is_some()) {
+            let b = if i.image.content.is_some()
+                && (i.image.text_fit_width.is_some() || i.image.text_fit_height.is_some())
+            {
                 shaping::apply_text_fit(i)
             } else {
                 [i.left, i.top, i.right, i.bottom]
@@ -1018,7 +1159,8 @@ fn collision_box(anchor: &Anchor, shape: CollisionShape, scale: f64, padding: [f
     if rotate != 0.0 {
         let r = rotate.to_radians();
         let (s, c) = r.sin_cos();
-        let pts = [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]].map(|p| [p[0] * c - p[1] * s, p[0] * s + p[1] * c]);
+        let pts = [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]
+            .map(|p| [p[0] * c - p[1] * s, p[0] * s + p[1] * c]);
         b = [
             pts.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
             pts.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min),
@@ -1026,7 +1168,13 @@ fn collision_box(anchor: &Anchor, shape: CollisionShape, scale: f64, padding: [f
             pts.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max),
         ];
     }
-    Some(CollisionBox { anchor: [int16(anchor.x), int16(anchor.y)], x1: int16(b[0]), y1: int16(b[1]), x2: int16(b[2]), y2: int16(b[3]) })
+    Some(CollisionBox {
+        anchor: [int16(anchor.x), int16(anchor.y)],
+        x1: int16(b[0]),
+        y1: int16(b[1]),
+        x2: int16(b[2]),
+        y2: int16(b[3]),
+    })
 }
 
 fn rotate_quad(corners: &mut [P; 4], radians: f64) {
@@ -1041,7 +1189,13 @@ fn rotate_quad(corners: &mut [P; 4], radians: f64) {
 }
 
 /// `getGlyphQuads`: vertical glyphs are pre-rotated -90° (the label is turned at render).
-fn glyph_quads(shaping: &Shaping, text_offset: P, along_line: bool, text_rotate_deg: f64, allow_vertical_placement: bool) -> Vec<Quad> {
+fn glyph_quads(
+    shaping: &Shaping,
+    text_offset: P,
+    along_line: bool,
+    text_rotate_deg: f64,
+    allow_vertical_placement: bool,
+) -> Vec<Quad> {
     let rotate = text_rotate_deg * std::f64::consts::PI / 180.0;
     let mut quads = Vec::new();
     for line in &shaping.lines {
@@ -1062,7 +1216,11 @@ fn glyph_quads(shaping: &Shaping, text_offset: P, along_line: bool, text_rotate_
                 line_offset = line.line_offset / 2.0 - if is_image { -image_offset } else { scaled_glyph_offset };
             }
             let glyph_offset = if along_line { [g.x + half_advance, g.y] } else { [0.0, 0.0] };
-            let mut built_in = if along_line { [0.0, 0.0] } else { [g.x + half_advance + text_offset[0], g.y + text_offset[1] - line_offset] };
+            let mut built_in = if along_line {
+                [0.0, 0.0]
+            } else {
+                [g.x + half_advance + text_offset[0], g.y + text_offset[1] - line_offset]
+            };
             let mut verticalized_offset = [0.0, 0.0];
             if rotate_vertical {
                 verticalized_offset = built_in;
@@ -1125,7 +1283,9 @@ fn icon_quads(icon: &PositionedIcon, rotate_deg: f64, is_sdf: bool, has_icon_tex
         if image.text_fit_width.is_some() || image.text_fit_height.is_some() {
             b = shaping::apply_text_fit(icon);
         }
-        let within = |r: &[[f64; 2]], min: f64, max: f64| r.iter().map(|r| min.max(max.min(r[1])) - min.max(max.min(r[0]))).sum::<f64>();
+        let within = |r: &[[f64; 2]], min: f64, max: f64| {
+            r.iter().map(|r| min.max(max.min(r[1])) - min.max(max.min(r[0]))).sum::<f64>()
+        };
         so_x = within(&stretch_x, 0.0, c[0]);
         so_y = within(&stretch_y, 0.0, c[1]);
         sc_w = within(&stretch_x, c[0], c[2]);
@@ -1141,8 +1301,11 @@ fn icon_quads(icon: &PositionedIcon, rotate_deg: f64, is_sdf: bool, has_icon_tex
         fixed: f64,
         stretch: f64,
     }
-    let em = |stretch_offset: f64, stretch_size: f64, size: f64, offset: f64| stretch_offset / stretch_size * size + offset;
-    let px = |fixed_offset: f64, fixed_size: f64, stretch_offset: f64, stretch_size: f64| fixed_offset - fixed_size * stretch_offset / stretch_size;
+    let em =
+        |stretch_offset: f64, stretch_size: f64, size: f64, offset: f64| stretch_offset / stretch_size * size + offset;
+    let px = |fixed_offset: f64, fixed_size: f64, stretch_offset: f64, stretch_size: f64| {
+        fixed_offset - fixed_size * stretch_offset / stretch_size
+    };
     let make = |l: Cut, t: Cut, r: Cut, bo: Cut| {
         let left_em = em(l.stretch - so_x, sc_w, icon_w, icon_left);
         let left_px = px(l.fixed - fo_x, fc_w, l.stretch, stretch_w);
