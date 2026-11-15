@@ -10,7 +10,7 @@
  * @module
  */
 import { createRequire } from 'node:module';
-import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 
 /**
  * A camera, of Web Mercator ({@link Renderer.renderView}) or of a CRS ({@link ProjectedRenderer.renderView}). Every
@@ -119,12 +119,6 @@ export interface RendererOptions {
    * through as written in the style. Loads within each stage run concurrently. Default: `fetch`.
    */
   loadResource?: (url: string) => Promise<Uint8Array | null>;
-  /**
-   * Replace each layer of a type the renderer does not draw (fill-extrusion) with any number of
-   * layers. Default: a fill-extrusion becomes a fill preserving its 2D appearance, any other is
-   * dropped. Layers of supported types are not passed; unsupported layers returned are skipped.
-   */
-  transformLayer?: (layer: LayerSpecification) => LayerSpecification[];
 }
 
 /** The addon's sans-IO renderer. Calls on one renderer must not overlap. */
@@ -179,40 +173,10 @@ async function fetchResource(url: string): Promise<Uint8Array | null> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-// The same replacement as `@ml2drender/wasm`: keep the two in step.
-const SUPPORTED_LAYERS = new Set<string>(['background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap']);
-
-function flattenFillExtrusion(layer: FillExtrusionLayerSpecification): FillLayerSpecification {
-  const { type, paint, layout, ...base } = layer;
-  // Shared paint properties have the same defaults; absent values stay unset. Expressions stay intact.
-  return {
-    ...base,
-    type: 'fill',
-    layout: { visibility: layout?.visibility },
-    paint: {
-      'fill-color': paint?.['fill-extrusion-color'],
-      'fill-opacity': paint?.['fill-extrusion-opacity'],
-      'fill-pattern': paint?.['fill-extrusion-pattern'],
-      'fill-translate': paint?.['fill-extrusion-translate'],
-      'fill-translate-anchor': paint?.['fill-extrusion-translate-anchor'],
-    },
-  };
-}
-
-function transformUnsupported(layer: LayerSpecification): LayerSpecification[] {
-  return layer.type === 'fill-extrusion' ? [flattenFillExtrusion(layer)] : [];
-}
-
-function styleJson(style: StyleSpecification, transform: NonNullable<RendererOptions['transformLayer']> = transformUnsupported): string {
+function styleJson(style: StyleSpecification): string {
   // A JSON string would stringify to a valid, empty style and draw nothing.
   if (!style || typeof style !== 'object' || !Array.isArray(style.layers)) throw new TypeError('style must be a style object with layers');
-  const layers = style.layers.flatMap((layer: LayerSpecification) => {
-    if (!layer || typeof layer !== 'object' || SUPPORTED_LAYERS.has(layer.type)) return [layer];
-    const replacement = transform(layer);
-    if (!Array.isArray(replacement)) throw new TypeError(`transformLayer must return an array of layers (layer ${layer.id})`);
-    return replacement;
-  });
-  return JSON.stringify({ ...style, layers });
+  return JSON.stringify(style);
 }
 
 /**
@@ -235,7 +199,7 @@ export class Renderer {
    * @param style - The style, with absolute resource URLs. Throws a `TypeError` if it is not a style object.
    */
   constructor(style: StyleSpecification, options: RendererOptions = {}) {
-    this.#style = styleJson(style, options.transformLayer);
+    this.#style = styleJson(style);
     this.#loadResource = options.loadResource ?? fetchResource;
   }
 

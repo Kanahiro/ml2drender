@@ -11,7 +11,7 @@
 - **Made for serverless.** The core does no network or file I/O; the host fetches everything.
 
 > [!NOTE]
-> ml2drender draws flat 2D maps. 3D features (fill-extrusion, terrain, globe, pitch) are out of scope; fill-extrusion layers are drawn as fills by default. Styles are fixed when a renderer is created: there is no API for changing a style at runtime.
+> ml2drender draws flat 2D maps. 3D features (fill-extrusion, terrain, globe, pitch) are out of scope; layers of types it does not draw (fill-extrusion) are skipped, so rewrite them in the style beforehand if you want them drawn (for example as fills). Styles are fixed when a renderer is created: there is no API for changing a style at runtime.
 
 ## Quick start
 
@@ -113,7 +113,6 @@ Takes a style object (the official `StyleSpecification` type) and loads the WASM
 | `loadResource` | HTTP `fetch` | `(url) => Promise<Uint8Array \| null>`. Fetches tiles, TileJSON, sprites and glyphs. Return `null` (HTTP 404) for a missing resource and rendering goes on without it; any other failure should reject. Concurrency limits, retries and caching belong here. |
 | `wasm` | bundled WASM | A compiled `WebAssembly.Module`. Required in Node.js and Cloudflare Workers. |
 | `cache.ttlMs` | `300_000` | How long the renderer inside WASM (decoded tiles, geometry, glyphs) is reused across renders. `0` creates and frees one per render, for the least memory; `Infinity` never expires. |
-| `transformLayer` | fill-extrusion to fill | `(layer) => LayerSpecification[]`. Replaces each layer of a type the renderer does not draw (fill-extrusion) with any number of layers. By default a fill-extrusion becomes a fill with the same color, opacity, pattern and translation, and any other is dropped. |
 
 Concurrent requests for the same URL are fetched once. Fetched bytes are not cached: rely on the browser's HTTP cache, or cache inside `loadResource` (for example with the Cache API on Workers).
 

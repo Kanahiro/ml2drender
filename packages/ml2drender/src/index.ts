@@ -1,4 +1,4 @@
-import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification, SourceSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
+import type { LayerSpecification, SourceSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 
 /** A camera, of Web Mercator (`MapRenderer.renderView`) or of a CRS (`ProjectedRenderer.renderView`). */
 export interface View {
@@ -141,7 +141,7 @@ export interface ProjectedRenderer {
    * `getTile`, whose URL templates (`{z}/{x}/{y}` of the CRS's grid) `tiles` gives for each source: vector and
    * GeoJSON sources become vector sources (layers of a GeoJSON source read the layer named after it), raster and
    * image sources raster sources, raster-dem sources terrarium ones, all of 512 px tiles. Layers of other sources
-   * (video) are left out. The style is the one given to `init`, fill-extrusion layers included.
+   * (video) are left out. The style is the one given to `init`.
    */
   toStyle(options: { tiles: (source: string) => string }): StyleSpecification;
 }
@@ -161,9 +161,6 @@ export interface RenderedImage {
   /** Encode `data` inside WASM as an owned JPEG of `quality` (1–100), flattened over black. */
   toJpeg(quality: number): Uint8Array<ArrayBuffer>;
 }
-
-/** Style Spec layers supported by the 2D renderer. */
-export type StyleLayer = Exclude<LayerSpecification, FillExtrusionLayerSpecification>;
 
 export type { StyleSpecification };
 
@@ -185,12 +182,6 @@ export interface InitOptions {
     /** Milliseconds; 0 or `Infinity` included. Default: 300 000 (5 minutes). */
     ttlMs?: number;
   };
-  /**
-   * Replace each layer of a type the renderer does not draw (fill-extrusion) with any number of
-   * layers. Default: a fill-extrusion becomes a fill preserving its 2D appearance, any other is
-   * dropped. Layers of supported types are not passed; unsupported layers returned are skipped.
-   */
-  transformLayer?: (layer: LayerSpecification) => LayerSpecification[];
 }
 
 interface WasmExports {
@@ -232,9 +223,6 @@ interface Core {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
-const SUPPORTED_LAYERS = new Set<string>([
-  'background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap',
-] satisfies StyleLayer['type'][]);
 
 async function fetchResource(url: string): Promise<Uint8Array<ArrayBuffer> | null> {
   const response = await fetch(url);
@@ -388,43 +376,11 @@ function nonnegative(value: number, name: string): number {
   return value;
 }
 
-function flattenFillExtrusion(layer: FillExtrusionLayerSpecification): FillLayerSpecification {
-  const { type, paint, layout, ...base } = layer;
-  // Shared paint properties have the same defaults; leaving absent values unset
-  // preserves them without duplicating Style Spec defaults. Expressions stay intact.
-  return {
-    ...base,
-    type: 'fill',
-    layout: { visibility: layout?.visibility },
-    paint: {
-      'fill-color': paint?.['fill-extrusion-color'],
-      'fill-opacity': paint?.['fill-extrusion-opacity'],
-      'fill-pattern': paint?.['fill-extrusion-pattern'],
-      'fill-translate': paint?.['fill-extrusion-translate'],
-      'fill-translate-anchor': paint?.['fill-extrusion-translate-anchor'],
-      'fill-color-transition': paint?.['fill-extrusion-color-transition'],
-      'fill-opacity-transition': paint?.['fill-extrusion-opacity-transition'],
-      'fill-pattern-transition': paint?.['fill-extrusion-pattern-transition'],
-      'fill-translate-transition': paint?.['fill-extrusion-translate-transition'],
-    },
-  };
-}
-
-function transformUnsupported(layer: LayerSpecification): LayerSpecification[] {
-  return layer.type === 'fill-extrusion' ? [flattenFillExtrusion(layer)] : [];
-}
-
-function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOptions['transformLayer']> = transformUnsupported): Uint8Array {
+function prepareStyle(style: StyleSpecification): Uint8Array {
   if (!style || typeof style !== 'object' || !Array.isArray(style.layers)) {
     throw new Error('Style must contain a layers array');
   }
-  const layers = style.layers.flatMap((layer: LayerSpecification) => {
-    if (!layer || typeof layer !== 'object' || SUPPORTED_LAYERS.has(layer.type)) return [layer];
-    const replacement = transform(layer);
-    if (!Array.isArray(replacement)) throw new TypeError(`transformLayer must return an array of layers (layer ${layer.id})`);
-    return replacement;
-  });
-  return encoder.encode(JSON.stringify({ ...style, layers }));
+  return encoder.encode(JSON.stringify(style));
 }
 
 /**
@@ -480,7 +436,7 @@ export class MapRenderer {
     const ttlMs = options.cache?.ttlMs ?? DEFAULT_TTL_MS;
     if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
     const loadResource = options.loadResource ?? fetchResource;
-    const prepared = prepareStyle(style, options.transformLayer);
+    const prepared = prepareStyle(style);
     const instance = ttlMs === 0 ? sharedWasm(options.wasm) : loadWasm(options.wasm);
     return new MapRenderer(options.wasm, instance, await instance, prepared, structuredClone(style), loadResource, ttlMs);
   }

@@ -23,30 +23,6 @@ __all__ = [
 ]
 
 
-Layer = dict[str, Any]
-TransformLayer = Callable[[Layer], list[Layer]]
-
-_SUPPORTED_LAYERS = frozenset(
-    {"background", "fill", "line", "circle", "raster", "symbol", "hillshade", "color-relief", "heatmap"}
-)
-_FLAT_PAINT = ("color", "opacity", "pattern", "translate", "translate-anchor")
-
-
-def _transform_unsupported(layer: Layer) -> list[Layer]:
-    """The same replacement as the JavaScript packages: a fill-extrusion becomes a fill, others are dropped."""
-    if layer.get("type") != "fill-extrusion":
-        return []
-    paint = layer.get("paint") or {}
-    layout = layer.get("layout") or {}
-    fill = {key: value for key, value in layer.items() if key not in ("paint", "layout")}
-    fill["type"] = "fill"
-    # Shared paint properties have the same defaults, so absent ones stay unset.
-    fill["paint"] = {f"fill-{p}": paint[f"fill-extrusion-{p}"] for p in _FLAT_PAINT if f"fill-extrusion-{p}" in paint}
-    if "visibility" in layout:
-        fill["layout"] = {"visibility": layout["visibility"]}
-    return [fill]
-
-
 class TileMatrixSet(NamedTuple):
     """The tile grid of a CRS, as MapLibre GL JS's ``TileMatrixSet`` (``addProjection``).
 
@@ -67,11 +43,6 @@ class Renderer:
     exceptions propagate out of the render. By default resources are fetched with HTTPX
     (HTTP 404 means missing). URLs are passed through as written in the style; use absolute URLs.
 
-    ``transform_layer(layer)`` replaces each layer of a type the renderer does not draw
-    (fill-extrusion) with a list of layers. By default a fill-extrusion becomes a fill keeping its
-    2D appearance and any other is dropped. Layers of supported types are not passed; unsupported
-    layers returned are skipped.
-
     Raises ``TypeError`` if ``style`` is not a JSON-serializable dict with a ``layers`` list.
     Not thread-safe: use it from one thread. Requires asyncio.
     """
@@ -80,21 +51,10 @@ class Renderer:
         self,
         style: dict[str, Any],
         load: Callable[[str], Awaitable[bytes | None]] | None = None,
-        transform_layer: TransformLayer | None = None,
     ) -> None:
         if not isinstance(style, dict) or not isinstance(style.get("layers"), list):
             raise TypeError("style must be a dict with a layers list")
-        transform_layer = transform_layer or _transform_unsupported
-        layers = []
-        for layer in style["layers"]:
-            if not isinstance(layer, dict) or layer.get("type") in _SUPPORTED_LAYERS:
-                layers.append(layer)
-                continue
-            replacement = transform_layer(layer)
-            if not isinstance(replacement, list):
-                raise TypeError(f"transform_layer must return a list of layers (layer {layer.get('id')})")
-            layers += replacement
-        self._style = json.dumps({**style, "layers": layers})
+        self._style = json.dumps(style)
         self._load = load
         self._native: _native.Renderer | None = None
         # The native renderer has one view: renders of one renderer take turns.

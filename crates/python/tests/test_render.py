@@ -33,8 +33,8 @@ async def load(url):
     return POINTS if url == "test://points.geojson" else None
 
 
-async def render(style, view, load=None, transform_layer=None):
-    return await ml2drender.Renderer(style, load, transform_layer).render_view(view)
+async def render(style, view, load=None):
+    return await ml2drender.Renderer(style, load).render_view(view)
 
 
 def two_sources(first, second):
@@ -121,7 +121,7 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         mercator = await renderer.render_view(ml2drender.View((140.0, 37.0), 4.0, 64, 32))
         self.assertEqual(mercator[(16 * 64 + 32) * 4 :][:4], bytes(red))
 
-    async def test_transform_layer(self):
+    async def test_unsupported_layers_skipped(self):
         box = [[[130, 30], [150, 30], [150, 45], [130, 45], [130, 30]]]
         style = {
             "version": 8,
@@ -143,27 +143,9 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
             ],
         }
         view = ml2drender.View((140.0, 37.0), 4.0, 64, 32)
-
-        async def center(transform_layer=None):
-            rgba = await render(style, view, transform_layer=transform_layer)
-            return tuple(rgba[(16 * 64 + 32) * 4 :][:4])
-
-        # By default a fill-extrusion becomes a fill and other unsupported layers are dropped.
-        self.assertEqual(await center(), (0, 0, 255, 255))
-        self.assertEqual(await center(lambda layer: []), (255, 255, 255, 255))
-        # Unsupported layers that come back are skipped.
-        self.assertEqual(await center(lambda layer: [layer]), (255, 255, 255, 255))
-        seen = []
-
-        def custom(layer):
-            seen.append(layer["id"])
-            green = {"id": "a", "type": "fill", "source": "box", "paint": {"fill-color": "#00ff00"}}
-            return [green, {"id": "b", "type": "line", "source": "box"}] if layer["id"] == "box" else []
-
-        self.assertEqual(await center(custom), (0, 255, 0, 255))
-        self.assertEqual(seen, ["box", "future"])
-        with self.assertRaises(TypeError):
-            ml2drender.Renderer(style, transform_layer=lambda layer: layer)
+        rgba = await render(style, view)
+        # fill-extrusion and unknown types are left out: only the background shows.
+        self.assertEqual(tuple(rgba[(16 * 64 + 32) * 4 :][:4]), (255, 255, 255, 255))
 
     async def test_custom_missing(self):
         view = ml2drender.View((140.0, 37.0), 4.0, 64, 32)

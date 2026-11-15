@@ -46,7 +46,6 @@ The renderer fetches TileJSON, GeoJSON, sprites, tiles and glyph ranges with the
 | Option | Default | Description |
 |---|---|---|
 | `loadResource` | HTTP `fetch` | `(url: string) => Promise<Uint8Array \| null>`, for authentication, caching or non-HTTP sources. Return `null` only for a missing resource; reject for other failures. Loads within a stage run concurrently. Fetched bytes are not cached: cache in your loader if needed. |
-| `transformLayer` | fill-extrusion to fill | `(layer) => LayerSpecification[]`. Replaces each layer of a type the renderer does not draw (fill-extrusion) with any number of layers. By default a fill-extrusion becomes a fill with the same color, opacity, pattern and translation, and any other is dropped. |
 
 ### `renderer.renderView(view)`
 

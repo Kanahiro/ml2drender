@@ -63,7 +63,7 @@ async with httpx.AsyncClient(headers={"Authorization": "Bearer ..."}, follow_red
 
 | | |
 |---|---|
-| `Renderer(style, load=None, transform_layer=None)` | A renderer of `style` (the style JSON as a `dict`), fixed for its life. `load` is an optional async `load(url) -> bytes \| None`; `transform_layer` is described below. Not thread-safe. |
+| `Renderer(style, load=None)` | A renderer of `style` (the style JSON as a `dict`), fixed for its life. `load` is an optional async `load(url) -> bytes \| None`. Not thread-safe. |
 | `await renderer.render_view(view)` | Non-premultiplied RGBA8 pixels (`bytes`, row by row) of `view`, after loading the resources it needs. Requires asyncio. |
 | `View(center, zoom, width, height, bearing=0.0, pixel_ratio=1.0, margin=0)` | A Web Mercator camera. `center` is (lng, lat) in degrees; `zoom` is the MapLibre zoom (the world is `512 * 2**zoom` CSS pixels wide); `bearing` is degrees clockwise. The image is `width` x `height` CSS pixels, times `pixel_ratio` in pixels. `margin` CSS pixels are drawn around it and cropped, so labels near the edge are placed as in a larger map. |
 | `View.tile(z, x, y, tile_size=256)` | The XYZ tile `z/x/y`, `tile_size` CSS pixels square. |
@@ -79,7 +79,7 @@ async with httpx.AsyncClient(headers={"Authorization": "Bearer ..."}, follow_red
 | `encode_webp(rgba, width, height)` | Lossless WebP. |
 | `encode_jpeg(rgba, width, height, quality=90)` | JPEG, flattened over black. |
 
-`transform_layer(layer) -> list[dict]` replaces each layer of a type the renderer does not draw (fill-extrusion) with a list of layers. By default a fill-extrusion becomes a fill with the same color, opacity, pattern and translation, and any other is dropped.
+Layers of types the renderer does not draw (fill-extrusion) are skipped; rewrite them in the style beforehand if you want them drawn.
 
 A `style` that is not a JSON-serializable `dict` raises `TypeError`; rendering errors raise `RuntimeError`. Type hints and docstrings ship with the package (inline Python annotations, `_native.pyi` and `py.typed`). The sans-IO steps (`needs` / `provide` / `render`) stay in `ml2drender._native.Renderer`, which is not a public API.
 
