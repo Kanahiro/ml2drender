@@ -26,7 +26,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-transform-types tests/render.ts"
+    "test": "node tests/render.ts"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

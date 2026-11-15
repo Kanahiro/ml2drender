@@ -1,5 +1,5 @@
 // The addon renders a style through the needs → provide loop and encodes the result.
-// Run: node --experimental-transform-types tests/render.ts (after pnpm build:native)
+// Run: node tests/render.ts (after pnpm build:native)
 import assert from 'node:assert/strict';
 import { encodeJpeg, encodePng, encodeWebp, Renderer } from '../src/index.ts';
 

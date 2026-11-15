@@ -104,7 +104,7 @@ jobs:
         run: pip install cargo-zigbuild ziglang && echo GLIBC=2.34 >> "$GITHUB_ENV"
       - run: pnpm build:native
       - name: Test the addon
-        run: node --experimental-transform-types packages/ml2drender-node/tests/render.ts
+        run: node packages/ml2drender-node/tests/render.ts
       - uses: actions/upload-artifact@v4
         with:
           name: napi-${{ matrix.platform }}-${{ matrix.arch }}

@@ -1,6 +1,6 @@
 // `projected(crs).renderView` is GL JS's camera on the CRS's grid: `center` lands on the middle of the
 // image, a CSS pixel is `extentAtZoom0 / (512 * 2^zoom)` CRS units, and `bearing` turns the map around `center`.
-// Run: node --experimental-transform-types tests/projected-view.ts (after pnpm build:wasm)
+// Run: node tests/projected-view.ts (after pnpm build:wasm)
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { loadProjection, MapRenderer, type StyleSpecification } from '../src/index.ts';

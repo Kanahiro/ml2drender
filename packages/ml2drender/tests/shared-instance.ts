@@ -1,7 +1,7 @@
 // Renderers share one WASM instance per module. A renderer with ttlMs 0 frees its WASM renderer
 // after each render, so serving many requests (e.g. a Cloudflare Workers isolate creating a
 // renderer per request) reuses the same memory instead of growing it.
-// Run: node --experimental-transform-types tests/shared-instance.ts (after pnpm build:wasm)
+// Run: node tests/shared-instance.ts (after pnpm build:wasm)
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { MapRenderer, type StyleSpecification } from '../src/index.ts';

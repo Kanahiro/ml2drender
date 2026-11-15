@@ -26,7 +26,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-transform-types tests/single-flight.ts && node --experimental-transform-types tests/shared-instance.ts && node --experimental-transform-types tests/projected-view.ts",
+    "test": "node tests/single-flight.ts && node tests/shared-instance.ts && node tests/projected-view.ts",
     "docs": "typedoc"
   },
   "peerDependencies": {

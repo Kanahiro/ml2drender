@@ -479,16 +479,32 @@ export class MapRenderer {
   private readonly tickets = new Set<number>();
   private lastTicket = 0;
 
+  private readonly module: WebAssembly.Module | undefined;
+  private readonly instance: Promise<WasmExports>;
+  private readonly wasm: WasmExports;
+  private readonly style: Uint8Array;
+  /** The style as given, for `toStyle`. */
+  private readonly original: StyleSpecification;
+  private readonly loadResource: NonNullable<InitOptions['loadResource']>;
+  private readonly ttlMs: number;
+
   private constructor(
-    private readonly module: WebAssembly.Module | undefined,
-    private readonly instance: Promise<WasmExports>,
-    private readonly wasm: WasmExports,
-    private readonly style: Uint8Array,
-    /** The style as given, for `toStyle`. */
-    private readonly original: StyleSpecification,
-    private readonly loadResource: NonNullable<InitOptions['loadResource']>,
-    private readonly ttlMs: number,
-  ) {}
+    module: WebAssembly.Module | undefined,
+    instance: Promise<WasmExports>,
+    wasm: WasmExports,
+    style: Uint8Array,
+    original: StyleSpecification,
+    loadResource: NonNullable<InitOptions['loadResource']>,
+    ttlMs: number,
+  ) {
+    this.module = module;
+    this.instance = instance;
+    this.wasm = wasm;
+    this.style = style;
+    this.original = original;
+    this.loadResource = loadResource;
+    this.ttlMs = ttlMs;
+  }
 
   /** Snapshot a style object and load the renderer. Resource URLs are passed to `loadResource` as written. */
   static async init(style: StyleSpecification, options: InitOptions = {}): Promise<MapRenderer> {
