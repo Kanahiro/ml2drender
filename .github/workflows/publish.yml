@@ -1,0 +1,98 @@
+# Publish the version in the repository (all packages share it) to npm and PyPI.
+#   npm:  ml2drender, ml2drender-node and its platform packages (ml2drender-node-<platform>-<arch>)
+#   PyPI: ml2drender (wheels and sdist)
+# Both use trusted publishing (OIDC) with provenance. npm accepts trusted publishing only for packages
+# that exist, so the first npm release needs an NPM_TOKEN secret (an automation token); remove it after
+# configuring trusted publishers. PyPI accepts a pending publisher for a new project.
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      npm:
+        description: Publish to npm
+        type: boolean
+        default: true
+      pypi:
+        description: Publish to PyPI
+        type: boolean
+        default: true
+      dry_run:
+        description: Build and check without publishing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: version
+        name: Check that the packages share a version
+        run: |
+          npm=$(node -p "require('./packages/ml2drender/package.json').version")
+          node=$(node -p "require('./packages/ml2drender-node/package.json').version")
+          python=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/python/Cargo.toml)
+          echo "ml2drender $npm, ml2drender-node $node, python $python"
+          test "$npm" = "$node" && test "$npm" = "$python"
+          echo "version=$npm" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+
+  npm:
+    if: inputs.npm
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      FLAGS: --access public --provenance ${{ inputs.dry_run && '--dry-run' || '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: napi-*
+          path: napi
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm
+          path: npm
+      # Platform packages first: ml2drender-node depends on them.
+      - run: |
+          node scripts/npm-node.ts platforms napi platforms
+          for dir in platforms/*; do npm publish "$dir" $FLAGS; done
+          npm publish "npm/ml2drender-node-$VERSION.tgz" $FLAGS
+          npm publish "npm/ml2drender-$VERSION.tgz" $FLAGS
+
+  pypi:
+    if: inputs.pypi
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - run: pipx run twine check --strict dist/*
+      - if: ${{ !inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@release/v1

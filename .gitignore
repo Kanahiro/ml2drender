@@ -4,6 +4,6 @@ node_modules
 dist
 .wrangler
 /packages/ml2drender/wasm
-/native
+/packages/ml2drender-node/native
 .venv/
 __pycache__/

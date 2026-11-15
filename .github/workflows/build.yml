@@ -1,0 +1,135 @@
+# Build and test every package on every runtime, and keep what would be published as artifacts:
+#   npm         ml2drender (TypeScript + WASM) and ml2drender-node (the addon's loader) tarballs
+#   napi-*      the Node-API addon of each platform
+#   wheel-*     the Python wheel of each platform, and sdist
+# Called by ci.yml (pull requests, main) and publish.yml.
+name: Build
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('scripts/fetch-fixtures.sh') }}
+      - run: test -d fixtures/render || sh scripts/fetch-fixtures.sh
+      - run: cargo test --release
+
+  # The WASM package on Node.js, Deno and a browser bundler (Vite), then packed as published.
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:wasm
+      - run: pnpm typecheck
+      - name: Test on Node.js
+        run: pnpm --filter ml2drender test
+      - name: Test on Deno
+        working-directory: packages/ml2drender
+        run: for t in single-flight shared-instance projected-view; do deno run --allow-read tests/$t.ts; done
+      - name: Bundle for browsers
+        run: pnpm --filter demo-browser build
+      - name: Pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm"
+          cp README.md LICENSE packages/ml2drender/
+          pnpm --filter ml2drender build
+          (cd packages/ml2drender && pnpm pack --pack-destination "$RUNNER_TEMP/npm")
+          pnpm --filter ml2drender-node build
+          node scripts/npm-node.ts deps
+          (cd packages/ml2drender-node && pnpm pack --pack-destination "$RUNNER_TEMP/npm")
+      - name: Test the packed package
+        run: |
+          version=$(node -p "require('./packages/ml2drender/package.json').version")
+          mkdir "$RUNNER_TEMP/installed" && cd "$RUNNER_TEMP/installed"
+          echo '{ "type": "module" }' > package.json
+          npm install --no-audit --no-fund "$RUNNER_TEMP/npm/ml2drender-$version.tgz"
+          cp "$GITHUB_WORKSPACE/packages/ml2drender/tests/installed.ts" . && node installed.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm
+          path: ${{ runner.temp }}/npm/*.tgz
+
+  # The Node-API addon and the Python wheel, built and tested on each platform.
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, platform: linux, arch: x64 }
+          - { os: ubuntu-24.04-arm, platform: linux, arch: arm64 }
+          - { os: macos-15-intel, platform: darwin, arch: x64 }
+          - { os: macos-latest, platform: darwin, arch: arm64 }
+          - { os: windows-latest, platform: win32, arch: x64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Linux addons link against glibc 2.34 (scripts/build-native.ts).
+      - if: matrix.platform == 'linux'
+        run: pip install cargo-zigbuild ziglang && echo GLIBC=2.34 >> "$GITHUB_ENV"
+      - run: pnpm build:native
+      - name: Test the addon
+        run: node --experimental-transform-types packages/ml2drender-node/tests/render.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: napi-${{ matrix.platform }}-${{ matrix.arch }}
+          path: packages/ml2drender-node/native/*.node
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: -m crates/python/Cargo.toml -o wheels
+          manylinux: auto
+      - name: Test the wheel
+        run: pip install wheels/*.whl && python -m unittest discover crates/python/tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}-${{ matrix.arch }}
+          path: wheels/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: -m crates/python/Cargo.toml -o wheels
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-sdist
+          path: wheels/*.tar.gz
