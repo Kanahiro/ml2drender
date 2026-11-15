@@ -90,8 +90,7 @@ await assert.rejects(flaky.renderView(view), (error) => error === offline);
 offline = undefined;
 assert.deepEqual(await flaky.renderView(view), rgba);
 
-// Layers the renderer does not draw go through transformLayer: by default a fill-extrusion
-// becomes a fill and others are dropped; unsupported layers that come back are skipped.
+// Layers of types the renderer does not draw are left out.
 const extruded: StyleSpecification = {
   version: 8,
   sources: { box: { type: 'geojson', data: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[[130, 30], [150, 30], [150, 45], [130, 45], [130, 30]]] } } } },
@@ -101,17 +100,7 @@ const extruded: StyleSpecification = {
     { id: 'future', type: 'unknown' } as any,
   ],
 };
-const center = async (transformLayer?: (layer: any) => any[]) => [...(await render(extruded, { transformLayer })).subarray((16 * 64 + 32) * 4, (16 * 64 + 32) * 4 + 4)];
-assert.deepEqual(await center(), [0, 0, 255, 255]);
-assert.deepEqual(await center(() => []), [255, 255, 255, 255]);
-assert.deepEqual(await center((layer) => [layer]), [255, 255, 255, 255]);
-const seen: string[] = [];
-assert.deepEqual(await center((layer) => {
-  seen.push(layer.id);
-  return layer.id === 'box' ? [{ id: 'a', type: 'fill', source: 'box', paint: { 'fill-color': '#00ff00' } }, { id: 'b', type: 'line', source: 'box' }] : [];
-}), [0, 255, 0, 255]);
-assert.deepEqual(seen, ['box', 'future']);
-assert.throws(() => new Renderer(extruded, { transformLayer: ((layer: any) => layer) as any }), TypeError);
+assert.deepEqual([...(await render(extruded)).subarray((16 * 64 + 32) * 4, (16 * 64 + 32) * 4 + 4)], [255, 255, 255, 255]);
 
 // Exercise real HTTP without depending on a public service, including staged TileJSON → tile loads.
 const requests: string[] = [];
