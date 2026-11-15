@@ -5,8 +5,11 @@ import type { WorkerRequest, WorkerResponse } from './render-worker';
 type TileImage = Pick<Extract<WorkerResponse, { kind: 'image' }>, 'bitmap' | 'renderMs'>;
 type SourceData = Pick<Extract<WorkerResponse, { kind: 'source' }>, 'data' | 'renderMs'>;
 
+// Each worker's WASM memory stays at its peak (hundreds of MB for a dense style in a projected CRS), so touch
+// devices, whose browsers kill a page sooner, get fewer.
+const MAX_WORKERS = matchMedia('(pointer: coarse)').matches ? 2 : 4;
 // Leave a core for the main thread and MapLibre's own workers.
-const WORKER_COUNT = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
+const WORKER_COUNT = Math.min(MAX_WORKERS, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
 
 interface Slot {
   worker: Worker;

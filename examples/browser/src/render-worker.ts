@@ -16,6 +16,11 @@ export type WorkerResponse =
 
 let generation = 0;
 let renderer: MapRenderer | undefined;
+/**
+ * Tiles are rendered one at a time: overlapping renders hold the decoded source tiles of all of them at once, and
+ * WASM memory stays at its peak.
+ */
+let queue: Promise<void> = Promise.resolve();
 const worker = self as DedicatedWorkerGlobalScope;
 
 worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
@@ -38,38 +43,40 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
   }
   const active = renderer;
   if (request.generation !== generation || !active) return;
-  const started = performance.now();
-  const failed = (error: unknown) => {
-    if (request.generation === generation) {
-      worker.postMessage({ kind: 'error', generation, id: request.id, message: String(error) } satisfies WorkerResponse);
+  queue = queue.then(() => {
+    if (request.generation !== generation) return;
+    const started = performance.now();
+    const failed = (error: unknown) => {
+      if (request.generation === generation) {
+        worker.postMessage({ kind: 'error', generation, id: request.id, message: String(error) } satisfies WorkerResponse);
+      }
+    };
+    if (request.kind === 'source') {
+      return active.projected(request.crs).getTile(request.tile)
+        .then((tile) => {
+          if (request.generation !== generation) return;
+          const data = tile.slice().buffer;
+          worker.postMessage({ kind: 'source', generation, id: request.id, data, renderMs: performance.now() - started } satisfies WorkerResponse, [data]);
+        })
+        .catch(failed);
     }
-  };
-  if (request.kind === 'source') {
-    void active.projected(request.crs).getTile(request.tile)
-      .then((tile) => {
+    return (request.crs ? active.projected(request.crs).renderTile(request.tile) : active.renderTile(request.tile))
+      .then(async (image) => {
+        // Includes resource loading; this is elapsed time, not CPU time.
+        const renderMs = performance.now() - started;
         if (request.generation !== generation) return;
-        const data = tile.slice().buffer;
-        worker.postMessage({ kind: 'source', generation, id: request.id, data, renderMs: performance.now() - started } satisfies WorkerResponse, [data]);
+        const bitmap = await createImageBitmap(new ImageData(image.data, image.width, image.height));
+        if (request.generation !== generation) {
+          bitmap.close();
+          return;
+        }
+        try {
+          worker.postMessage({ kind: 'image', generation, id: request.id, bitmap, renderMs } satisfies WorkerResponse, [bitmap]);
+        } catch (error) {
+          bitmap.close();
+          throw error;
+        }
       })
       .catch(failed);
-    return;
-  }
-  void (request.crs ? active.projected(request.crs).renderTile(request.tile) : active.renderTile(request.tile))
-    .then(async (image) => {
-      // Includes resource loading and overlapping renders; this is elapsed time, not CPU time.
-      const renderMs = performance.now() - started;
-      if (request.generation !== generation) return;
-      const bitmap = await createImageBitmap(new ImageData(image.data, image.width, image.height));
-      if (request.generation !== generation) {
-        bitmap.close();
-        return;
-      }
-      try {
-        worker.postMessage({ kind: 'image', generation, id: request.id, bitmap, renderMs } satisfies WorkerResponse, [bitmap]);
-      } catch (error) {
-        bitmap.close();
-        throw error;
-      }
-    })
-    .catch(failed);
+  });
 };
