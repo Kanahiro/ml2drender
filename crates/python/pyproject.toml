@@ -7,6 +7,7 @@ name = "ml2drender"
 description = "MapLibre style 2D renderer in pure Rust, no GPU"
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = ["httpx>=0.28.1,<1", "certifi>=2026.10.19"]
 license = { text = "BSD-3-Clause" }
 dynamic = ["version"]
 classifiers = [
@@ -38,4 +39,6 @@ extend-select = ["I", "UP", "B"]
 [tool.maturin]
 # Panics unwind into Python exceptions; x86-64 builds target x86-64-v2 (../../.cargo/config.toml).
 profile = "native"
-module-name = "ml2drender"
+module-name = "ml2drender._native"
+python-source = "python"
+exclude = ["**/__pycache__/**", "**/*.pyc"]

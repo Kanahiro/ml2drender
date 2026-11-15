@@ -1,11 +1,8 @@
 """MapLibre style 2D renderer (pure Rust, no GPU).
 
 The renderer is sans-IO: it asks for the resources it needs (TileJSON, GeoJSON, sprites, tiles,
-glyph ranges) and the host loads them. :func:`render` runs that loop with a ``load`` callable;
-:class:`Renderer` exposes the steps, for hosts that load concurrently.
+glyph ranges) and the host loads them.
 """
-
-from collections.abc import Callable
 
 class View:
     """A Web Mercator camera.
@@ -53,13 +50,6 @@ class Renderer:
         tile is empty, a missing raster tile is replaced by its parent)."""
     def render(self) -> bytes:
         """Non-premultiplied RGBA8 pixels, row by row (see :attr:`View.size`). Raises ``RuntimeError`` while resources are still needed."""
-
-def render(style: str, view: View, load: Callable[[str], bytes | None]) -> bytes:
-    """Non-premultiplied RGBA8 pixels of ``style`` (JSON string) in ``view``.
-
-    Each resource is loaded with ``load(url)``, which returns its bytes, or None when it is
-    missing (like HTTP 404). Exceptions raised by ``load`` propagate.
-    """
 
 def encode_png(rgba: bytes, width: int, height: int) -> bytes:
     """Lossless PNG of RGBA8 pixels."""
