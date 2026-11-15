@@ -3,7 +3,7 @@ import { type Crs, MapRenderer, type SourceTile, type Tile } from '@ml2drender/w
 import type { StyleSpecification } from 'maplibre-gl';
 
 export type WorkerRequest =
-  | { kind: 'init'; generation: number; style: StyleSpecification }
+  | { kind: 'init'; generation: number; style: StyleSpecification; ttlMs: number }
   /** A tile of the Web Mercator grid, or with `crs` of that CRS's grid. */
   | { kind: 'render'; generation: number; id: number; tile: Tile; crs?: Crs }
   | { kind: 'source'; generation: number; id: number; tile: SourceTile; crs: Crs };
@@ -28,7 +28,7 @@ worker.onmessage = (event: MessageEvent<WorkerRequest>) => {
   if (request.kind === 'init') {
     generation = request.generation;
     renderer = undefined;
-    void MapRenderer.init(request.style, { cache: { ttlMs: Infinity } })
+    void MapRenderer.init(request.style, { cache: { ttlMs: request.ttlMs } })
       .then((loaded) => {
         if (request.generation !== generation) return;
         renderer = loaded;
