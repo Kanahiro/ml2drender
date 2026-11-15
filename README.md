@@ -111,6 +111,15 @@ Takes a style object (the official `StyleSpecification` type) and loads the WASM
 
 Concurrent requests for the same URL are fetched once. Fetched bytes are not cached: rely on the browser's HTTP cache, or cache inside `loadResource` (for example with the Cache API on Workers).
 
+Renderers with `cache.ttlMs: 0` share one WASM instance per module, and WASM memory never shrinks. Overlapping renders each hold their decoded data while they wait for fetches, so peak memory grows with the number of renders in flight. Where memory is tight, limit that number yourself:
+
+```ts
+import pLimit from 'p-limit';
+
+const limit = pLimit(2); // one limit for every renderer of the module
+const image = await limit(() => renderer.renderTile(z, x, y));
+```
+
 ### Rendering methods
 
 Each one fetches what it needs and resolves to a `RenderedImage` of all the style's layers. One renderer can mix views, methods and CRSs, even concurrently, and they share fetched resources.
