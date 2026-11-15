@@ -41,6 +41,14 @@ jobs:
           key: fixtures-${{ hashFiles('scripts/fetch-fixtures.sh') }}
       - run: test -d fixtures/render || sh scripts/fetch-fixtures.sh
       - run: cargo test --release --locked
+      # Upstream fixtures: fails on any failure outside crates/cli/tests/known-failures.json.
+      - run: cargo run --release --locked -p ml2drender-cli -- expression-tests
+      - run: cargo run --release --locked -p ml2drender-cli -- render-tests
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-report
+          path: target/test-report
 
   # The WASM package on Node.js, Deno and a browser bundler (Vite), then packed as published.
   js:

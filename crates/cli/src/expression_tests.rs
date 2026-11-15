@@ -19,6 +19,7 @@ pub fn run(root: &Path, filter: Option<&str>) {
     let mut overall = Tally::default();
     let mut by_group: BTreeMap<String, Tally> = BTreeMap::new();
     let mut results = Vec::new();
+    let mut passed = Vec::new();
     for path in find_files(&tests_dir, "test.json") {
         let id = path.parent().unwrap().strip_prefix(&tests_dir).unwrap().to_string_lossy().replace('\\', "/");
         if filter.is_some_and(|f| !id.contains(f)) {
@@ -35,6 +36,8 @@ pub fn run(root: &Path, filter: Option<&str>) {
         if !ok {
             let stage = if compile_ok { "evaluation" } else { "compilation" };
             results.push(json!({"id": id, "stage": stage, "expected": expected, "actual": actual}));
+        } else {
+            passed.push(id);
         }
     }
 
@@ -49,6 +52,8 @@ pub fn run(root: &Path, filter: Option<&str>) {
     fs::write(out_dir.join("summary.md"), &md).unwrap();
     fs::write(out_dir.join("failures.json"), serde_json::to_string_pretty(&results).unwrap()).unwrap();
     eprintln!("report: {}", out_dir.display());
+    let failed: Vec<String> = results.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect();
+    crate::check_known_failures("expression", &failed, &passed);
 }
 
 fn evaluate_fixture(fixture: &Value) -> Value {

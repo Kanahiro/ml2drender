@@ -87,6 +87,10 @@ pub fn run(root: &Path, filter: Option<&str>) {
     fs::write(out_dir.join("summary.md"), &md).unwrap();
     fs::write(out_dir.join("results.json"), serde_json::to_string_pretty(&results).unwrap()).unwrap();
     eprintln!("report: {}", out_dir.display());
+    let ids = |status: &str| -> Vec<String> {
+        results.iter().filter(|r| r["status"] == status).map(|r| r["id"].as_str().unwrap().to_string()).collect()
+    };
+    crate::check_known_failures("render", &ids("fail"), &ids("pass"));
 }
 
 /// The outcome, and a hash of the compared RGBA (to check that an optimization keeps the output

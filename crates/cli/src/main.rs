@@ -53,6 +53,22 @@ fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&s).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
+/// Exits with 1 if a test outside `tests/known-failures.json` failed, so CI catches regressions
+/// while the known failures stay as they are.
+fn check_known_failures(suite: &str, failed: &[String], passed: &[String]) {
+    let known = read_json(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/known-failures.json"));
+    let known: Vec<&str> = known[suite].as_array().into_iter().flatten().filter_map(|v| v.as_str()).collect();
+    let fixed: Vec<&str> = passed.iter().map(String::as_str).filter(|id| known.contains(id)).collect();
+    if !fixed.is_empty() {
+        eprintln!("now passing, remove from tests/known-failures.json:\n  {}", fixed.join("\n  "));
+    }
+    let new: Vec<&str> = failed.iter().map(String::as_str).filter(|id| !known.contains(id)).collect();
+    if !new.is_empty() {
+        eprintln!("{} new {suite} test failure(s):\n  {}", new.len(), new.join("\n  "));
+        std::process::exit(1);
+    }
+}
+
 #[derive(Default)]
 struct Tally {
     pass: usize,
