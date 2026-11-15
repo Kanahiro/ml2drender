@@ -13,13 +13,14 @@
     "build:native": "node scripts/build-native.ts",
     "build:python": "uvx --from 'maturin>=1.16,<2' maturin build -m crates/python/Cargo.toml -o target/python",
     "build:docs": "pnpm --filter ml2drender run docs",
-    "test": "cargo test --release",
+    "test": "cargo test --release --locked",
     "test:node": "pnpm --filter ml2drender-node test",
     "test:python": "uv run --project crates/python --reinstall-package ml2drender python -m unittest discover crates/python/tests",
     "test:render": "cargo run --release -p ml2drender-cli -- render-tests",
     "test:expression": "cargo run --release -p ml2drender-cli -- expression-tests",
     "bench": "node scripts/bench.ts",
     "demo": "pnpm build:wasm && pnpm --filter demo-browser dev",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "lint": "cargo fmt --check && cargo clippy --all-targets --locked --workspace -- -D warnings && cargo clippy --target wasm32-unknown-unknown -p ml2drender-wasm --locked -- -D warnings && uv run --project crates/python --only-group dev ruff check crates/python && uv run --project crates/python --only-group dev ruff format --check crates/python"
   }
 }

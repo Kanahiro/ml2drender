@@ -6,7 +6,7 @@ Python bindings of [ml2drender](https://github.com/Kanahiro/ml2drender), a 2D ma
 pip install ml2drender
 ```
 
-Wheels are built for Linux (x86-64, arm64; glibc), macOS (x86-64, arm64) and Windows (x86-64), for CPython 3.9 and later (abi3).
+Wheels are built for Linux (x86-64, arm64; glibc), macOS (x86-64, arm64) and Windows (x86-64), for CPython 3.11 and later (abi3).
 
 ## Usage
 
@@ -19,6 +19,7 @@ import urllib.request
 
 import ml2drender
 
+
 def load(url):
     try:
         with urllib.request.urlopen(url) as response:
@@ -27,6 +28,7 @@ def load(url):
         if e.code == 404:
             return None  # missing: an empty vector tile, a raster tile replaced by its parent
         raise
+
 
 style = load("https://demotiles.maplibre.org/style.json").decode()
 

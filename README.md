@@ -39,7 +39,7 @@ pip install ml2drender        # Python
 |---|---|---|
 | [`ml2drender`](#javascript-api) | browsers, Node.js, Deno, Cloudflare Workers | Everything below: fetching, Web Mercator and projected views, reprojected sources for GL JS. |
 | [`ml2drender-node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | Low level: you fetch resources yourself. Web Mercator views only. Renders run in parallel off the JS thread. |
-| [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.9+ (Linux, macOS, Windows) | Low level, with a `load(url)` callback. Web Mercator views only. |
+| [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.11+ (Linux, macOS, Windows) | Low level, with a `load(url)` callback. Web Mercator views only. |
 
 All three draw with the same Rust core. To build from source, see [Development](#development).
 
@@ -246,11 +246,11 @@ The renderer does not imitate the GPU pipeline. It ports MapLibre's bucket build
 
 ```sh
 pnpm install
-rustup target add wasm32-unknown-unknown
 pnpm build:wasm        # WASM → packages/ml2drender/wasm/
 pnpm demo              # starts the demo (examples/browser)
 pnpm test              # Rust unit tests
 pnpm typecheck         # TypeScript type checks, including the API type tests
+pnpm lint              # rustfmt, clippy and Ruff
 pnpm fixtures          # fetches the upstream test data (first time only, about 144 MB)
 pnpm test:render       # render tests → target/test-report/render/
 pnpm test:expression   # expression tests → target/test-report/expression/
@@ -272,7 +272,7 @@ packages/ml2drender-node/  Node-API addon package
 examples/browser/          demo (Vite + MapLibre GL JS)
 ```
 
-You need Node.js (version in `.node-version`), pnpm (version in `packageManager`), Rust, and uv for Python. CI (`.github/workflows/build.yml`) builds and tests every package on Linux, macOS and Windows; `publish.yml` publishes to npm and PyPI.
+You need Node.js (version in `.node-version`), pnpm (version in `packageManager`), Rust via rustup (version in `rust-toolchain.toml`), and uv for Python. CI (`.github/workflows/build.yml`) builds and tests every package on Linux, macOS and Windows; `publish.yml` publishes to npm and PyPI.
 
 Design constraints and conventions are described in [AGENTS.md](https://github.com/Kanahiro/ml2drender/blob/main/AGENTS.md) (in Japanese). Issues and pull requests are welcome. A change to rendering should keep `pnpm test:render` results unchanged, or explain why they change.
 

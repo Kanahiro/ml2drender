@@ -6,7 +6,6 @@ glyph ranges) and the host loads them. :func:`render` runs that loop with a ``lo
 """
 
 from collections.abc import Callable
-from typing import Optional
 
 class View:
     """A Web Mercator camera.
@@ -49,13 +48,13 @@ class Renderer:
         Resources come in stages, each found from the last (style sources, then tiles, then glyph
         ranges), so repeat :meth:`needs` and :meth:`provide` until this is empty.
         """
-    def provide(self, url: str, data: Optional[bytes]) -> None:
+    def provide(self, url: str, data: bytes | None) -> None:
         """The bytes of ``url``, or None for a missing resource (like HTTP 404: a missing vector
         tile is empty, a missing raster tile is replaced by its parent)."""
     def render(self) -> bytes:
         """Non-premultiplied RGBA8 pixels, row by row (see :attr:`View.size`). Raises ``RuntimeError`` while resources are still needed."""
 
-def render(style: str, view: View, load: Callable[[str], Optional[bytes]]) -> bytes:
+def render(style: str, view: View, load: Callable[[str], bytes | None]) -> bytes:
     """Non-premultiplied RGBA8 pixels of ``style`` (JSON string) in ``view``.
 
     Each resource is loaded with ``load(url)``, which returns its bytes, or None when it is

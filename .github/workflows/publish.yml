@@ -2,8 +2,11 @@
 #   npm:  ml2drender, ml2drender-node and its platform packages (ml2drender-node-<platform>-<arch>)
 #   PyPI: ml2drender (wheels and sdist)
 # Both use trusted publishing (OIDC) with provenance. npm accepts trusted publishing only for packages
-# that exist, so the first npm release needs an NPM_TOKEN secret (an automation token); remove it after
-# configuring trusted publishers. PyPI accepts a pending publisher for a new project.
+# that exist, so the first npm release needs an NPM_TOKEN secret of the `npm` environment (not a
+# repository secret); remove it after configuring trusted publishers. PyPI accepts a pending publisher
+# for a new project (environment `pypi`).
+# Packages are built with pnpm; the npm CLI only uploads the tarballs, as pnpm publish has no OIDC
+# trusted publishing.
 name: Publish
 
 on:
@@ -31,7 +34,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: version
         name: Check that the packages share a version
         run: |
@@ -59,17 +62,17 @@ jobs:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       FLAGS: --access public --provenance ${{ inputs.dry_run && '--dry-run' || '' }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: napi-*
           path: napi
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm
           path: npm
@@ -88,11 +91,14 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: wheel-*
           path: dist
           merge-multiple: true
-      - run: pipx run twine check --strict dist/*
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uvx twine check --strict dist/*
+        env:
+          UV_EXCLUDE_NEWER: 7 days
       - if: ${{ !inputs.dry_run }}
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
