@@ -60,7 +60,8 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      FLAGS: --access public --provenance ${{ inputs.dry_run && '--dry-run' || '' }}
+      # npm rejects --provenance from a private repository.
+      FLAGS: --access public ${{ !github.event.repository.private && '--provenance' || '' }} ${{ inputs.dry_run && '--dry-run' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -77,11 +78,12 @@ jobs:
           name: npm
           path: npm
       # Platform packages first: @ml2drender/node depends on them.
+      # Paths start with ./ because npm reads a bare `a/b` as the GitHub repository a/b.
       - run: |
           node scripts/npm-node.ts platforms napi platforms
-          for dir in platforms/*; do npm publish "$dir" $FLAGS; done
-          npm publish "npm/ml2drender-node-$VERSION.tgz" $FLAGS
-          npm publish "npm/ml2drender-wasm-$VERSION.tgz" $FLAGS
+          for dir in ./platforms/*; do npm publish "$dir" $FLAGS; done
+          npm publish "./npm/ml2drender-node-$VERSION.tgz" $FLAGS
+          npm publish "./npm/ml2drender-wasm-$VERSION.tgz" $FLAGS
 
   pypi:
     if: inputs.pypi
