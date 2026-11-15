@@ -41,7 +41,7 @@ impl View {
 
     /// Output width and height in pixels.
     #[getter]
-    fn size(&self) -> (u32, u32) {
+    fn pixels(&self) -> (u32, u32) {
         pixels(self.0.width, self.0.height, self.0.pixel_ratio)
     }
 }
@@ -67,7 +67,7 @@ impl ProjectedBox {
 
     /// Output width and height in pixels.
     #[getter]
-    fn size(&self) -> (u32, u32) {
+    fn pixels(&self) -> (u32, u32) {
         pixels(self.0.width, self.0.height, self.0.pixel_ratio)
     }
 }
@@ -138,7 +138,7 @@ impl Renderer {
         self.0.provide(url, data);
     }
 
-    /// RGBA8 pixels, row by row (see `View.size`).
+    /// RGBA8 pixels, row by row (see `View.pixels`).
     fn render<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         Ok(PyBytes::new(py, &self.0.render().map_err(error)?))
     }

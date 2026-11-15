@@ -101,7 +101,7 @@ class Renderer:
         self._lock = asyncio.Lock()
 
     async def render_view(self, view: View) -> bytes:
-        """Return non-premultiplied RGBA8 pixels of ``view``, row by row (see :attr:`View.size`).
+        """Return non-premultiplied RGBA8 pixels of ``view``, row by row (see :attr:`View.pixels`).
 
         Resources are loaded concurrently within each stage. The default loader uses one
         ``httpx.AsyncClient`` per render, with redirects enabled and HTTPX's default timeouts;
@@ -181,7 +181,7 @@ class ProjectedRenderer:
         return self._projjson, origin, extent_at_zoom0
 
     async def render(self, box: ProjectedBox) -> bytes:
-        """:meth:`Renderer.render_view` of a box of the CRS (see :attr:`ProjectedBox.size`).
+        """:meth:`Renderer.render_view` of a box of the CRS (see :attr:`ProjectedBox.pixels`).
 
         Raises ``RuntimeError`` for a CRS the renderer does not support.
         """

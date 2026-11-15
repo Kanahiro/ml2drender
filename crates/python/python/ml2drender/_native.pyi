@@ -28,7 +28,7 @@ class View:
     def tile(z: int, x: int, y: int, tile_size: int = 256) -> View:
         """The XYZ tile ``z/x/y`` of the Web Mercator grid, ``tile_size`` CSS pixels square."""
     @property
-    def size(self) -> tuple[int, int]:
+    def pixels(self) -> tuple[int, int]:
         """Output width and height in pixels."""
 
 class ProjectedBox:
@@ -53,7 +53,7 @@ class ProjectedBox:
         margin: int = 0,
     ) -> None: ...
     @property
-    def size(self) -> tuple[int, int]:
+    def pixels(self) -> tuple[int, int]:
         """Output width and height in pixels."""
 
 class Renderer:

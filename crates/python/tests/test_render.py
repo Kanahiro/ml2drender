@@ -49,7 +49,7 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
     async def test_render_tile(self):
         view = ml2drender.View.tile(5, 28, 12, 256)
         rgba = await render(STYLE, view, load)
-        width, height = view.size
+        width, height = view.pixels
         self.assertEqual(len(rgba), width * height * 4)
         pixels = {bytes(rgba[i : i + 4]) for i in range(0, len(rgba), 4)}
         self.assertIn(bytes([255, 255, 255, 255]), pixels)  # background
@@ -85,7 +85,7 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         renderer = ml2drender.Renderer(STYLE, load)
         crs = renderer.projected(longlat)
         box = ml2drender.ProjectedBox((130, 32, 150, 42), 64, pixel_ratio=2)
-        self.assertEqual(box.size, (128, 64))
+        self.assertEqual(box.pixels, (128, 64))
 
         def at(rgba, x, y):
             return tuple(rgba[(y * 128 + x) * 4 :][:4])
