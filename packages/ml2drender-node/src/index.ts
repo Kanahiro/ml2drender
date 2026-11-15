@@ -82,10 +82,8 @@ export interface Tile {
  * projected vertices; raster, hillshade and color-relief are rendered in Web Mercator and warped.
  */
 export interface ProjectedBox {
-  /** What is drawn at bearing 0, in CRS units (degrees for longlat), easting/longitude first whatever the CRS's axis order. */
+  /** In CRS units (degrees for longlat), easting/longitude first whatever the CRS's axis order; the CRS's y axis is up. */
   bbox: [minX: number, minY: number, maxX: number, maxY: number];
-  /** Degrees clockwise from the CRS's y axis of the direction that is up: the view turns around the center of `bbox`. */
-  bearing: number;
   /** CSS pixels of the image's long side; the image has the box's aspect ratio. */
   size: number;
   /** Device pixels per CSS pixel. */
@@ -224,7 +222,8 @@ export class Renderer {
       return crs.tileMatrixSet;
     };
     return {
-      render: (box) => this.#enqueue((native) => native.setProjectedView({ ...box, projjson })),
+      render: ({ bbox, size, pixelRatio, margin }) =>
+        this.#enqueue((native) => native.setProjectedView({ bbox, size, pixelRatio, margin, projjson })),
       renderTile: (tile) => this.#enqueue((native) => native.setProjectedTile(projjson, grid(), tile)),
       renderView: (view) => this.#enqueue((native) => native.setProjectedCamera(projjson, grid(), view)),
     };

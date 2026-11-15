@@ -50,9 +50,8 @@ fn pixels(width: u32, height: u32, pixel_ratio: f64) -> (u32, u32) {
     ((width as f64 * pixel_ratio).round() as u32, (height as f64 * pixel_ratio).round() as u32)
 }
 
-/// A box of a CRS: `bbox` (min x, min y, max x, max y) in CRS units, turned around its center by
-/// `bearing` degrees, in an image of its aspect ratio with `size` CSS pixels on the long side;
-/// `pixel_ratio` and `margin` as in `View`. The CRS is given with it (`set_projected_view`).
+/// A box of a CRS: `bbox` (min x, min y, max x, max y) in CRS units, in an image of its aspect
+/// ratio with `size` CSS pixels on the long side; `pixel_ratio` and `margin` as in `View`. The CRS is given with it (`set_projected_view`).
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
 struct ProjectedBox(ml2drender::reproject::ProjectedView);
@@ -60,9 +59,9 @@ struct ProjectedBox(ml2drender::reproject::ProjectedView);
 #[pymethods]
 impl ProjectedBox {
     #[new]
-    #[pyo3(signature = (bbox, size, bearing = 0.0, pixel_ratio = 1.0, margin = 0))]
-    fn new(bbox: [f64; 4], size: u32, bearing: f64, pixel_ratio: f64, margin: u32) -> Self {
-        ProjectedBox(ml2drender::reproject::ProjectedView::fit("", bbox, bearing, size, pixel_ratio, margin))
+    #[pyo3(signature = (bbox, size, pixel_ratio = 1.0, margin = 0))]
+    fn new(bbox: [f64; 4], size: u32, pixel_ratio: f64, margin: u32) -> Self {
+        ProjectedBox(ml2drender::reproject::ProjectedView::fit("", bbox, size, pixel_ratio, margin))
     }
 
     /// Output width and height in pixels.

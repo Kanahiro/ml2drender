@@ -77,10 +77,11 @@ export interface Crs {
  * and warped.
  */
 export interface ProjectedBox {
-  /** What is drawn at bearing 0, in CRS units (degrees for longlat), always easting/longitude first whatever the CRS's axis order. */
+  /**
+   * In CRS units (degrees for longlat), always easting/longitude first whatever the CRS's axis order; the CRS's y
+   * axis is up. For a rotated view, use `renderView`.
+   */
   bbox: [minX: number, minY: number, maxX: number, maxY: number];
-  /** Degrees clockwise from the CRS's y axis of the direction that is up: the view turns around the center of `bbox`. Default: 0. */
-  bearing?: number;
   /** Positive integer CSS pixels of the image's long side; the image has the box's aspect ratio. */
   size: number;
   /** Output pixels per CSS pixel. Default: 1. */
@@ -363,7 +364,8 @@ function fitSize(dx: number, dy: number, size: number): [width: number, height: 
 }
 
 /** A `ProjectedBox` of a size in CSS pixels. */
-type SizedBox = Omit<ProjectedBox, 'size'> & { width: number; height: number };
+/** A box turned around its center by `bearing` degrees (`renderView`), at `width` x `height` CSS pixels. */
+type SizedBox = Omit<ProjectedBox, 'size'> & { bearing?: number; width: number; height: number };
 
 function marginArg(value = 0): number {
   const margin = nonnegative(value, 'margin');
@@ -482,10 +484,10 @@ export class MapRenderer {
     const render = async (view: SizedBox) => this.draw(view, ...this.projectedArgs(projjson, view));
     return {
       crs,
-      render: async ({ size, ...box }) => {
-        const [minX, minY, maxX, maxY] = box.bbox;
+      render: async ({ bbox, size, pixelRatio, margin }) => {
+        const [minX, minY, maxX, maxY] = bbox;
         const [width, height] = fitSize(maxX - minX, maxY - minY, size);
-        return render({ ...box, width, height });
+        return render({ bbox, width, height, pixelRatio, margin });
       },
       renderTile: async ({ tileSize = 256, pixelRatio, margin, ...tile }) => {
         if (!Number.isInteger(tileSize) || tileSize < 1) throw new RangeError('tileSize must be a positive integer');

@@ -46,20 +46,17 @@ assert.deepEqual(loaded, ['test://points.geojson']);
 
 // A box of a CRS (PROJJSON), here longitude/latitude: the point is in the middle of 130..150°E, 32..42°N.
 const longlat = { type: 'GeographicCRS', datum: { ellipsoid: { semi_major_axis: 6378137, inverse_flattening: 298.257223563 } } };
-const box = { bbox: [130, 32, 150, 42] as [number, number, number, number], bearing: 0, size: 64, pixelRatio: 2, margin: 0 };
+const box = { bbox: [130, 32, 150, 42] as [number, number, number, number], size: 64, pixelRatio: 2, margin: 0 };
 const crs = renderer.projected({ projjson: longlat });
 const projected = await crs.render(box);
 assert.equal(projected.length, 128 * 64 * 4);
 assert.deepEqual([...projected.subarray(0, 4)], [255, 255, 255, 255]);
 assert.deepEqual([...projected.subarray((32 * 128 + 64) * 4, (32 * 128 + 64) * 4 + 4)], [255, 0, 0, 255]);
-// With the box 3.125° further east, the circle (10 device px in radius) is 20 device px left of the middle;
-// turned 90°, east is up, so it is below the middle.
+// With the box 3.125° further east, the circle (10 device px in radius) is 20 device px left of the middle.
 const offCenter = { ...box, bbox: [133.125, 32, 153.125, 42] as [number, number, number, number] };
 const at = (rgba: Uint8Array, x: number, y: number) => [...rgba.subarray((y * 128 + x) * 4, (y * 128 + x) * 4 + 4)];
 const moved20 = await crs.render(offCenter);
 assert.deepEqual([at(moved20, 44, 32), at(moved20, 64, 32)], [[255, 0, 0, 255], [255, 255, 255, 255]]);
-const turned = await crs.render({ ...offCenter, bearing: 90 });
-assert.deepEqual([at(turned, 64, 52), at(turned, 64, 32), at(turned, 44, 32)], [[255, 0, 0, 255], [255, 255, 255, 255], [255, 255, 255, 255]]);
 // An unsupported CRS rejects, a first render in a CRS works, and Mercator views still draw afterwards.
 await assert.rejects(renderer.projected({ projjson: { type: 'ProjectedCRS', conversion: { method: { name: 'Robinson' } } } }).render(box), /unsupported/);
 assert.throws(() => renderer.projected({ projjson: '+proj=longlat' as any }), TypeError);
@@ -70,7 +67,10 @@ assert.deepEqual(await new Renderer(style, { loadResource: async () => points })
 const grid = renderer.projected({ projjson: longlat, tileMatrixSet: { origin: [90, 62], extentAtZoom0: 80 } });
 assert.deepEqual(await grid.renderTile({ z: 2, x: 2, y: 1, tileSize: 64, pixelRatio: 1, margin: 0 }), await crs.render({ ...box, bbox: [130, 22, 150, 42], pixelRatio: 1 }));
 assert.deepEqual(await grid.renderView({ ...view, zoom: -1, pixelRatio: 2 }), projected);
-assert.deepEqual(await grid.renderView({ ...view, lng: 143.125, zoom: -1, bearing: 90, pixelRatio: 2 }), turned);
+assert.deepEqual(await grid.renderView({ ...view, lng: 143.125, zoom: -1, pixelRatio: 2 }), moved20);
+// Turned 90° around the center of that box, east is up, so the circle is below the middle.
+const turned = await grid.renderView({ ...view, lng: 143.125, zoom: -1, bearing: 90, pixelRatio: 2 });
+assert.deepEqual([at(turned, 64, 52), at(turned, 64, 32), at(turned, 44, 32)], [[255, 0, 0, 255], [255, 255, 255, 255], [255, 255, 255, 255]]);
 await assert.rejects(grid.renderTile({ z: 2, x: 4, y: 1, tileSize: 64, pixelRatio: 1, margin: 0 }), /unsupported/);
 await assert.rejects(crs.renderTile({ z: 0, x: 0, y: 0, tileSize: 64, pixelRatio: 1, margin: 0 }), TypeError);
 await assert.rejects(crs.renderView(view), TypeError);
