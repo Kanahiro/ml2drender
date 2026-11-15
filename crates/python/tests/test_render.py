@@ -95,12 +95,10 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rgba), 128 * 64 * 4)
         self.assertEqual((at(rgba, 64, 32), at(rgba, 0, 0)), (red, white))
         # With the box 3.125 degrees further east, the circle (10 pixels in radius) is 20 pixels
-        # left of the middle; turned 90 degrees, east is up, so it is below the middle.
+        # left of the middle.
         east = (133.125, 32, 153.125, 42)
         rgba = await crs.render(ml2drender.ProjectedBox(east, 64, pixel_ratio=2))
         self.assertEqual((at(rgba, 44, 32), at(rgba, 64, 32)), (red, white))
-        rgba = await crs.render(ml2drender.ProjectedBox(east, 64, bearing=90, pixel_ratio=2))
-        self.assertEqual((at(rgba, 64, 52), at(rgba, 64, 32), at(rgba, 44, 32)), (red, white, white))
         # An unsupported CRS raises, and Mercator views still draw afterwards.
         robinson = {"type": "ProjectedCRS", "conversion": {"method": {"name": "Robinson"}}}
         with self.assertRaises(RuntimeError):
@@ -116,6 +114,11 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tile, await crs.render(ml2drender.ProjectedBox((130, 22, 150, 42), 64)))
         camera = ml2drender.View((140.0, 37.0), -1.0, 64, 32, pixel_ratio=2)
         self.assertEqual(await grid.render_view(camera), await crs.render(box))
+        # Turned 90 degrees around the center of the box further east, east is up, so the circle
+        # is below the middle.
+        turned = ml2drender.View((143.125, 37.0), -1.0, 64, 32, bearing=90, pixel_ratio=2)
+        rgba = await grid.render_view(turned)
+        self.assertEqual((at(rgba, 64, 52), at(rgba, 64, 32), at(rgba, 44, 32)), (red, white, white))
         with self.assertRaises(RuntimeError):
             await grid.render_tile(2, 4, 1)
         mercator = await renderer.render_view(ml2drender.View((140.0, 37.0), 4.0, 64, 32))

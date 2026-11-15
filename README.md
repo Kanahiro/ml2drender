@@ -135,7 +135,7 @@ Each one fetches what it needs and resolves to a `RenderedImage` of all the styl
 | `renderTile({ z, x, y, tileSize? })` | An XYZ tile of the Web Mercator grid. `tileSize` defaults to 256. |
 | `render({ bbox, size })` | A lng/lat box `[west, south, east, north]`, fitted so that its long side is `size` px. `west > east` crosses the antimeridian. |
 | `projected(crs).renderView({ center, zoom, bearing?, width, height })` | A camera in the CRS, with the same arguments as the Mercator `renderView`. `center` is lng/lat. `bearing` is the angle clockwise from the CRS's y axis of the direction that is up, so at 0 the y axis is up. Zoom levels are those of GL JS with the CRS registered by `addProjection`: at zoom 0, tile 0/0/0 of the grid is 512 CSS px wide. A `center` outside the CRS's domain throws a `RangeError`. |
-| `projected(crs).render({ bbox, bearing?, size })` | A box `[minX, minY, maxX, maxY]` in CRS units (degrees for longlat), fitted so that its long side is `size` px, turned around its center by `bearing`. |
+| `projected(crs).render({ bbox, size })` | A box `[minX, minY, maxX, maxY]` in CRS units (degrees for longlat), y axis up, fitted so that its long side is `size` px. For a rotated view, use `renderView`. |
 | `projected(crs).renderTile({ z, x, y, tileSize? })` | A tile of the CRS's grid. |
 
 All of them also accept two options:

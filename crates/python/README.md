@@ -73,7 +73,7 @@ async with httpx.AsyncClient(headers={"Authorization": "Bearer ..."}, follow_red
 | `await projected.render(box)` | `render_view` of a box of the CRS. An unsupported CRS raises `RuntimeError`. |
 | `await projected.render_tile(z, x, y, tile_size=256, pixel_ratio=1.0, margin=0)` | Tile `z/x/y` of the CRS's grid. Without a `tile_matrix_set` it raises `TypeError`. |
 | `await projected.render_view(view)` | The camera `view` (a `View`) in the CRS: the same area as MapLibre GL JS draws with that center, zoom and bearing once the CRS is registered with `addProjection`. At zoom 0, tile 0/0/0 of the grid is 512 CSS pixels wide. Without a `tile_matrix_set` it raises `TypeError`. |
-| `ProjectedBox(bbox, size, bearing=0.0, pixel_ratio=1.0, margin=0)` | A box of a CRS. `bbox` is `(min_x, min_y, max_x, max_y)` in CRS units (degrees for longlat), easting first: the area drawn at bearing 0. The image has the box's aspect ratio and `size` CSS pixels on its long side. `bearing` is degrees clockwise from the CRS's y axis of the direction that is up; the view turns around the center of `bbox`. The rest is as in `View`. |
+| `ProjectedBox(bbox, size, pixel_ratio=1.0, margin=0)` | A box of a CRS. `bbox` is `(min_x, min_y, max_x, max_y)` in CRS units (degrees for longlat), easting first, with the CRS's y axis up. The image has the box's aspect ratio and `size` CSS pixels on its long side. The rest is as in `View`. For a rotated view, use `render_view`. |
 | `ProjectedBox.pixels` | `(width, height)` of the output in pixels. |
 | `encode_png(rgba, width, height)` | Lossless PNG. |
 | `encode_webp(rgba, width, height)` | Lossless WebP. |

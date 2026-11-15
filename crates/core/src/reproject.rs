@@ -46,14 +46,14 @@ pub struct TileMatrixSet {
 impl ProjectedView {
     /// `bbox` in an image of its aspect ratio, `size` CSS pixels on the long side (at least one on
     /// the short side). An empty or infinite `bbox` is left for `set_projected_view` to reject.
-    pub fn fit(projjson: &str, bbox: [f64; 4], bearing: f64, size: u32, pixel_ratio: f64, margin: u32) -> Self {
+    pub fn fit(projjson: &str, bbox: [f64; 4], size: u32, pixel_ratio: f64, margin: u32) -> Self {
         let (dx, dy) = (bbox[2] - bbox[0], bbox[3] - bbox[1]);
         let scale = size as f64 / dx.max(dy);
         let side = |d: f64| ((d * scale).round() as u32).max(size.min(1));
         ProjectedView {
             projjson: projjson.to_owned(),
             bbox,
-            bearing,
+            bearing: 0.0,
             width: side(dx),
             height: side(dy),
             pixel_ratio,
@@ -714,7 +714,7 @@ mod tests {
         assert!(ProjectedView::camera(&crs, &grid, &View { center: [f64::NAN, 0.0], ..view }).is_err());
         // A box keeps its aspect ratio, `size` on the long side.
         let fit = |bbox, size| {
-            let v = ProjectedView::fit(&crs, bbox, 0.0, size, 1.0, 0);
+            let v = ProjectedView::fit(&crs, bbox, size, 1.0, 0);
             (v.width, v.height)
         };
         assert_eq!(fit([130.0, 32.0, 150.0, 42.0], 64), (64, 32));
