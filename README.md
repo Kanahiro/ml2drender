@@ -117,7 +117,7 @@ Renderers with `cache.ttlMs: 0` share one WASM instance per module, and WASM mem
 import pLimit from 'p-limit';
 
 const limit = pLimit(2); // one limit for every renderer of the module
-const image = await limit(() => renderer.renderTile(z, x, y));
+const image = await limit(() => renderer.renderTile({ z, x, y }));
 ```
 
 ### Rendering methods
