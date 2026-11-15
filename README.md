@@ -16,7 +16,7 @@
 ## Quick start
 
 ```ts
-import { MapRenderer } from 'ml2drender';
+import { MapRenderer } from '@ml2drender/wasm';
 
 const style = await (await fetch('https://demotiles.maplibre.org/style.json')).json();
 const renderer = await MapRenderer.init(style);
@@ -25,20 +25,20 @@ const image = await renderer.renderView({ center: [139.767, 35.681], zoom: 5, wi
 const png = image.toPng(); // or image.toWebp(), image.toJpeg(80); raw RGBA in image.data
 ```
 
-The renderer works out which tiles, TileJSON, sprites and glyphs it needs, and fetches them. In browsers (with Vite or similar), the bundled WASM loads automatically. Elsewhere, pass the compiled module as the `wasm` option: `await WebAssembly.compile(readFileSync(new URL(import.meta.resolve('ml2drender/renderer.wasm'))))` in Node.js and Deno, or `import wasm from 'ml2drender/renderer.wasm'` in Cloudflare Workers (Wrangler).
+The renderer works out which tiles, TileJSON, sprites and glyphs it needs, and fetches them. In browsers (with Vite or similar), the bundled WASM loads automatically. Elsewhere, pass the compiled module as the `wasm` option: `await WebAssembly.compile(readFileSync(new URL(import.meta.resolve('@ml2drender/wasm/renderer.wasm'))))` in Node.js and Deno, or `import wasm from '@ml2drender/wasm/renderer.wasm'` in Cloudflare Workers (Wrangler).
 
 ### Installation
 
 ```sh
-npm install ml2drender        # WebAssembly: browsers, Node.js, Deno, Workers
-npm install ml2drender-node   # native Node.js addon
-pip install ml2drender        # Python
+npm install @ml2drender/wasm   # WebAssembly: browsers, Node.js, Deno, Workers
+npm install @ml2drender/node   # native Node.js addon
+pip install ml2drender         # Python
 ```
 
 | Package | Runs in | API |
 |---|---|---|
-| [`ml2drender`](#javascript-api) | browsers, Node.js, Deno, Cloudflare Workers | Everything below: fetching, Web Mercator and projected views, reprojected sources for GL JS. |
-| [`ml2drender-node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | Low level: you fetch resources yourself. Web Mercator views only. Renders run in parallel off the JS thread. |
+| [`@ml2drender/wasm`](#javascript-api) | browsers, Node.js, Deno, Cloudflare Workers | Everything below: fetching, Web Mercator and projected views, reprojected sources for GL JS. |
+| [`@ml2drender/node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | Low level: you fetch resources yourself. Web Mercator views only. Renders run in parallel off the JS thread. |
 | [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.11+ (Linux, macOS, Windows) | Low level, with a `load(url)` callback. Web Mercator views only. |
 
 All three draw with the same Rust core. To build from source, see [Development](#development).
@@ -88,7 +88,7 @@ const tile = await renderer.projected(crs).getTile({ source, z, x, y }); // MVT,
 
 // Browser: register the CRS with GL JS and draw the rewritten style
 import { addProjection, Map } from 'maplibre-gl';
-import { loadProjection } from 'ml2drender';
+import { loadProjection } from '@ml2drender/wasm';
 
 addProjection({ name: crs.name, projection: await loadProjection(crs.projjson), tileMatrixSet: crs.tileMatrixSet });
 const glStyle = renderer.projected(crs).toStyle({ tiles: (source) => `https://tiles.example.com/${source}/{z}/{x}/{y}` });
@@ -99,7 +99,7 @@ Give `addProjection` the projection from `loadProjection`. It is the same code m
 
 ## JavaScript API
 
-The `ml2drender` package (WebAssembly). This section is an overview. Every type and option is documented in the [API reference](https://kanahiro.github.io/ml2drender/api/).
+The `@ml2drender/wasm` package (WebAssembly). This section is an overview. Every type and option is documented in the [API reference](https://kanahiro.github.io/ml2drender/api/).
 
 ### MapRenderer.init(style, options?)
 
@@ -204,7 +204,7 @@ CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`). PROJ strings and
 
 The core is a plain Rust crate with no I/O, so it can be wrapped for other hosts. Each host runs the same loop: ask the renderer what it `needs`, fetch it, `provide` the bytes, repeat until nothing is needed, then `render`.
 
-- **Node.js (Node-API):** [`ml2drender-node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme), from [`crates/napi`](https://github.com/Kanahiro/ml2drender/tree/main/crates/napi).
+- **Node.js (Node-API):** [`@ml2drender/node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme), from [`crates/napi`](https://github.com/Kanahiro/ml2drender/tree/main/crates/napi).
 - **Python:** [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme), from [`crates/python`](https://github.com/Kanahiro/ml2drender/tree/main/crates/python) (PyO3, abi3).
 - **Rust:** the `ml2drender` crate in [`crates/core`](https://github.com/Kanahiro/ml2drender/tree/main/crates/core) (not on crates.io). `Renderer::new(style, View::tile(z, x, y, 256))`, then `needs()` / `provide()` / `render()`.
 

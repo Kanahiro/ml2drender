@@ -2,7 +2,7 @@
 // napi-rs does: the main package lists them as optionalDependencies and npm installs the one
 // matching the machine (os / cpu / libc).
 //   node scripts/npm-node.ts deps                  add the optionalDependencies to the main package
-//   node scripts/npm-node.ts platforms <in> <out>  <in>/ml2drender.<platform>-<arch>.node → <out>/<package>/
+//   node scripts/npm-node.ts platforms <in> <out>  <in>/ml2drender.<platform>-<arch>.node → <out>/node-<platform>-<arch>[-gnu]/
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 const TARGETS = [
@@ -13,7 +13,8 @@ const TARGETS = [
   { platform: 'win32', arch: 'x64' },
 ];
 // Must match the package name the loader in packages/ml2drender-node/src/index.ts requires.
-const name = (t: (typeof TARGETS)[number]) => `ml2drender-node-${t.platform}-${t.arch}${t.platform === 'linux' ? '-gnu' : ''}`;
+const suffix = (t: (typeof TARGETS)[number]) => `${t.platform}-${t.arch}${t.platform === 'linux' ? '-gnu' : ''}`;
+const name = (t: (typeof TARGETS)[number]) => `@ml2drender/node-${suffix(t)}`;
 
 const mainPath = 'packages/ml2drender-node/package.json';
 const main = JSON.parse(readFileSync(mainPath, 'utf8'));
@@ -24,7 +25,7 @@ if (command === 'deps') {
   writeFileSync(mainPath, JSON.stringify(main, null, 2) + '\n');
 } else if (command === 'platforms' && input && output) {
   for (const t of TARGETS) {
-    const dir = `${output}/${name(t)}`;
+    const dir = `${output}/node-${suffix(t)}`;
     mkdirSync(dir, { recursive: true });
     copyFileSync(`${input}/ml2drender.${t.platform}-${t.arch}.node`, `${dir}/ml2drender.node`);
     writeFileSync(`${dir}/package.json`, JSON.stringify({

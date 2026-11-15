@@ -1,5 +1,5 @@
 import { addProjection, type LngLat, removeProjection } from 'maplibre-gl';
-import { loadProjection, type Projection } from 'ml2drender';
+import { loadProjection, type Projection } from '@ml2drender/wasm';
 import type * as GeoJSON from 'geojson';
 
 /** A CRS for the output pane: ml2drender renders its tile grid, which MapLibre shows through `addProjection`. */

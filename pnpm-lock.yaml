@@ -168,12 +168,12 @@ importers:
 
   examples/browser:
     dependencies:
+      '@ml2drender/wasm':
+        specifier: workspace:*
+        version: link:../../packages/ml2drender
       maplibre-gl:
         specifier: 6.15.0
         version: 6.15.0
-      ml2drender:
-        specifier: workspace:*
-        version: link:../../packages/ml2drender
     devDependencies:
       '@types/geojson':
         specifier: 7946.0.16

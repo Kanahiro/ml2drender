@@ -1,6 +1,6 @@
 {
   "$schema": "https://typedoc.org/schema.json",
-  "name": "ml2drender",
+  "name": "@ml2drender/wasm",
   "entryPoints": [
     "src/index.ts"
   ],

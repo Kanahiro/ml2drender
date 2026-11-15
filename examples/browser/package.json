@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "maplibre-gl": "6.15.0",
-    "ml2drender": "workspace:*"
+    "@ml2drender/wasm": "workspace:*"
   },
   "devDependencies": {
     "@types/geojson": "7946.0.16",

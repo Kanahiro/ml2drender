@@ -1,16 +1,16 @@
-# ml2drender-node
+# @ml2drender/node
 
 [ml2drender](https://github.com/Kanahiro/ml2drender), a 2D map renderer for MapLibre styles written in pure Rust, as a native Node.js addon (Node-API). It needs no GPU.
 
 ```sh
-npm install ml2drender-node
+npm install @ml2drender/node
 ```
 
 Prebuilt addons are published for Linux (x64, arm64; glibc 2.34+), macOS (x64, arm64) and Windows (x64). npm installs the one for your machine.
 
 ## Which package?
 
-| | `ml2drender` (WebAssembly) | `ml2drender-node` (this package) |
+| | `@ml2drender/wasm` (WebAssembly) | `@ml2drender/node` (this package) |
 |---|---|---|
 | Runs in | browsers, Node.js, Deno, Cloudflare Workers | Node.js |
 | Fetching | built in (`loadResource` to customize) | you write the `needs` → fetch → `provide` loop |
@@ -18,12 +18,12 @@ Prebuilt addons are published for Linux (x64, arm64; glibc 2.34+), macOS (x64, a
 | Reprojected sources for GL JS (`getTile`, `toStyle`) | yes | no |
 | Concurrency | renders take turns on the JS thread | renders run in parallel on libuv's thread pool, off the JS thread |
 
-Both draw with the same Rust core, so the same view gives the same image. Choose this package for throughput on a Node.js server; choose [`ml2drender`](https://github.com/Kanahiro/ml2drender#readme) for everything else.
+Both draw with the same Rust core, so the same view gives the same image. Choose this package for throughput on a Node.js server; choose [`@ml2drender/wasm`](https://github.com/Kanahiro/ml2drender#readme) for everything else.
 
 ## Usage
 
 ```ts
-import { encodePng, Renderer } from 'ml2drender-node';
+import { encodePng, Renderer } from '@ml2drender/node';
 
 const style = await (await fetch('https://demotiles.maplibre.org/style.json')).text();
 const renderer = new Renderer(style, {
