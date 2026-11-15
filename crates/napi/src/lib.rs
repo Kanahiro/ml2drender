@@ -35,6 +35,47 @@ impl From<View> for ml2drender::View {
     }
 }
 
+/// A box of a CRS, given as PROJJSON text (see `ml2drender::reproject::ProjectedView`).
+#[napi(object)]
+pub struct ProjectedView {
+    pub projjson: String,
+    /// `[minX, minY, maxX, maxY]` in CRS units.
+    pub bbox: Vec<f64>,
+    pub bearing: f64,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_ratio: f64,
+    pub margin: u32,
+}
+
+/// The tile grid of a CRS (see `ml2drender::reproject::TileMatrixSet`).
+#[napi(object)]
+pub struct TileMatrixSet {
+    /// `[minX, maxY]` of tile 0/0/0 in CRS units.
+    pub origin: Vec<f64>,
+    pub extent_at_zoom0: f64,
+}
+
+impl TryFrom<TileMatrixSet> for ml2drender::reproject::TileMatrixSet {
+    type Error = Error;
+
+    fn try_from(grid: TileMatrixSet) -> Result<Self> {
+        let origin = grid.origin.try_into().map_err(|_| Error::from_reason("origin must be [minX, maxY]"))?;
+        Ok(Self { origin, extent_at_zoom0: grid.extent_at_zoom0 })
+    }
+}
+
+/// A tile of a CRS's grid, `tile_size` CSS pixels square.
+#[napi(object)]
+pub struct Tile {
+    pub z: u32,
+    pub x: u32,
+    pub y: u32,
+    pub tile_size: u32,
+    pub pixel_ratio: f64,
+    pub margin: u32,
+}
+
 fn error(e: ml2drender::Error) -> Error {
     Error::from_reason(e.to_string())
 }
@@ -70,15 +111,52 @@ pub struct Renderer {
 
 #[napi]
 impl Renderer {
+    /// The host points it at a view (`set_view` or `set_projected_view`) before the first `needs`.
     #[napi(constructor)]
-    pub fn new(style: String, view: View) -> Result<Self> {
-        let renderer = ml2drender::Renderer::new(&style, view.into()).map_err(error)?;
+    pub fn new(style: String) -> Result<Self> {
+        let renderer = ml2drender::Renderer::new(&style, ml2drender::View::tile(0, 0, 0, 256)).map_err(error)?;
         Ok(Renderer { inner: Arc::new(Mutex::new(Movable(renderer))) })
     }
 
     #[napi]
     pub fn set_view(&self, view: View) -> Result<()> {
         with(&self.inner, |r| r.set_view(view.into()))
+    }
+
+    /// Draw a box of a CRS instead of a Mercator camera. Fails for a CRS the core does not support.
+    #[napi]
+    pub fn set_projected_view(&self, view: ProjectedView) -> Result<()> {
+        let bbox =
+            <[f64; 4]>::try_from(view.bbox).map_err(|_| Error::from_reason("bbox must be [minX, minY, maxX, maxY]"))?;
+        let view = ml2drender::reproject::ProjectedView {
+            projjson: view.projjson,
+            bbox,
+            bearing: view.bearing,
+            width: view.width,
+            height: view.height,
+            pixel_ratio: view.pixel_ratio,
+            margin: view.margin,
+        };
+        with(&self.inner, |r| r.set_projected_view(&view))?.map_err(error)
+    }
+
+    /// Draw a tile of the grid of a CRS (PROJJSON text).
+    #[napi]
+    pub fn set_projected_tile(&self, projjson: String, grid: TileMatrixSet, tile: Tile) -> Result<()> {
+        let z = tile.z.min(u8::MAX as u32) as u8;
+        let view =
+            ml2drender::reproject::ProjectedView::tile(&projjson, &grid.try_into()?, z, tile.x, tile.y, tile.tile_size)
+                .map_err(error)?;
+        let view = ml2drender::reproject::ProjectedView { pixel_ratio: tile.pixel_ratio, margin: tile.margin, ..view };
+        with(&self.inner, |r| r.set_projected_view(&view))?.map_err(error)
+    }
+
+    /// Draw MapLibre GL JS's camera in a CRS (PROJJSON text) on its grid.
+    #[napi]
+    pub fn set_projected_camera(&self, projjson: String, grid: TileMatrixSet, view: View) -> Result<()> {
+        let view =
+            ml2drender::reproject::ProjectedView::camera(&projjson, &grid.try_into()?, &view.into()).map_err(error)?;
+        with(&self.inner, |r| r.set_projected_view(&view))?.map_err(error)
     }
 
     #[napi]

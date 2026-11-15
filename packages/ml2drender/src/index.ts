@@ -50,19 +50,25 @@ export interface LngLatBox {
 }
 
 /**
- * A CRS on MapLibre GL JS's tile grid for it: what `addProjection` registers, with the CRS as PROJJSON.
+ * A CRS, with MapLibre GL JS's tile grid and name for it: what `addProjection` registers, with the CRS as PROJJSON.
  */
 export interface Crs {
-  /** The name GL JS knows the CRS by (`addProjection`'s `name`, `projection.type` of `toStyle`'s style). */
-  name: string;
+  /**
+   * The name GL JS knows the CRS by (`addProjection`'s `name`, `projection.type` of `toStyle`'s style). Required by
+   * `toStyle` only.
+   */
+  name?: string;
   /**
    * PROJJSON of a geographic or projected CRS. Supported methods: Transverse Mercator, Mercator, Pseudo Mercator,
    * Lambert Conic Conformal, Polar Stereographic, Lambert Azimuthal Equal Area, Equal Earth and PROJ's
    * Geostationary Satellite, without datum shifts.
    */
   projjson: object;
-  /** The CRS's tile grid, for `renderTile`, `getTile` and GL JS. */
-  tileMatrixSet: TileMatrixSet;
+  /**
+   * The CRS's tile grid, which a CRS does not have by itself. Required by `renderTile`, `getTile` and `renderView`
+   * (whose zoom is the grid's); `render` of a box works without it.
+   */
+  tileMatrixSet?: TileMatrixSet;
 }
 
 /**
@@ -71,8 +77,10 @@ export interface Crs {
  * and warped.
  */
 export interface ProjectedBox {
-  /** In CRS units (degrees for longlat), always easting/longitude first whatever the CRS's axis order. */
+  /** What is drawn at bearing 0, in CRS units (degrees for longlat), always easting/longitude first whatever the CRS's axis order. */
   bbox: [minX: number, minY: number, maxX: number, maxY: number];
+  /** Degrees clockwise from the CRS's y axis of the direction that is up: the view turns around the center of `bbox`. Default: 0. */
+  bearing?: number;
   /** Positive integer CSS pixels. */
   width: number;
   /** Positive integer CSS pixels. */
@@ -209,17 +217,8 @@ interface WasmExports {
   renderer_free(handle: number): void;
   projection_new(ptr: number, len: number): number;
   projection_forward(handle: number, lng: number, lat: number): number;
-  projection_inverse(handle: number, x: number, y: number): number;
   projection_free(handle: number): void;
   xy_ptr(): number;
-}
-
-/** A CRS's projection, computed by the renderer itself. */
-export interface Projection {
-  /** `[lng, lat]` in degrees → `[x, y]` in CRS units; NaN where the CRS has no point (e.g. the far side of a geostationary view). */
-  forward(lngLat: number[]): number[];
-  /** `[x, y]` → `[lng, lat]` in degrees; NaN outside the projection's domain. */
-  inverse(xy: number[]): number[];
 }
 
 type ViewArgs = [lng: number, lat: number, zoom: number, bearing: number, width: number, height: number, pixelRatio: number, margin: number];
@@ -287,9 +286,8 @@ function withBytes<T>(w: WasmExports, bytes: Uint8Array, call: (ptr: number, len
 }
 
 /**
- * One WASM instance per module (the bundled one under `undefined`), shared by projections and by
- * renderers that keep nothing between renders (`ttlMs` 0): memory freed by one render is reused by
- * the next. (WASM memory never shrinks, and an instance per renderer holds its own until collected;
+ * One WASM instance per module (the bundled one under `undefined`), shared by renderers that keep
+ * nothing between renders (`ttlMs` 0): memory freed by one render is reused by the next. (WASM memory never shrinks, and an instance per renderer holds its own until collected;
  * on Cloudflare Workers all of it counts towards the isolate's 128 MB.) A renderer that keeps
  * resources gets its own instance, which goes with it.
  */
@@ -313,46 +311,6 @@ function sharedWasm(module: WebAssembly.Module | undefined): Promise<WasmExports
 function discardInstance(module: WebAssembly.Module | undefined, instance: Promise<WasmExports>, w: WasmExports) {
   brokenInstances.add(w);
   if (instances.get(module) === instance) instances.delete(module);
-}
-
-const freeProjection = new FinalizationRegistry<{ w: WasmExports; handle: number }>(({ w, handle }) => w.projection_free(handle));
-
-/**
- * Load a PROJJSON CRS the way `MapRenderer.projected` reads `Crs.projjson`, e.g. to compute
- * tile bounds or to register the CRS with MapLibre's `addProjection`, so both agree on the CRS.
- * Throws for a CRS the renderer does not support.
- */
-export async function loadProjection(projjson: object, options: Pick<InitOptions, 'wasm'> = {}): Promise<Projection> {
-  return (await loadProjectionFactory(options))(projjson);
-}
-
-/**
- * Load the WASM once and return a synchronous `loadProjection`, for hosts that must build a
- * projection without awaiting, such as MapLibre's worker `setProjectionHandler`.
- */
-export async function loadProjectionFactory(options: Pick<InitOptions, 'wasm'> = {}): Promise<(projjson: object) => Projection> {
-  const w = await sharedWasm(options.wasm);
-  return (projjson) => {
-    if (!projjson || typeof projjson !== 'object') throw new TypeError('projjson must be a PROJJSON object');
-    const handle = withBytes(w, encoder.encode(JSON.stringify(projjson)), (ptr, len) => w.projection_new(ptr, len));
-    if (!handle) throw new Error(decoder.decode(output(w)));
-    // A fresh view per call: memory growth detaches earlier ones.
-    const xy = () => [...new Float64Array(w.memory.buffer, w.xy_ptr(), 2)];
-    // The methods hold `owner`, which frees the handle once collected: callers may keep only them.
-    const owner = { handle };
-    const projection: Projection = {
-      forward: ([lng, lat]) => {
-        w.projection_forward(owner.handle, lng, lat);
-        return xy();
-      },
-      inverse: ([x, y]) => {
-        w.projection_inverse(owner.handle, x, y);
-        return xy();
-      },
-    };
-    freeProjection.register(owner, { w, handle });
-    return projection;
-  };
 }
 
 function viewArgs(view: View): ViewArgs {
@@ -538,15 +496,19 @@ export class MapRenderer {
 
   /** This renderer drawing in `crs`, on its tile grid. Resources fetched for one CRS serve the others too. */
   projected(crs: Crs): ProjectedRenderer {
-    if (typeof crs.name !== 'string' || !crs.name) throw new TypeError('crs.name must be a name');
     if (!crs.projjson || typeof crs.projjson !== 'object') throw new TypeError('crs.projjson must be a PROJJSON object');
-    const { origin, extentAtZoom0 } = crs.tileMatrixSet;
-    if (!origin.every(Number.isFinite) || !(extentAtZoom0 > 0 && Number.isFinite(extentAtZoom0))) {
-      throw new RangeError('crs.tileMatrixSet must have a finite origin and a finite, positive extentAtZoom0');
-    }
+    const grid = (): TileMatrixSet => {
+      if (!crs.tileMatrixSet) throw new TypeError('crs.tileMatrixSet is required for tiles and cameras');
+      const { origin, extentAtZoom0 } = crs.tileMatrixSet;
+      if (!origin.every(Number.isFinite) || !(extentAtZoom0 > 0 && Number.isFinite(extentAtZoom0))) {
+        throw new RangeError('crs.tileMatrixSet must have a finite origin and a finite, positive extentAtZoom0');
+      }
+      return crs.tileMatrixSet;
+    };
     const projjson = encoder.encode(JSON.stringify(crs.projjson));
     // The box of tile z/x/y of the grid.
     const box = ({ z, x, y }: { z: number; x: number; y: number }): ProjectedBox['bbox'] => {
+      const { origin, extentAtZoom0 } = grid();
       const n = 2 ** z;
       if (!Number.isInteger(z) || z < 0 || z > 30) throw new RangeError('z must be an integer in 0..=30');
       if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) throw new RangeError('x and y must be integers in 0..2^z');
@@ -554,11 +516,11 @@ export class MapRenderer {
       const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
       return [minX, maxY - s, minX + s, maxY];
     };
-    const render = (view: ProjectedBox, bearing?: number) => this.draw(view, ...this.projectedArgs(projjson, view, bearing));
+    const render = async (view: ProjectedBox) => this.draw(view, ...this.projectedArgs(projjson, view));
     return {
       crs,
-      render: (view) => render(view),
-      renderTile: ({ tileSize = 256, pixelRatio, margin, ...tile }) => {
+      render,
+      renderTile: async ({ tileSize = 256, pixelRatio, margin, ...tile }) => {
         if (!Number.isInteger(tileSize) || tileSize < 1) throw new RangeError('tileSize must be a positive integer');
         return render({ bbox: box(tile), width: tileSize, height: tileSize, pixelRatio, margin });
       },
@@ -567,17 +529,18 @@ export class MapRenderer {
         const [x, y] = this.forward(projjson, lng, lat);
         if (!Number.isFinite(x) || !Number.isFinite(y)) throw new RangeError('center is outside the CRS');
         // CRS units per CSS pixel.
-        const unit = extentAtZoom0 / (512 * 2 ** zoom);
+        const unit = grid().extentAtZoom0 / (512 * 2 ** zoom);
         const [w, h] = [(width / 2) * unit, (height / 2) * unit];
         // The box at bearing 0, which the core turns around its center.
-        return render({ bbox: [x - w, y - h, x + w, y + h], width, height, pixelRatio, margin }, bearing);
+        return render({ bbox: [x - w, y - h, x + w, y + h], bearing, width, height, pixelRatio, margin });
       },
-      getTile: (tile) => {
+      getTile: async (tile) => {
         if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
         const view = { bbox: box(tile), width: 512, height: 512 };
         return this.run(...this.projectedArgs(projjson, view), encoder.encode(tile.source), this.wasm.renderer_export_tile);
       },
       toStyle: ({ tiles }) => {
+        if (typeof crs.name !== 'string' || !crs.name) throw new TypeError('crs.name is required for toStyle');
         const style = this.original;
         const sources: Record<string, SourceSpecification> = {};
         for (const [id, source] of Object.entries(style.sources)) {
@@ -615,10 +578,11 @@ export class MapRenderer {
   }
 
   /** The core arguments and `setView` of a view of the CRS `projjson` (encoded), turned around its center by `bearing`. */
-  private projectedArgs(projjson: Uint8Array, view: ProjectedBox, bearing = 0): [ViewArgs, (handle: number) => void] {
+  private projectedArgs(projjson: Uint8Array, view: ProjectedBox): [ViewArgs, (handle: number) => void] {
     const margin = marginArg(view.margin);
     const size = sizeArgs(view);
-    if (!view.bbox.every(Number.isFinite)) throw new RangeError('bbox must be finite');
+    const bearing = view.bearing ?? 0;
+    if (![...view.bbox, bearing].every(Number.isFinite)) throw new RangeError('bbox and bearing must be finite');
     // The initial camera is replaced before the first `needs`.
     return [[0, 0, 0, 0, ...size, 0], (handle) => {
       const ok = this.withBytes(projjson, (ptr, len) =>

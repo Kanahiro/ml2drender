@@ -1,6 +1,6 @@
 import { addProjection, type LngLat, removeProjection } from 'maplibre-gl';
-import { loadProjection, type Projection } from '@ml2drender/wasm';
 import type * as GeoJSON from 'geojson';
+import { type Converter, converter as proj4Converter } from './proj';
 
 /** A CRS for the output pane: ml2drender renders its tile grid, which MapLibre shows through `addProjection`. */
 export interface Crs {
@@ -11,16 +11,16 @@ export interface Crs {
   /** Top-left of tile 0/0/0 and its width, in CRS units. */
   origin: [number, number];
   extent: number;
-  /** ml2drender's own projection, so that MapLibre places the tiles exactly where they were rendered. */
-  converter: Projection;
+  /** The projection MapLibre places the tiles with (proj4js). */
+  converter: Converter;
 }
 
 type Area = [west: number, south: number, east: number, north: number];
 const WORLD: Area = [-180, -90, 180, 90];
 
 /** Registers `definition` with MapLibre, on a square tile grid around its projected area of use. */
-async function register(name: string, label: string, definition: object, [west, south, east, north]: Area): Promise<Crs> {
-  const converter = await loadProjection(definition);
+function register(name: string, label: string, definition: object, [west, south, east, north]: Area): Crs {
+  const converter = proj4Converter(definition);
   if (east < west) east += 360;
   let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
   const n = 64;
@@ -46,12 +46,12 @@ let registered = 0;
 let previous: string | undefined;
 
 /** Registers a PROJJSON text, replacing the previous one, on a grid around its `bbox` (or the world). */
-export async function registerProjJson(text: string): Promise<Crs> {
+export function registerProjJson(text: string): Crs {
   const json = JSON.parse(text);
   if (!json || typeof json !== 'object' || Array.isArray(json)) throw new Error('PROJJSON must be an object');
   const b = json.bbox;
   const area: Area = b ? [b.west_longitude, b.south_latitude, b.east_longitude, b.north_latitude] : WORLD;
-  const crs = await register(`ml2drender:${++registered}`, json.name ?? 'PROJJSON', json, area);
+  const crs = register(`ml2drender:${++registered}`, json.name ?? 'PROJJSON', json, area);
   if (previous) removeProjection(previous);
   previous = crs.name;
   return crs;

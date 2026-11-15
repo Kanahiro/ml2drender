@@ -14,7 +14,7 @@ Prebuilt addons are published for Linux (x64, arm64; glibc 2.34+), macOS (x64, a
 |---|---|---|
 | Runs in | browsers, Node.js, Deno, Cloudflare Workers | Node.js |
 | Fetching | built in (`loadResource` to customize) | built in (`loadResource` to customize) |
-| Views | Web Mercator, projected CRSs (PROJJSON) | Web Mercator |
+| Views | Web Mercator by camera, tile or lng/lat box; projected CRSs (PROJJSON) by box, tile of a grid or camera | Web Mercator by camera; projected CRSs (PROJJSON) by box, tile of a grid or camera |
 | Reprojected sources for GL JS (`getTile`, `toStyle`) | yes | no |
 | Concurrency | renders take turns on the JS thread | renders run in parallel on libuv's thread pool, off the JS thread |
 
@@ -64,6 +64,43 @@ A renderer keeps the resources and tiles it has decoded, so later views load onl
 | `width`, `height` | Output size in CSS pixels. |
 | `pixelRatio` | Device pixels per CSS pixel. The image is `round(width * pixelRatio)` x `round(height * pixelRatio)` pixels. |
 | `margin` | CSS pixels drawn around the view and cropped, so labels near the edge are placed as in a larger map. |
+
+### `renderer.projected(crs)`
+
+The renderer drawing in a projected CRS, with the same three methods as in `@ml2drender/wasm`:
+
+```ts
+const utm = renderer.projected({
+  projjson: utm54n, // PROJJSON of EPSG:32654
+  tileMatrixSet: { origin: [-2_000_000, 6_000_000], extentAtZoom0: 4_000_000 },
+});
+
+// a box in CRS units
+await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000], bearing: 0, width: 512, height: 512, pixelRatio: 1, margin: 0 });
+// a tile of the CRS's grid
+await utm.renderTile({ z: 3, x: 4, y: 2, tileSize: 256, pixelRatio: 1, margin: 0 });
+// a camera: the same view as renderView takes
+await utm.renderView({ lng: 139.767, lat: 35.681, zoom: 6, bearing: 30, width: 800, height: 600, pixelRatio: 1, margin: 0 });
+```
+
+`crs` is a `crs` of `@ml2drender/wasm` (its `name` is not read):
+
+- `projjson`: the CRS as a PROJJSON object. For the supported methods, see [Projected coordinate reference systems](https://github.com/Kanahiro/ml2drender#projected-coordinate-reference-systems). `projected` throws a `TypeError` if it is not an object, and renders reject for an unsupported CRS.
+- `tileMatrixSet`: `{ origin: [minX, maxY], extentAtZoom0 }`, MapLibre GL JS's tile grid for the CRS (`addProjection`). Tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`, and each zoom level splits every tile into four. `renderTile` and `renderView` reject without it; `render` does not need it.
+
+`renderView` draws the same area as MapLibre GL JS does with that center, `zoom` and `bearing` once the CRS is registered with `addProjection`: at zoom 0, tile 0/0/0 of the grid is 512 CSS pixels wide.
+
+Vector layers are drawn with projected vertices; raster, hillshade and color-relief are rendered in Web Mercator and warped. One renderer can mix CRSs and Web Mercator views, and they share loaded resources. Every field of a box is required:
+
+| Field | |
+|---|---|
+| `bbox` | `[minX, minY, maxX, maxY]` in CRS units (degrees for longlat), easting first: the area drawn at bearing 0. |
+| `bearing` | Degrees clockwise from the CRS's y axis of the direction that is up. The view turns around the center of `bbox`. |
+| `width`, `height`, `pixelRatio`, `margin` | As in `renderView`. |
+
+A tile has `z`, `x`, `y`, `tileSize` (CSS pixels), `pixelRatio` and `margin`, all required.
+
+The zoom that drives style evaluation and source tile selection comes from CRS units per CSS pixel (it is not the grid zoom of `renderTile` and `renderView`), as in [`@ml2drender/wasm`](https://github.com/Kanahiro/ml2drender#rendererprojectedcrs).
 
 ### `encodePng(rgba, width, height)`, `encodeWebp(rgba, width, height)`, `encodeJpeg(rgba, width, height, quality)`
 

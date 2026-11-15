@@ -8,8 +8,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ml2drender/wasm": "workspace:*",
     "maplibre-gl": "6.15.0",
-    "@ml2drender/wasm": "workspace:*"
+    "proj4": "2.22.0"
   },
   "devDependencies": {
     "@types/geojson": "7946.0.16",

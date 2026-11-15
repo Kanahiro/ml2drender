@@ -76,6 +76,51 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(moved[(16 * 64 + 32) * 4 :][:4], bytes([255, 255, 255, 255]))
         self.assertEqual(loaded, ["test://points.geojson"])
 
+    async def test_projected(self):
+        # Longitude/latitude: the point is in the middle of 130..150 E, 32..42 N.
+        longlat = {
+            "type": "GeographicCRS",
+            "datum": {"ellipsoid": {"semi_major_axis": 6378137, "inverse_flattening": 298.257223563}},
+        }
+        renderer = ml2drender.Renderer(STYLE, load)
+        crs = renderer.projected(longlat)
+        box = ml2drender.ProjectedBox((130, 32, 150, 42), 64, 32, pixel_ratio=2)
+        self.assertEqual(box.size, (128, 64))
+
+        def at(rgba, x, y):
+            return tuple(rgba[(y * 128 + x) * 4 :][:4])
+
+        red, white = (255, 0, 0, 255), (255, 255, 255, 255)
+        rgba = await crs.render(box)
+        self.assertEqual(len(rgba), 128 * 64 * 4)
+        self.assertEqual((at(rgba, 64, 32), at(rgba, 0, 0)), (red, white))
+        # With the box 3.125 degrees further east, the circle (10 pixels in radius) is 20 pixels
+        # left of the middle; turned 90 degrees, east is up, so it is below the middle.
+        east = (133.125, 32, 153.125, 42)
+        rgba = await crs.render(ml2drender.ProjectedBox(east, 64, 32, pixel_ratio=2))
+        self.assertEqual((at(rgba, 44, 32), at(rgba, 64, 32)), (red, white))
+        rgba = await crs.render(ml2drender.ProjectedBox(east, 64, 32, bearing=90, pixel_ratio=2))
+        self.assertEqual((at(rgba, 64, 52), at(rgba, 64, 32), at(rgba, 44, 32)), (red, white, white))
+        # An unsupported CRS raises, and Mercator views still draw afterwards.
+        robinson = {"type": "ProjectedCRS", "conversion": {"method": {"name": "Robinson"}}}
+        with self.assertRaises(RuntimeError):
+            await renderer.projected(robinson).render(ml2drender.ProjectedBox((0, 0, 1, 1), 64, 32))
+        with self.assertRaises(TypeError):  # PROJJSON is a dict, not a PROJ string
+            renderer.projected("+proj=longlat")
+        with self.assertRaises(TypeError):  # tiles and cameras need a grid
+            await crs.render_tile(0, 0, 0)
+        # On a grid whose tile 0/0/0 is 80 degrees wide from 90 E 62 N, tile 2/2/1 is
+        # 130..150 E, 22..42 N, and at zoom -1 a 64 x 32 view is the first box.
+        grid = renderer.projected(longlat, ml2drender.TileMatrixSet((90, 62), 80))
+        tile = await grid.render_tile(2, 2, 1, tile_size=64)
+        self.assertEqual(tile, await crs.render(ml2drender.ProjectedBox((130, 22, 150, 42), 64, 64)))
+        camera = ml2drender.View((140.0, 37.0), -1.0, 64, 32, pixel_ratio=2)
+        self.assertEqual(await grid.render_view(camera), await crs.render(box))
+        with self.assertRaises(RuntimeError):
+            await grid.render_tile(2, 4, 1)
+        mercator = await renderer.render_view(ml2drender.View((140.0, 37.0), 4.0, 64, 32))
+        self.assertEqual(mercator[(16 * 64 + 32) * 4 :][:4], bytes(red))
+
     async def test_transform_layer(self):
         box = [[[130, 30], [150, 30], [150, 45], [130, 45], [130, 30]]]
         style = {

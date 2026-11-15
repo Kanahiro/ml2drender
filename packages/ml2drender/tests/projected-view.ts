@@ -3,31 +3,26 @@
 // Run: node tests/projected-view.ts (after pnpm build:wasm)
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { loadProjection, MapRenderer, type StyleSpecification } from '../src/index.ts';
+import { MapRenderer, type StyleSpecification } from '../src/index.ts';
 
 const wasm = await WebAssembly.compile(readFileSync(new URL('../wasm/ml2drender_wasm.wasm', import.meta.url)));
-// UTM zone 54N.
+// Web Mercator, whose formulas fit in a line each.
+const R = 6378137;
 const projjson = {
   type: 'ProjectedCRS',
-  base_crs: { datum: { ellipsoid: { semi_major_axis: 6378137, inverse_flattening: 298.257222101 } } },
-  conversion: {
-    method: { name: 'Transverse Mercator' },
-    parameters: [
-      { name: 'Longitude of natural origin', value: 141 },
-      { name: 'Scale factor at natural origin', value: 0.9996 },
-      { name: 'False easting', value: 500000 },
-    ],
-  },
+  base_crs: { datum: { ellipsoid: { semi_major_axis: R, inverse_flattening: 298.257223563 } } },
+  conversion: { method: { name: 'Popular Visualisation Pseudo Mercator' }, parameters: [] },
 };
-const crs = { name: 'EPSG:32654', projjson, tileMatrixSet: { origin: [-2000000, 6000000] as [number, number], extentAtZoom0: 4000000 } };
-const projection = await loadProjection(projjson, { wasm });
+const forward = ([lng, lat]: number[]) => [R * lng * Math.PI / 180, R * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360))];
+const inverse = ([x, y]: number[]) => [x / R * 180 / Math.PI, (2 * Math.atan(Math.exp(y / R)) - Math.PI / 2) * 180 / Math.PI];
+const crs = { name: 'EPSG:3857', projjson, tileMatrixSet: { origin: [13000000, 6000000] as [number, number], extentAtZoom0: 4000000 } };
 
 const center: [number, number] = [139.76, 35.68];
 const zoom = 6.5;
 const unit = crs.tileMatrixSet.extentAtZoom0 / (512 * 2 ** zoom);
-const [x, y] = projection.forward(center);
+const [x, y] = forward(center);
 // A point 100 px east and 40 px north of the center.
-const other = projection.inverse([x + 100 * unit, y + 40 * unit]);
+const other = inverse([x + 100 * unit, y + 40 * unit]);
 const point = (coordinates: number[]) => ({ type: 'Feature' as const, properties: {}, geometry: { type: 'Point' as const, coordinates } });
 const style: StyleSpecification = {
   version: 8,
@@ -49,4 +44,16 @@ assert.equal(turnedAlpha(128, 128), 255, 'the map turns around the center');
 assert.equal(turnedAlpha(88, 28), 255, '100 px east is 100 px up, 40 px north is 40 px left');
 assert.equal(turnedAlpha(228, 88), 0);
 await assert.rejects(renderer.projected(crs).renderView({ center, zoom, bearing: NaN, width: 256, height: 128 }), RangeError);
-console.log('ok: projected renderView');
+// `render` draws the same from the box in CRS units, turned around its center.
+const half = 128 * unit;
+const box = await renderer.projected(crs).render({ bbox: [x - half, y - half, x + half, y + half], bearing: 90, width: 256, height: 256 });
+const boxAlpha = (px: number, py: number) => box.data[(py * box.width + px) * 4 + 3];
+assert.deepEqual([boxAlpha(128, 128), boxAlpha(88, 28), boxAlpha(228, 88)], [255, 255, 0]);
+await assert.rejects(renderer.projected(crs).render({ bbox: [0, 0, 1, 1], bearing: NaN, width: 256, height: 256 }), RangeError);
+// A box needs only the PROJJSON; tiles and cameras need the grid, and `toStyle` the name.
+const bare = renderer.projected({ projjson });
+assert.deepEqual((await bare.render({ bbox: [x - half, y - half, x + half, y + half], bearing: 90, width: 256, height: 256 })).data, box.data);
+await assert.rejects(bare.renderTile({ z: 0, x: 0, y: 0 }), TypeError);
+await assert.rejects(bare.renderView({ center, zoom, width: 256, height: 128 }), TypeError);
+assert.throws(() => bare.toStyle({ tiles: () => '' }), TypeError);
+console.log('ok: projected renderView and render');

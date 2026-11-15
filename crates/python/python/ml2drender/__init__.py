@@ -4,14 +4,23 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
 from . import _native
-from ._native import View, encode_jpeg, encode_png, encode_webp
+from ._native import ProjectedBox, View, encode_jpeg, encode_png, encode_webp
 
-__all__ = ["Renderer", "View", "encode_jpeg", "encode_png", "encode_webp"]
+__all__ = [
+    "ProjectedBox",
+    "ProjectedRenderer",
+    "Renderer",
+    "TileMatrixSet",
+    "View",
+    "encode_jpeg",
+    "encode_png",
+    "encode_webp",
+]
 
 
 Layer = dict[str, Any]
@@ -38,13 +47,24 @@ def _transform_unsupported(layer: Layer) -> list[Layer]:
     return [fill]
 
 
+class TileMatrixSet(NamedTuple):
+    """The tile grid of a CRS, as MapLibre GL JS's ``TileMatrixSet`` (``addProjection``).
+
+    Tile 0/0/0 is the square of side ``extent_at_zoom0`` whose top-left corner is ``origin``
+    (min x, max y), in CRS units. Each zoom splits every tile in four; x grows east, y south.
+    """
+
+    origin: tuple[float, float]
+    extent_at_zoom0: float
+
+
 class Renderer:
     """A style (the style JSON as a dict) fixed at creation, drawn for any number of views.
 
     Decoded resources and tiles are kept and reused by later renders.
 
     ``load`` is an async ``load(url)`` returning bytes, or None for a missing resource; its
-    exceptions propagate out of :meth:`render_view`. By default resources are fetched with HTTPX
+    exceptions propagate out of the render. By default resources are fetched with HTTPX
     (HTTP 404 means missing). URLs are passed through as written in the style; use absolute URLs.
 
     ``transform_layer(layer)`` replaces each layer of a type the renderer does not draw
@@ -90,12 +110,29 @@ class Renderer:
 
         Decoding and drawing run synchronously on the calling thread.
         """
+        return await self._render(lambda renderer: renderer.set_view(view))
+
+    def projected(self, projjson: dict[str, Any], tile_matrix_set: TileMatrixSet | None = None) -> "ProjectedRenderer":
+        """Return this renderer drawing in the CRS ``projjson`` (PROJJSON as a dict).
+
+        Supported methods: Transverse Mercator, Mercator, Pseudo Mercator, Lambert Conic Conformal,
+        Polar Stereographic, Lambert Azimuthal Equal Area, Equal Earth and PROJ's Geostationary
+        Satellite, without datum shifts. Resources loaded for one CRS serve the others, and Web
+        Mercator views, too. Raises ``TypeError`` if ``projjson`` is not a dict.
+
+        ``tile_matrix_set`` is the CRS's tile grid, which a CRS does not have by itself. Tiles and
+        cameras need it (a camera's zoom is the grid's); boxes do not.
+        """
+        if not isinstance(projjson, dict):
+            raise TypeError("projjson must be a PROJJSON dict")
+        return ProjectedRenderer(self, json.dumps(projjson), tile_matrix_set)
+
+    async def _render(self, set_view: Callable[[_native.Renderer], None]) -> bytes:
         async with self._lock, AsyncExitStack() as stack:
             if self._native is None:
-                self._native = _native.Renderer(self._style, view)
-            else:
-                self._native.set_view(view)
+                self._native = _native.Renderer(self._style)
             renderer = self._native
+            set_view(renderer)
             load = self._load
             if load is None:
                 client = await stack.enter_async_context(httpx.AsyncClient(follow_redirects=True))
@@ -127,3 +164,48 @@ class Renderer:
                     await asyncio.gather(*tasks, return_exceptions=True)
                 round += 1
             return renderer.render()
+
+
+class ProjectedRenderer:
+    """A :class:`Renderer` drawing in a CRS (see :meth:`Renderer.projected`)."""
+
+    def __init__(self, renderer: Renderer, projjson: str, tile_matrix_set: TileMatrixSet | None) -> None:
+        self._renderer = renderer
+        self._projjson = projjson
+        self._tile_matrix_set = tile_matrix_set
+
+    def _grid(self) -> tuple[str, tuple[float, float], float]:
+        if self._tile_matrix_set is None:
+            raise TypeError("tile_matrix_set is required for tiles and cameras")
+        origin, extent_at_zoom0 = self._tile_matrix_set
+        return self._projjson, origin, extent_at_zoom0
+
+    async def render(self, box: ProjectedBox) -> bytes:
+        """:meth:`Renderer.render_view` of a box of the CRS (see :attr:`ProjectedBox.size`).
+
+        Raises ``RuntimeError`` for a CRS the renderer does not support.
+        """
+        return await self._renderer._render(lambda renderer: renderer.set_projected_view(self._projjson, box))
+
+    async def render_tile(
+        self, z: int, x: int, y: int, tile_size: int = 256, pixel_ratio: float = 1.0, margin: int = 0
+    ) -> bytes:
+        """:meth:`render` of tile ``z/x/y`` of the CRS's grid, ``tile_size`` CSS pixels square.
+
+        The image is ``round(tile_size * pixel_ratio)`` pixels square. Raises ``TypeError`` without
+        a ``tile_matrix_set`` and ``RuntimeError`` for a tile that is not of the grid.
+        """
+        grid = self._grid()
+        tile = (z, x, y, tile_size, pixel_ratio, margin)
+        return await self._renderer._render(lambda renderer: renderer.set_projected_tile(*grid, *tile))
+
+    async def render_view(self, view: View) -> bytes:
+        """:meth:`render` of MapLibre GL JS's camera in the CRS (registered with ``addProjection``).
+
+        ``view.center`` (lng, lat) is in the middle, tile 0/0/0 of the grid is 512 CSS pixels wide
+        at zoom 0, and the view turns around the center by ``view.bearing`` (from the CRS's y
+        axis). Raises ``TypeError`` without a ``tile_matrix_set`` and ``RuntimeError`` for a center
+        outside the CRS.
+        """
+        grid = self._grid()
+        return await self._renderer._render(lambda renderer: renderer.set_projected_camera(*grid, view))
