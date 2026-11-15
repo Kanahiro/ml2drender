@@ -4,7 +4,7 @@ import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import projectionHandlerUrl from './gl-projection-handler.ts?worker&url';
 import projjsonPresets from './projjson-presets.json';
 import { clipToCrs, type Crs, registerProjJson, zoomOffset } from './projections';
-import { type Crs as RendererCrs, MapRenderer } from 'ml2drender';
+import { type Crs as RendererCrs, MapRenderer } from '@ml2drender/wasm';
 import { stylePresets } from './styles';
 import { TileWorker } from './worker-client';
 

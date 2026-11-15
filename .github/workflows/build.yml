@@ -1,5 +1,5 @@
 # Lint, build and test every package on every runtime, and keep what would be published as artifacts:
-#   npm         ml2drender (TypeScript + WASM) and ml2drender-node (the addon's loader) tarballs
+#   npm         @ml2drender/wasm (TypeScript + WASM) and @ml2drender/node (the addon's loader) tarballs
 #   napi-*      the Node-API addon of each platform
 #   wheel-*     the Python wheel of each platform, and sdist
 # Called by ci.yml (pull requests, main) and publish.yml. Rust comes from rust-toolchain.toml.
@@ -61,7 +61,7 @@ jobs:
       - run: pnpm build:wasm
       - run: pnpm typecheck
       - name: Test on Node.js
-        run: pnpm --filter ml2drender test
+        run: pnpm --filter @ml2drender/wasm test
       - name: Test on Deno
         working-directory: packages/ml2drender
         run: for t in single-flight shared-instance projected-view; do deno run --allow-read tests/$t.ts; done
@@ -71,9 +71,9 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/npm"
           cp README.md LICENSE packages/ml2drender/
-          pnpm --filter ml2drender build
+          pnpm --filter @ml2drender/wasm build
           (cd packages/ml2drender && pnpm pack --pack-destination "$RUNNER_TEMP/npm")
-          pnpm --filter ml2drender-node build
+          pnpm --filter @ml2drender/node build
           node scripts/npm-node.ts deps
           (cd packages/ml2drender-node && pnpm pack --pack-destination "$RUNNER_TEMP/npm")
       - name: Test the packed package
@@ -81,7 +81,7 @@ jobs:
           version=$(node -p "require('./packages/ml2drender/package.json').version")
           mkdir "$RUNNER_TEMP/installed" && cd "$RUNNER_TEMP/installed"
           echo '{ "type": "module" }' > package.json
-          pnpm add "$RUNNER_TEMP/npm/ml2drender-$version.tgz"
+          pnpm add "$RUNNER_TEMP/npm/ml2drender-wasm-$version.tgz"
           cp "$GITHUB_WORKSPACE/packages/ml2drender/tests/installed.ts" . && node installed.ts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

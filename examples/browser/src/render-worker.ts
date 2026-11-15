@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import { type Crs, MapRenderer, type SourceTile, type Tile } from 'ml2drender';
+import { type Crs, MapRenderer, type SourceTile, type Tile } from '@ml2drender/wasm';
 import type { StyleSpecification } from 'maplibre-gl';
 
 export type WorkerRequest =

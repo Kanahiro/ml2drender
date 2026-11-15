@@ -1,4 +1,4 @@
-import type { Crs, SourceTile, Tile } from 'ml2drender';
+import type { Crs, SourceTile, Tile } from '@ml2drender/wasm';
 import type { StyleSpecification } from 'maplibre-gl';
 import type { WorkerRequest, WorkerResponse } from './render-worker';
 

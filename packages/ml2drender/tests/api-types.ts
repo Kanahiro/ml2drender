@@ -1,6 +1,6 @@
 import type { FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 import { loadProjection, loadProjectionFactory, MapRenderer, type FillExtrusionLayer, type InitOptions, type Projection, type StyleLayer } from '../src/index';
-import wasm from 'ml2drender/renderer.wasm';
+import wasm from '@ml2drender/wasm/renderer.wasm';
 
 async function pngResponse() {
   const style: StyleSpecification = await (await fetch('https://example.com/style.json')).json();

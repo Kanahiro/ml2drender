@@ -5,7 +5,7 @@
  * {@link Renderer.needs} → fetch → {@link Renderer.provide}, then calls {@link Renderer.render}.
  * The work runs on libuv's thread pool, so the JavaScript thread stays free and several renderers
  * draw in parallel. It draws Web Mercator views only; for projected CRSs, reprojected sources and
- * resource fetching, use the WebAssembly package `ml2drender`, which also runs in Node.js.
+ * resource fetching, use the WebAssembly package `@ml2drender/wasm`, which also runs in Node.js.
  *
  * @module
  */
@@ -77,7 +77,7 @@ interface Binding {
 }
 
 /** The npm package with the addon for this platform. */
-const target = `ml2drender-node-${process.platform}-${process.arch}${process.platform === 'linux' ? '-gnu' : ''}`;
+const target = `@ml2drender/node-${process.platform}-${process.arch}${process.platform === 'linux' ? '-gnu' : ''}`;
 
 function load(): Binding {
   const require = createRequire(import.meta.url);
@@ -90,7 +90,7 @@ function load(): Binding {
   try {
     return require(target);
   } catch (error) {
-    throw new Error(`ml2drender-node: no prebuilt addon for this platform (${target}). Use the WebAssembly package ml2drender instead.`, { cause: error });
+    throw new Error(`@ml2drender/node: no prebuilt addon for this platform (${target}). Use the WebAssembly package @ml2drender/wasm instead.`, { cause: error });
   }
 }
 
