@@ -28,7 +28,11 @@
     "typecheck": "tsc --noEmit",
     "test": "node tests/render.ts"
   },
+  "peerDependencies": {
+    "@maplibre/maplibre-gl-style-spec": "^26.4.4"
+  },
   "devDependencies": {
+    "@maplibre/maplibre-gl-style-spec": "26.4.4",
     "@types/node": "24.19.2",
     "typescript": "6.0.3"
   }

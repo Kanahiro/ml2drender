@@ -199,6 +199,9 @@ importers:
 
   packages/ml2drender-node:
     devDependencies:
+      '@maplibre/maplibre-gl-style-spec':
+        specifier: 26.4.4
+        version: 26.4.4
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2

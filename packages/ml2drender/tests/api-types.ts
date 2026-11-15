@@ -1,5 +1,5 @@
 import type { FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
-import { loadProjection, loadProjectionFactory, MapRenderer, type FillExtrusionLayer, type InitOptions, type Projection, type StyleLayer } from '../src/index';
+import { loadProjection, loadProjectionFactory, MapRenderer, type InitOptions, type Projection, type StyleLayer } from '../src/index';
 import wasm from '@ml2drender/wasm/renderer.wasm';
 
 async function pngResponse() {
@@ -64,7 +64,7 @@ async function webpBytes(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>
   return (await renderer.renderView({ center: [0, 0], zoom: 0, width: 256, height: 256 })).toWebp();
 }
 
-const transform: NonNullable<InitOptions['transformFillExtrusion']> = (layer) => ({
+const transform: NonNullable<InitOptions['transformLayer']> = (layer) => layer.type !== 'fill-extrusion' ? [] : [{
   id: layer.id,
   type: 'fill',
   source: layer.source,
@@ -74,13 +74,13 @@ const transform: NonNullable<InitOptions['transformFillExtrusion']> = (layer) =>
   filter: layer.filter,
   layout: { visibility: layer.layout?.visibility },
   paint: { 'fill-color': layer.paint?.['fill-extrusion-color'] ?? '#888888' },
-});
+}];
 
-const extrusion: FillExtrusionLayer = {
+const extrusion: LayerSpecification = {
   id: 'buildings', type: 'fill-extrusion', source: 'buildings',
   paint: { 'fill-extrusion-height': ['get', 'height'] },
 };
-const replacement: LayerSpecification = transform(extrusion);
+const replacement: LayerSpecification[] = transform(extrusion);
 const fill: FillLayerSpecification = { id: 'fill', type: 'fill', source: 'buildings' };
 const supported: StyleLayer = fill;
 
@@ -90,8 +90,8 @@ const missingSource: StyleLayer = { id: 'fill', type: 'fill' };
 const misspelledPaint: StyleLayer = { id: 'fill', type: 'fill', source: 'buildings', paint: { 'fill-colour': '#888888' } };
 // @ts-expect-error Fill color cannot be a number.
 const invalidColor: StyleLayer = { id: 'fill', type: 'fill', source: 'buildings', paint: { 'fill-color': 123 } };
-// @ts-expect-error The replacement must be a supported 2D layer.
-const unsupportedTransform: InitOptions = { transformFillExtrusion: (layer) => layer };
+// @ts-expect-error The replacement is an array of layers.
+const singleTransform: InitOptions = { transformLayer: (layer) => layer };
 
 const customResourceLoader: InitOptions = {
   loadResource: async (url) => new Uint8Array(await (await fetch(url)).arrayBuffer()),

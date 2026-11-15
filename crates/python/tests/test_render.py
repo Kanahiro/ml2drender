@@ -1,6 +1,7 @@
 """python -m unittest discover crates/python/tests (with the wheel installed)."""
 
 import asyncio
+import copy
 import json
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,16 +10,14 @@ from threading import Barrier, BrokenBarrierError, Thread
 import httpx
 import ml2drender
 
-STYLE = json.dumps(
-    {
-        "version": 8,
-        "sources": {"points": {"type": "geojson", "data": "test://points.geojson"}},
-        "layers": [
-            {"id": "bg", "type": "background", "paint": {"background-color": "#ffffff"}},
-            {"id": "points", "type": "circle", "source": "points", "paint": {"circle-color": "#ff0000"}},
-        ],
-    }
-)
+STYLE = {
+    "version": 8,
+    "sources": {"points": {"type": "geojson", "data": "test://points.geojson"}},
+    "layers": [
+        {"id": "bg", "type": "background", "paint": {"background-color": "#ffffff"}},
+        {"id": "points", "type": "circle", "source": "points", "paint": {"circle-color": "#ff0000"}},
+    ],
+}
 
 POINTS = json.dumps(
     {
@@ -34,18 +33,22 @@ async def load(url):
     return POINTS if url == "test://points.geojson" else None
 
 
+async def render(style, view, load=None, transform_layer=None):
+    return await ml2drender.Renderer(style, load, transform_layer).render_view(view)
+
+
 def two_sources(first, second):
-    style = json.loads(STYLE)
+    style = copy.deepcopy(STYLE)
     style["sources"]["points"]["data"] = first
     style["sources"]["other"] = {"type": "geojson", "data": second}
     style["layers"].append({**style["layers"][1], "id": "other", "source": "other"})
-    return json.dumps(style)
+    return style
 
 
 class RenderTest(unittest.IsolatedAsyncioTestCase):
     async def test_render_tile(self):
         view = ml2drender.View.tile(5, 28, 12, 256)
-        rgba = await ml2drender.render(STYLE, view, load)
+        rgba = await render(STYLE, view, load)
         width, height = view.size
         self.assertEqual(len(rgba), width * height * 4)
         pixels = {bytes(rgba[i : i + 4]) for i in range(0, len(rgba), 4)}
@@ -55,14 +58,67 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(png[:4], b"\x89PNG")
         self.assertEqual(ml2drender.encode_jpeg(rgba, width, height)[:2], b"\xff\xd8")
 
-    async def test_step_by_step(self):
-        r = ml2drender.Renderer(STYLE, ml2drender.View((140.0, 37.0), 4.0, 64, 32))
-        urls = r.needs()
-        self.assertTrue(urls)
-        for url in urls:
-            r.provide(url, await load(url))
-        self.assertEqual(r.needs(), [])
-        self.assertEqual(len(r.render()), 64 * 32 * 4)
+    async def test_reuse(self):
+        loaded = []
+
+        async def counting(url):
+            loaded.append(url)
+            return await load(url)
+
+        renderer = ml2drender.Renderer(STYLE, counting)
+        view = ml2drender.View((140.0, 37.0), 4.0, 64, 32)
+        west = ml2drender.View((120.0, 37.0), 4.0, 64, 32)
+        first = await renderer.render_view(view)
+        # Overlapping renders of one renderer take turns, and reuse what was loaded.
+        moved, again = await asyncio.gather(renderer.render_view(west), renderer.render_view(view))
+        self.assertEqual(again, first)
+        self.assertEqual(first[(16 * 64 + 32) * 4 :][:4], bytes([255, 0, 0, 255]))
+        self.assertEqual(moved[(16 * 64 + 32) * 4 :][:4], bytes([255, 255, 255, 255]))
+        self.assertEqual(loaded, ["test://points.geojson"])
+
+    async def test_transform_layer(self):
+        box = [[[130, 30], [150, 30], [150, 45], [130, 45], [130, 30]]]
+        style = {
+            "version": 8,
+            "sources": {
+                "box": {
+                    "type": "geojson",
+                    "data": {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": box}},
+                }
+            },
+            "layers": [
+                {"id": "bg", "type": "background", "paint": {"background-color": "#ffffff"}},
+                {
+                    "id": "box",
+                    "type": "fill-extrusion",
+                    "source": "box",
+                    "paint": {"fill-extrusion-color": "#0000ff", "fill-extrusion-height": 10},
+                },
+                {"id": "future", "type": "unknown"},
+            ],
+        }
+        view = ml2drender.View((140.0, 37.0), 4.0, 64, 32)
+
+        async def center(transform_layer=None):
+            rgba = await render(style, view, transform_layer=transform_layer)
+            return tuple(rgba[(16 * 64 + 32) * 4 :][:4])
+
+        # By default a fill-extrusion becomes a fill and other unsupported layers are dropped.
+        self.assertEqual(await center(), (0, 0, 255, 255))
+        self.assertEqual(await center(lambda layer: []), (255, 255, 255, 255))
+        # Unsupported layers that come back are skipped.
+        self.assertEqual(await center(lambda layer: [layer]), (255, 255, 255, 255))
+        seen = []
+
+        def custom(layer):
+            seen.append(layer["id"])
+            green = {"id": "a", "type": "fill", "source": "box", "paint": {"fill-color": "#00ff00"}}
+            return [green, {"id": "b", "type": "line", "source": "box"}] if layer["id"] == "box" else []
+
+        self.assertEqual(await center(custom), (0, 255, 0, 255))
+        self.assertEqual(seen, ["box", "future"])
+        with self.assertRaises(TypeError):
+            ml2drender.Renderer(style, transform_layer=lambda layer: layer)
 
     async def test_custom_missing(self):
         view = ml2drender.View((140.0, 37.0), 4.0, 64, 32)
@@ -70,17 +126,17 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         async def missing(url):
             return None
 
-        self.assertEqual(await ml2drender.render(STYLE, view, load=missing), bytes([255]) * (64 * 32 * 4))
+        self.assertEqual(await render(STYLE, view, load=missing), bytes([255]) * (64 * 32 * 4))
 
     async def test_errors(self):
-        with self.assertRaises(RuntimeError):
-            ml2drender.Renderer("{", ml2drender.View.tile(0, 0, 0))
+        with self.assertRaises(TypeError):  # a JSON string is not a style
+            ml2drender.Renderer(json.dumps(STYLE))
 
         async def broken(url):
             raise OSError("offline")
 
         with self.assertRaises(OSError):
-            await ml2drender.render(STYLE, ml2drender.View.tile(5, 28, 12), broken)
+            await render(STYLE, ml2drender.View.tile(5, 28, 12), broken)
 
     async def test_concurrent_custom_loads(self):
         started = set()
@@ -95,7 +151,7 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
 
         style = two_sources("test://first", "test://second")
         view = ml2drender.View.tile(0, 0, 0, 32)
-        rgba = await asyncio.wait_for(ml2drender.render(style, view, concurrent), timeout=2)
+        rgba = await asyncio.wait_for(render(style, view, concurrent), timeout=2)
         self.assertEqual(started, {"test://first", "test://second"})
         self.assertEqual(len(rgba), 32 * 32 * 4)
 
@@ -116,7 +172,7 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
 
         style = two_sources("test://fail", "test://pending")
         with self.assertRaises(OSError) as raised:
-            await asyncio.wait_for(ml2drender.render(style, ml2drender.View.tile(0, 0, 0, 32), failing), timeout=2)
+            await asyncio.wait_for(render(style, ml2drender.View.tile(0, 0, 0, 32), failing), timeout=2)
         self.assertIs(raised.exception, error)
         self.assertTrue(finished.is_set())
 
@@ -132,7 +188,7 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
                 finished.set()
 
-        task = asyncio.create_task(ml2drender.render(STYLE, ml2drender.View.tile(0, 0, 0, 32), pending))
+        task = asyncio.create_task(render(STYLE, ml2drender.View.tile(0, 0, 0, 32), pending))
         await asyncio.wait_for(started.wait(), timeout=2)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -194,35 +250,35 @@ class HttpRenderTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.view = ml2drender.View((140.0, 37.0), 4.0, 64, 32)
-        self.expected = await ml2drender.render(STYLE, self.view, load)
+        self.expected = await render(STYLE, self.view, load)
         self.empty = bytes([255]) * (64 * 32 * 4)
 
     def style(self, path):
-        return STYLE.replace("test://points.geojson", self.base + path)
+        return {**STYLE, "sources": {"points": {"type": "geojson", "data": self.base + path}}}
 
     async def test_default_http(self):
-        self.assertEqual(await ml2drender.render(self.style("/points.geojson"), self.view), self.expected)
-        self.assertEqual(await ml2drender.render(self.style("/points.geojson"), self.view, load=None), self.expected)
-        self.assertEqual(await ml2drender.render(self.style("/redirect"), self.view), self.expected)
+        self.assertEqual(await render(self.style("/points.geojson"), self.view), self.expected)
+        self.assertEqual(await render(self.style("/points.geojson"), self.view, load=None), self.expected)
+        self.assertEqual(await render(self.style("/redirect"), self.view), self.expected)
 
     async def test_missing(self):
-        self.assertEqual(await ml2drender.render(self.style("/missing"), self.view), self.empty)
+        self.assertEqual(await render(self.style("/missing"), self.view), self.empty)
 
     async def test_http_errors(self):
         for path, status in [("/forbidden", 403), ("/error", 500)]:
             with self.subTest(status=status), self.assertRaises(httpx.HTTPStatusError) as raised:
-                await ml2drender.render(self.style(path), self.view)
+                await render(self.style(path), self.view)
             self.assertEqual(raised.exception.response.status_code, status)
 
     async def test_network_error(self):
         with self.assertRaises(httpx.RequestError):
-            await ml2drender.render(self.style("/offline"), self.view)
+            await render(self.style("/offline"), self.view)
 
     async def test_staged_resources(self):
-        style = json.loads(STYLE)
+        style = copy.deepcopy(STYLE)
         style["sources"]["points"] = {"type": "vector", "url": self.base + "/source.json"}
         style["layers"][1]["source-layer"] = "points"
-        self.assertEqual(await ml2drender.render(json.dumps(style), self.view), self.empty)
+        self.assertEqual(await render(style, self.view), self.empty)
         self.assertIn("/source.json", self.requests)
         self.assertIn("/tiles/0/0/0.pbf", self.requests)
         style["sources"]["points"] = {
@@ -230,7 +286,7 @@ class HttpRenderTest(unittest.IsolatedAsyncioTestCase):
             "tiles": [self.base + "/missing/{z}/{x}/{y}.pbf"],
             "maxzoom": 0,
         }
-        self.assertEqual(await ml2drender.render(json.dumps(style), self.view), self.empty)
+        self.assertEqual(await render(style, self.view), self.empty)
 
     async def test_default_http_loads_overlap(self):
         type(self).barrier = Barrier(2, timeout=2)
@@ -239,8 +295,8 @@ class HttpRenderTest(unittest.IsolatedAsyncioTestCase):
         async def points(url):
             return POINTS
 
-        expected = await ml2drender.render(style, self.view, points)
-        self.assertEqual(await asyncio.wait_for(ml2drender.render(style, self.view), timeout=4), expected)
+        expected = await render(style, self.view, points)
+        self.assertEqual(await asyncio.wait_for(render(style, self.view), timeout=4), expected)
 
 
 if __name__ == "__main__":
