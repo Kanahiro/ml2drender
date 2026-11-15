@@ -1,15 +1,15 @@
 /**
  * The ml2drender renderer as a native Node.js addon (Node-API).
  *
- * {@link render} fetches the resources a style needs, with an optional custom loader.
- * {@link Renderer} exposes the sans-IO steps for hosts that manage fetching and reuse themselves.
- * The work runs on libuv's thread pool, so the JavaScript thread stays free and several renderers
- * draw in parallel. It draws Web Mercator views only; for projected CRSs and reprojected sources,
+ * A {@link Renderer} draws views of a style, fetching the resources they need (or loading them
+ * through `loadResource`). The work runs on libuv's thread pool, so the JavaScript thread stays
+ * free and several renderers draw in parallel. It draws Web Mercator views only; for projected CRSs and reprojected sources,
  * use the WebAssembly package `@ml2drender/wasm`, which also runs in Node.js.
  *
  * @module
  */
 import { createRequire } from 'node:module';
+import type { FillExtrusionLayerSpecification, FillLayerSpecification, LayerSpecification, StyleSpecification } from '@maplibre/maplibre-gl-style-spec';
 
 /** A Web Mercator camera. Every field is required. */
 export interface View {
@@ -31,46 +31,35 @@ export interface View {
   margin: number;
 }
 
-/**
- * A style fixed at creation, drawn for a view once the resources it needs are provided.
- *
- * Calls on one renderer must not overlap: await each before the next.
- */
-export interface Renderer {
-  /** Point the renderer at another camera, keeping the resources and tiles it has. */
+/** Options of {@link Renderer}. */
+export interface RendererOptions {
+  /**
+   * Load bytes for a URL, or `null` for a missing resource (HTTP 404). Other failures must
+   * reject. Use this for authentication, caching, retries or non-HTTP resources. URLs are passed
+   * through as written in the style. Loads within each stage run concurrently. Default: `fetch`.
+   */
+  loadResource?: (url: string) => Promise<Uint8Array | null>;
+  /**
+   * Replace each layer of a type the renderer does not draw (fill-extrusion) with any number of
+   * layers. Default: a fill-extrusion becomes a fill preserving its 2D appearance, any other is
+   * dropped. Layers of supported types are not passed; unsupported layers returned are skipped.
+   */
+  transformLayer?: (layer: LayerSpecification) => LayerSpecification[];
+}
+
+/** The addon's sans-IO renderer. Calls on one renderer must not overlap. */
+interface NativeRenderer {
   setView(view: View): void;
-  /**
-   * Number the render about to run, for {@link Renderer.render}'s `oldest`. Only hosts that
-   * interleave renders of several views on one renderer need it.
-   */
-  setTicket(ticket: number): void;
-  /**
-   * Whether to keep line and fill geometry between renders (default: true). `false` frees it as
-   * soon as the last layer using it is drawn, lowering peak memory for one-off renders.
-   */
-  setKeepBuckets(keep: boolean): void;
-  /**
-   * URLs still needed before {@link Renderer.render}: the style's TileJSON, GeoJSON, sprites and
-   * images, then tiles, then glyph ranges. Resources come in stages, each found from the last, so
-   * repeat until it is empty.
-   */
+  /** URLs still needed: sources, then tiles, then glyph ranges, each stage found from the last. */
   needs(): Promise<string[]>;
-  /**
-   * The bytes of `url`, or `null` for a missing resource (like HTTP 404: a missing vector tile is
-   * empty, a missing raster tile is replaced by its parent). The bytes are read in place: don't
-   * modify them until this resolves.
-   */
+  /** `null` is a missing resource. The bytes are read in place until this resolves. */
   provide(url: string, bytes: Uint8Array | null): Promise<void>;
-  /**
-   * Non-premultiplied RGBA8 pixels, row by row. Call when {@link Renderer.needs} is empty. `oldest` is the oldest
-   * ticket (see {@link Renderer.setTicket}) of renders still in progress, whose tiles are kept;
-   * pass 0 if you don't use tickets.
-   */
+  /** `oldest` is the oldest ticket of renders in progress; 0 without tickets. */
   render(oldest: number): Promise<Uint8Array>;
 }
 
 interface Binding {
-  Renderer: new (style: string, view: View) => Renderer;
+  Renderer: new (style: string, view: View) => NativeRenderer;
   encodePng(rgba: Uint8Array, width: number, height: number): Promise<Uint8Array>;
   encodeWebp(rgba: Uint8Array, width: number, height: number): Promise<Uint8Array>;
   encodeJpeg(rgba: Uint8Array, width: number, height: number, quality: number): Promise<Uint8Array>;
@@ -106,50 +95,93 @@ async function fetchResource(url: string): Promise<Uint8Array | null> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-/**
- * RGBA8 pixels of `style` (style JSON) in `view`, fetching resources with HTTP `fetch` by default.
- *
- * @param style - Style JSON, with absolute resource URLs.
- * @param view - The Web Mercator camera to draw.
- * @param loadResource - Load bytes for a URL, or `null` for a missing resource (HTTP 404). Other
- * failures must reject. Use this for authentication, caching, retries or non-HTTP resources.
- * URLs are passed through as written in the style. Loads within each stage run concurrently.
- * @returns Non-premultiplied RGBA8 pixels, row by row. Loading and rendering errors reject.
- */
-export async function render(
-  style: string,
-  view: View,
-  loadResource: (url: string) => Promise<Uint8Array | null> = fetchResource,
-): Promise<Uint8Array> {
-  const renderer = new Renderer(style, view);
-  for (let round = 0; ; round++) {
-    const urls = await renderer.needs();
-    if (urls.length === 0) break;
-    if (round >= 32) throw new Error('Resource requests did not settle');
-    const resources = await Promise.all(urls.map((url) => loadResource(url)));
-    // Only fetching overlaps: calls on the native renderer must be awaited one at a time.
-    for (let i = 0; i < urls.length; i++) await renderer.provide(urls[i], resources[i]);
-  }
-  return renderer.render(0);
+// The same replacement as `@ml2drender/wasm`: keep the two in step.
+const SUPPORTED_LAYERS = new Set<string>(['background', 'fill', 'line', 'circle', 'raster', 'symbol', 'hillshade', 'color-relief', 'heatmap']);
+
+function flattenFillExtrusion(layer: FillExtrusionLayerSpecification): FillLayerSpecification {
+  const { type, paint, layout, ...base } = layer;
+  // Shared paint properties have the same defaults; absent values stay unset. Expressions stay intact.
+  return {
+    ...base,
+    type: 'fill',
+    layout: { visibility: layout?.visibility },
+    paint: {
+      'fill-color': paint?.['fill-extrusion-color'],
+      'fill-opacity': paint?.['fill-extrusion-opacity'],
+      'fill-pattern': paint?.['fill-extrusion-pattern'],
+      'fill-translate': paint?.['fill-extrusion-translate'],
+      'fill-translate-anchor': paint?.['fill-extrusion-translate-anchor'],
+    },
+  };
+}
+
+function transformUnsupported(layer: LayerSpecification): LayerSpecification[] {
+  return layer.type === 'fill-extrusion' ? [flattenFillExtrusion(layer)] : [];
+}
+
+function styleJson(style: StyleSpecification, transform: NonNullable<RendererOptions['transformLayer']> = transformUnsupported): string {
+  // A JSON string would stringify to a valid, empty style and draw nothing.
+  if (!style || typeof style !== 'object' || !Array.isArray(style.layers)) throw new TypeError('style must be a style object with layers');
+  const layers = style.layers.flatMap((layer: LayerSpecification) => {
+    if (!layer || typeof layer !== 'object' || SUPPORTED_LAYERS.has(layer.type)) return [layer];
+    const replacement = transform(layer);
+    if (!Array.isArray(replacement)) throw new TypeError(`transformLayer must return an array of layers (layer ${layer.id})`);
+    return replacement;
+  });
+  return JSON.stringify({ ...style, layers });
 }
 
 /**
- * Create a renderer of `style` (style JSON) for `view`. Throws on an invalid style.
+ * A style fixed at creation, drawn for any number of views. Decoded resources and tiles are kept
+ * and reused by later renders.
  *
  * @example
  * ```ts
- * const renderer = new Renderer(JSON.stringify(style), view);
- * for (let urls = await renderer.needs(); urls.length > 0; urls = await renderer.needs()) {
- *   for (const url of urls) {
- *     const response = await fetch(url);
- *     if (!response.ok && response.status !== 404) throw new Error(`HTTP ${response.status} ${url}`);
- *     await renderer.provide(url, response.ok ? new Uint8Array(await response.arrayBuffer()) : null);
- *   }
- * }
- * const rgba = await renderer.render(0);
+ * const renderer = new Renderer(style);
+ * const rgba = await renderer.renderView({ lng: 139.767, lat: 35.681, zoom: 5, bearing: 0, width: 512, height: 512, pixelRatio: 1, margin: 0 });
  * ```
  */
-export const Renderer: new (style: string, view: View) => Renderer = binding.Renderer;
+export class Renderer {
+  readonly #style: string;
+  readonly #loadResource: NonNullable<RendererOptions['loadResource']>;
+  #native: NativeRenderer | undefined;
+  #queue: Promise<unknown> = Promise.resolve();
+
+  /**
+   * @param style - The style, with absolute resource URLs. Throws a `TypeError` if it is not a style object.
+   */
+  constructor(style: StyleSpecification, options: RendererOptions = {}) {
+    this.#style = styleJson(style, options.transformLayer);
+    this.#loadResource = options.loadResource ?? fetchResource;
+  }
+
+  /**
+   * Non-premultiplied RGBA8 pixels of `view`, row by row, after loading the resources it needs.
+   * Loading and rendering errors reject. Renders of one renderer take turns; use several
+   * renderers to draw in parallel.
+   */
+  renderView(view: View): Promise<Uint8Array> {
+    // The native renderer takes one call at a time and has one view.
+    const rgba = this.#queue.then(() => this.#draw(view));
+    this.#queue = rgba.catch(() => {});
+    return rgba;
+  }
+
+  async #draw(view: View): Promise<Uint8Array> {
+    if (this.#native) this.#native.setView(view);
+    else this.#native = new binding.Renderer(this.#style, view);
+    const native = this.#native;
+    for (let round = 0; ; round++) {
+      const urls = await native.needs();
+      if (urls.length === 0) break;
+      if (round >= 32) throw new Error('Resource requests did not settle');
+      const resources = await Promise.all(urls.map((url) => this.#loadResource(url)));
+      // Only fetching overlaps: calls on the native renderer must be awaited one at a time.
+      for (let i = 0; i < urls.length; i++) await native.provide(urls[i], resources[i]);
+    }
+    return native.render(0);
+  }
+}
 
 /** Lossless PNG of RGBA8 pixels. Runs on the thread pool; don't modify `rgba` until it resolves. */
 export const encodePng: (rgba: Uint8Array, width: number, height: number) => Promise<Uint8Array> = binding.encodePng;

@@ -13,7 +13,7 @@ Prebuilt addons are published for Linux (x64, arm64; glibc 2.34+), macOS (x64, a
 | | `@ml2drender/wasm` (WebAssembly) | `@ml2drender/node` (this package) |
 |---|---|---|
 | Runs in | browsers, Node.js, Deno, Cloudflare Workers | Node.js |
-| Fetching | built in (`loadResource` to customize) | built in (`render`'s `loadResource` to customize) |
+| Fetching | built in (`loadResource` to customize) | built in (`loadResource` to customize) |
 | Views | Web Mercator, projected CRSs (PROJJSON) | Web Mercator |
 | Reprojected sources for GL JS (`getTile`, `toStyle`) | yes | no |
 | Concurrency | renders take turns on the JS thread | renders run in parallel on libuv's thread pool, off the JS thread |
@@ -23,10 +23,11 @@ Both draw with the same Rust core, so the same view gives the same image. Choose
 ## Usage
 
 ```ts
-import { encodePng, render } from '@ml2drender/node';
+import { encodePng, Renderer } from '@ml2drender/node';
 
-const style = await (await fetch('https://demotiles.maplibre.org/style.json')).text();
-const rgba = await render(style, {
+const style = await (await fetch('https://demotiles.maplibre.org/style.json')).json();
+const renderer = new Renderer(style);
+const rgba = await renderer.renderView({
   lng: 139.767, lat: 35.681, zoom: 5, bearing: 0,
   width: 512, height: 512, pixelRatio: 1, margin: 0,
 });
@@ -34,21 +35,24 @@ const rgba = await render(style, {
 const png = await encodePng(rgba, 512, 512);
 ```
 
-`render` fetches TileJSON, GeoJSON, sprites, tiles and glyph ranges with the standard `fetch`. HTTP 404 means a missing resource (an empty vector tile, or a raster tile replaced by its parent); other HTTP and network errors reject. Resource URLs are passed on exactly as the style writes them, so make `glyphs`, `sprite` and TileJSON URLs absolute.
+The renderer fetches TileJSON, GeoJSON, sprites, tiles and glyph ranges with the standard `fetch`. HTTP 404 means a missing resource (an empty vector tile, or a raster tile replaced by its parent); other HTTP and network errors reject. Resource URLs are passed on exactly as the style writes them, so make `glyphs`, `sprite` and TileJSON URLs absolute.
 
 ## API
 
-### `render(style, view, loadResource?)`
+### `new Renderer(style, options?)`
 
-Returns non-premultiplied RGBA8 pixels, row by row, as a `Promise<Uint8Array>`. `style` is a JSON string; `view` is the camera described below. A fresh renderer is created for each call.
+`style` is the style object (`StyleSpecification` of `@maplibre/maplibre-gl-style-spec`). Throws a `TypeError` if it is not a style object. The style is fixed for the life of the renderer.
 
-Override fetching with `loadResource: (url: string) => Promise<Uint8Array | null>`, for authentication, caching or non-HTTP sources. Return `null` only for a missing resource; reject for other failures. Resources come in stages (sources, then tiles, then glyph ranges); `render` repeats the loading loop until all are ready. Loads within a stage run concurrently. Fetched bytes are not cached: cache in your loader if needed.
+| Option | Default | Description |
+|---|---|---|
+| `loadResource` | HTTP `fetch` | `(url: string) => Promise<Uint8Array \| null>`, for authentication, caching or non-HTTP sources. Return `null` only for a missing resource; reject for other failures. Loads within a stage run concurrently. Fetched bytes are not cached: cache in your loader if needed. |
+| `transformLayer` | fill-extrusion to fill | `(layer) => LayerSpecification[]`. Replaces each layer of a type the renderer does not draw (fill-extrusion) with any number of layers. By default a fill-extrusion becomes a fill with the same color, opacity, pattern and translation, and any other is dropped. |
 
-### `new Renderer(style, view)`
+### `renderer.renderView(view)`
 
-`style` is the style JSON as a string. Throws on an invalid style. The style is fixed for the life of the renderer.
+Returns non-premultiplied RGBA8 pixels, row by row, as a `Promise<Uint8Array>`. Resources come in stages (sources, then tiles, then glyph ranges); the renderer repeats the loading loop until all are ready, then draws.
 
-Use this lower-level API to manage fetching yourself or reuse decoded resources across views: repeat `needs` → load → `provide` until `needs` is empty, then call `render(0)`.
+A renderer keeps the resources and tiles it has decoded, so later views load only what is missing. Renders of one renderer take turns; use several renderers to render in parallel.
 
 `view` is a Web Mercator camera; every field is required:
 
@@ -60,17 +64,6 @@ Use this lower-level API to manage fetching yourself or reuse decoded resources 
 | `width`, `height` | Output size in CSS pixels. |
 | `pixelRatio` | Device pixels per CSS pixel. The image is `round(width * pixelRatio)` x `round(height * pixelRatio)` pixels. |
 | `margin` | CSS pixels drawn around the view and cropped, so labels near the edge are placed as in a larger map. |
-
-Calls on one renderer must not overlap: await each before the next. Use several renderers to render in parallel.
-
-| Method | |
-|---|---|
-| `needs(): Promise<string[]>` | URLs still needed before `render`. Repeat with `provide` until it is empty. |
-| `provide(url, bytes \| null): Promise<void>` | The bytes of a URL from `needs`, or `null` if it is missing. The bytes are read in place: don't modify them until this resolves. |
-| `render(oldest): Promise<Uint8Array>` | Non-premultiplied RGBA8 pixels, row by row. Pass `0` as `oldest` unless you use tickets (below). |
-| `setView(view)` | Point the renderer at another camera. Resources and tiles it already has are reused, so the next `needs` asks only for what is missing. |
-| `setKeepBuckets(keep)` | `false` frees line and fill geometry as soon as it is drawn: lower peak memory for a renderer used once. Default `true`. |
-| `setTicket(ticket)` | For hosts that interleave the fetch loops of several views on one renderer (calling `setView` before each step): number each render with an increasing ticket, set it before each of its steps, and pass the oldest ticket still in progress to `render`, so that tiles another render still needs are kept. |
 
 ### `encodePng(rgba, width, height)`, `encodeWebp(rgba, width, height)`, `encodeJpeg(rgba, width, height, quality)`
 

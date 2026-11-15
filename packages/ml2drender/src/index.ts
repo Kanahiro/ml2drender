@@ -159,8 +159,6 @@ export interface RenderedImage {
 /** Style Spec layers supported by the 2D renderer. */
 export type StyleLayer = Exclude<LayerSpecification, FillExtrusionLayerSpecification>;
 
-/** A fill-extrusion layer, which `InitOptions.transformFillExtrusion` turns into a 2D layer. */
-export type FillExtrusionLayer = FillExtrusionLayerSpecification;
 export type { StyleSpecification };
 
 /** Options of `MapRenderer.init`. */
@@ -181,8 +179,12 @@ export interface InitOptions {
     /** Milliseconds; 0 or `Infinity` included. Default: 300 000 (5 minutes). */
     ttlMs?: number;
   };
-  /** Replace each fill-extrusion layer. Defaults to a fill preserving its 2D appearance. */
-  transformFillExtrusion?: (layer: FillExtrusionLayer) => StyleLayer;
+  /**
+   * Replace each layer of a type the renderer does not draw (fill-extrusion) with any number of
+   * layers. Default: a fill-extrusion becomes a fill preserving its 2D appearance, any other is
+   * dropped. Layers of supported types are not passed; unsupported layers returned are skipped.
+   */
+  transformLayer?: (layer: LayerSpecification) => LayerSpecification[];
 }
 
 interface WasmExports {
@@ -421,7 +423,7 @@ function nonnegative(value: number, name: string): number {
   return value;
 }
 
-function flattenFillExtrusion(layer: FillExtrusionLayer): FillLayerSpecification {
+function flattenFillExtrusion(layer: FillExtrusionLayerSpecification): FillLayerSpecification {
   const { type, paint, layout, ...base } = layer;
   // Shared paint properties have the same defaults; leaving absent values unset
   // preserves them without duplicating Style Spec defaults. Expressions stay intact.
@@ -443,16 +445,18 @@ function flattenFillExtrusion(layer: FillExtrusionLayer): FillLayerSpecification
   };
 }
 
-function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOptions['transformFillExtrusion']> = flattenFillExtrusion): Uint8Array {
+function transformUnsupported(layer: LayerSpecification): LayerSpecification[] {
+  return layer.type === 'fill-extrusion' ? [flattenFillExtrusion(layer)] : [];
+}
+
+function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOptions['transformLayer']> = transformUnsupported): Uint8Array {
   if (!style || typeof style !== 'object' || !Array.isArray(style.layers)) {
     throw new Error('Style must contain a layers array');
   }
-  const layers = style.layers.map((layer: unknown) => {
-    if (!layer || typeof layer !== 'object' || !('type' in layer) || layer.type !== 'fill-extrusion') return layer;
-    const replacement = transform(layer as FillExtrusionLayer);
-    if (!replacement || typeof replacement.id !== 'string' || !SUPPORTED_LAYERS.has(replacement.type)) {
-      throw new Error(`Invalid replacement for fill-extrusion layer ${'id' in layer ? String(layer.id) : ''}`);
-    }
+  const layers = style.layers.flatMap((layer: LayerSpecification) => {
+    if (!layer || typeof layer !== 'object' || SUPPORTED_LAYERS.has(layer.type)) return [layer];
+    const replacement = transform(layer);
+    if (!Array.isArray(replacement)) throw new TypeError(`transformLayer must return an array of layers (layer ${layer.id})`);
     return replacement;
   });
   return encoder.encode(JSON.stringify({ ...style, layers }));
@@ -511,7 +515,7 @@ export class MapRenderer {
     const ttlMs = options.cache?.ttlMs ?? DEFAULT_TTL_MS;
     if (ttlMs !== Infinity) nonnegative(ttlMs, 'cache.ttlMs');
     const loadResource = options.loadResource ?? fetchResource;
-    const prepared = prepareStyle(style, options.transformFillExtrusion);
+    const prepared = prepareStyle(style, options.transformLayer);
     const instance = ttlMs === 0 ? sharedWasm(options.wasm) : loadWasm(options.wasm);
     return new MapRenderer(options.wasm, instance, await instance, prepared, structuredClone(style), loadResource, ttlMs);
   }

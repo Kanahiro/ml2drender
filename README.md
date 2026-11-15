@@ -110,7 +110,7 @@ Takes a style object (the official `StyleSpecification` type) and loads the WASM
 | `loadResource` | HTTP `fetch` | `(url) => Promise<Uint8Array \| null>`. Fetches tiles, TileJSON, sprites and glyphs. Return `null` (HTTP 404) for a missing resource and rendering goes on without it; any other failure should reject. Concurrency limits, retries and caching belong here. |
 | `wasm` | bundled WASM | A compiled `WebAssembly.Module`. Required in Node.js and Cloudflare Workers. |
 | `cache.ttlMs` | `300_000` | How long the renderer inside WASM (decoded tiles, geometry, glyphs) is reused across renders. `0` creates and frees one per render, for the least memory; `Infinity` never expires. |
-| `transformFillExtrusion` | convert to fill | Replaces each fill-extrusion layer with a 2D layer. By default it becomes a fill with the same color, opacity, pattern and translation. |
+| `transformLayer` | fill-extrusion to fill | `(layer) => LayerSpecification[]`. Replaces each layer of a type the renderer does not draw (fill-extrusion) with any number of layers. By default a fill-extrusion becomes a fill with the same color, opacity, pattern and translation, and any other is dropped. |
 
 Concurrent requests for the same URL are fetched once. Fetched bytes are not cached: rely on the browser's HTTP cache, or cache inside `loadResource` (for example with the Cache API on Workers).
 
