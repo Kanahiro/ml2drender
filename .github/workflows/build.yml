@@ -1,0 +1,153 @@
+# Lint, build and test every package on every runtime, and keep what would be published as artifacts:
+#   npm         ml2drender (TypeScript + WASM) and ml2drender-node (the addon's loader) tarballs
+#   napi-*      the Node-API addon of each platform
+#   wheel-*     the Python wheel of each platform, and sdist
+# Called by ci.yml (pull requests, main) and publish.yml. Rust comes from rust-toolchain.toml.
+name: Build
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # Supply chain: like pyproject.toml, for uv commands outside the project too.
+  UV_EXCLUDE_NEWER: 7 days
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install # rust-toolchain.toml
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked --workspace -- -D warnings
+      - run: cargo clippy --target wasm32-unknown-unknown -p ml2drender-wasm --locked -- -D warnings
+      - run: uv run --project crates/python --only-group dev ruff check crates/python
+      - run: uv run --project crates/python --only-group dev ruff format --check crates/python
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install # rust-toolchain.toml
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('scripts/fetch-fixtures.sh') }}
+      - run: test -d fixtures/render || sh scripts/fetch-fixtures.sh
+      - run: cargo test --release --locked
+
+  # The WASM package on Node.js, Deno and a browser bundler (Vite), then packed as published.
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      - run: rustup toolchain install # rust-toolchain.toml
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:wasm
+      - run: pnpm typecheck
+      - name: Test on Node.js
+        run: pnpm --filter ml2drender test
+      - name: Test on Deno
+        working-directory: packages/ml2drender
+        run: for t in single-flight shared-instance projected-view; do deno run --allow-read tests/$t.ts; done
+      - name: Bundle for browsers
+        run: pnpm --filter demo-browser build
+      - name: Pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm"
+          cp README.md LICENSE packages/ml2drender/
+          pnpm --filter ml2drender build
+          (cd packages/ml2drender && pnpm pack --pack-destination "$RUNNER_TEMP/npm")
+          pnpm --filter ml2drender-node build
+          node scripts/npm-node.ts deps
+          (cd packages/ml2drender-node && pnpm pack --pack-destination "$RUNNER_TEMP/npm")
+      - name: Test the packed package
+        run: |
+          version=$(node -p "require('./packages/ml2drender/package.json').version")
+          mkdir "$RUNNER_TEMP/installed" && cd "$RUNNER_TEMP/installed"
+          echo '{ "type": "module" }' > package.json
+          pnpm add "$RUNNER_TEMP/npm/ml2drender-$version.tgz"
+          cp "$GITHUB_WORKSPACE/packages/ml2drender/tests/installed.ts" . && node installed.ts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm
+          path: ${{ runner.temp }}/npm/*.tgz
+
+  # The Node-API addon and the Python wheel, built and tested on each platform.
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, platform: linux, arch: x64 }
+          - { os: ubuntu-24.04-arm, platform: linux, arch: arm64 }
+          - { os: macos-15-intel, platform: darwin, arch: x64 }
+          - { os: macos-latest, platform: darwin, arch: arm64 }
+          - { os: windows-latest, platform: win32, arch: x64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      # A virtual environment on PATH, with the Python in crates/python/.python-version.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version-file: crates/python/.python-version
+          activate-environment: true
+      - run: rustup toolchain install # rust-toolchain.toml
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Linux addons link against glibc 2.34 (scripts/build-native.ts).
+      - if: matrix.platform == 'linux'
+        run: uv pip install cargo-zigbuild ziglang && echo GLIBC=2.34 >> "$GITHUB_ENV"
+      - run: pnpm build:native
+      - name: Test the addon
+        run: node packages/ml2drender-node/tests/render.ts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: napi-${{ matrix.platform }}-${{ matrix.arch }}
+          path: packages/ml2drender-node/native/*.node
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          args: --locked -m crates/python/Cargo.toml -o wheels
+          manylinux: auto
+      - name: Test the wheel
+        # uv run: the activated environment, whatever python maturin-action put first on PATH (macOS).
+        run: uv pip install wheels/*.whl && uv run --no-project python -m unittest discover crates/python/tests
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheel-${{ matrix.platform }}-${{ matrix.arch }}
+          path: wheels/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: -m crates/python/Cargo.toml -o wheels
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheel-sdist
+          path: wheels/*.tar.gz

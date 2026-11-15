@@ -1,5 +1,6 @@
-// Build the Node-API addon for this machine into native/ml2drender.<platform>-<arch>.node,
-// the file a Node host loads with `process.dlopen` / `require`.
+// Build the Node-API addon for this machine into
+// packages/ml2drender-node/native/ml2drender.<platform>-<arch>.node, which that package loads
+// in this repository (published, it loads the addon from its platform package).
 // On Linux, GLIBC=2.34 links against that glibc version with cargo-zigbuild (on PATH, e.g.
 // `pip install cargo-zigbuild ziglang`), so the addon loads on any glibc from 2.34 up.
 import { execFileSync } from 'node:child_process';
@@ -15,7 +16,8 @@ execFileSync(
     { stdio: 'inherit' },
 );
 const lib = { darwin: 'libml2drender_napi.dylib', win32: 'ml2drender_napi.dll' }[process.platform as string] ?? 'libml2drender_napi.so';
-mkdirSync('native', { recursive: true });
-const out = `native/ml2drender.${process.platform}-${process.arch}.node`;
+const dir = 'packages/ml2drender-node/native';
+mkdirSync(dir, { recursive: true });
+const out = `${dir}/ml2drender.${process.platform}-${process.arch}.node`;
 copyFileSync(glibc ? `target/${triple}/native/${lib}` : `target/native/${lib}`, out);
 console.log(out);

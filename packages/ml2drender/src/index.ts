@@ -181,15 +181,6 @@ export interface InitOptions {
     /** Milliseconds; 0 or `Infinity` included. Default: 300 000 (5 minutes). */
     ttlMs?: number;
   };
-  /**
-   * Run this renderer's renders one at a time with the other exclusive renders on the same WASM
-   * instance (renderers of one module with `cache.ttlMs` 0 share it), from the first fetch to the image. Overlapping
-   * renders otherwise each hold their decoded resources while they await fetches, so WASM memory
-   * grows with their number; exclusive renders need only as much as the largest one. Use it where
-   * memory is tight, e.g. on Cloudflare Workers (128 MB per isolate, serving concurrent requests).
-   * Default: false.
-   */
-  exclusive?: boolean;
   /** Replace each fill-extrusion layer. Defaults to a fill preserving its 2D appearance. */
   transformFillExtrusion?: (layer: FillExtrusionLayer) => StyleLayer;
 }
@@ -467,9 +458,6 @@ function prepareStyle(style: StyleSpecification, transform: NonNullable<InitOpti
   return encoder.encode(JSON.stringify({ ...style, layers }));
 }
 
-/** Per instance: the end of the last exclusive render queued (see `InitOptions.exclusive`). */
-const exclusiveRenders = new WeakMap<WasmExports, Promise<void>>();
-
 /**
  * Render a MapLibre Style as a static 2D RGBA image.
  *
@@ -491,17 +479,32 @@ export class MapRenderer {
   private readonly tickets = new Set<number>();
   private lastTicket = 0;
 
+  private readonly module: WebAssembly.Module | undefined;
+  private readonly instance: Promise<WasmExports>;
+  private readonly wasm: WasmExports;
+  private readonly style: Uint8Array;
+  /** The style as given, for `toStyle`. */
+  private readonly original: StyleSpecification;
+  private readonly loadResource: NonNullable<InitOptions['loadResource']>;
+  private readonly ttlMs: number;
+
   private constructor(
-    private readonly module: WebAssembly.Module | undefined,
-    private readonly instance: Promise<WasmExports>,
-    private readonly wasm: WasmExports,
-    private readonly style: Uint8Array,
-    /** The style as given, for `toStyle`. */
-    private readonly original: StyleSpecification,
-    private readonly loadResource: NonNullable<InitOptions['loadResource']>,
-    private readonly ttlMs: number,
-    private readonly exclusive: boolean,
-  ) {}
+    module: WebAssembly.Module | undefined,
+    instance: Promise<WasmExports>,
+    wasm: WasmExports,
+    style: Uint8Array,
+    original: StyleSpecification,
+    loadResource: NonNullable<InitOptions['loadResource']>,
+    ttlMs: number,
+  ) {
+    this.module = module;
+    this.instance = instance;
+    this.wasm = wasm;
+    this.style = style;
+    this.original = original;
+    this.loadResource = loadResource;
+    this.ttlMs = ttlMs;
+  }
 
   /** Snapshot a style object and load the renderer. Resource URLs are passed to `loadResource` as written. */
   static async init(style: StyleSpecification, options: InitOptions = {}): Promise<MapRenderer> {
@@ -510,7 +513,7 @@ export class MapRenderer {
     const loadResource = options.loadResource ?? fetchResource;
     const prepared = prepareStyle(style, options.transformFillExtrusion);
     const instance = ttlMs === 0 ? sharedWasm(options.wasm) : loadWasm(options.wasm);
-    return new MapRenderer(options.wasm, instance, await instance, prepared, structuredClone(style), loadResource, ttlMs, options.exclusive ?? false);
+    return new MapRenderer(options.wasm, instance, await instance, prepared, structuredClone(style), loadResource, ttlMs);
   }
 
   /** Fetch required resources and return a new RGBA image of a Web Mercator camera. */
@@ -653,13 +656,6 @@ export class MapRenderer {
     source: Uint8Array,
     finish: (handle: number, oldest: number) => number,
   ): Promise<Uint8Array<ArrayBuffer>> {
-    let done = () => {};
-    if (this.exclusive) {
-      const previous = exclusiveRenders.get(this.wasm);
-      const mine = new Promise<void>((resolve) => { done = resolve; });
-      exclusiveRenders.set(this.wasm, (previous ?? Promise.resolve()).then(() => mine));
-      await previous;
-    }
     try {
       return await this.runOnce(args, setView, source, finish);
     } catch (error) {
@@ -668,8 +664,6 @@ export class MapRenderer {
         discardInstance(this.module, this.instance, this.wasm);
       }
       throw error;
-    } finally {
-      done();
     }
   }
 

@@ -1,8 +1,8 @@
 //! Runs maplibre-gl-js render tests (fixtures/render) and reports pass rates.
 
-use crate::{find_files, read_json, Tally};
+use crate::{Tally, find_files, read_json};
 use ml2drender::{Renderer, View};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -53,7 +53,11 @@ pub fn run(root: &Path, filter: Option<&str>) {
         match &outcome {
             Outcome::Skip(r) => *skip_reasons.entry(r.clone()).or_default() += 1,
             Outcome::Fail(e) => {
-                let key = if e.starts_with("diff ") { "pixel diff above allowed".to_string() } else { e.lines().next().unwrap_or("").to_string() };
+                let key = if e.starts_with("diff ") {
+                    "pixel diff above allowed".to_string()
+                } else {
+                    e.lines().next().unwrap_or("").to_string()
+                };
                 *fail_reasons.entry(key).or_default() += 1
             }
             Outcome::Pass(_) => {}
@@ -64,7 +68,10 @@ pub fn run(root: &Path, filter: Option<&str>) {
         }
     }
 
-    let mut md = format!("## Render tests\n\n{}\n\n| layer type | pass | fail | skip | pass rate (excl. skip) |\n|---|---|---|---|---|\n", overall.line());
+    let mut md = format!(
+        "## Render tests\n\n{}\n\n| layer type | pass | fail | skip | pass rate (excl. skip) |\n|---|---|---|---|---|\n",
+        overall.line()
+    );
     for (t, tally) in &by_layer {
         md += &tally.row(t);
     }
@@ -145,7 +152,8 @@ fn compare_one(dir: &Path, style: &Value, assets: &Path, out_dir: &Path, hash: &
             continue;
         }
         let mut diff_img = vec![0; w * h * 4];
-        let diff = crate::pixelmatch::pixelmatch(&rgba, &expected, &mut diff_img, w, h, threshold) as f64 / (w * h) as f64;
+        let diff =
+            crate::pixelmatch::pixelmatch(&rgba, &expected, &mut diff_img, w, h, threshold) as f64 / (w * h) as f64;
         if best.as_ref().is_none_or(|b| diff < b.0) {
             best = Some((diff, diff_img, expected));
         }
@@ -164,7 +172,13 @@ fn compare_one(dir: &Path, style: &Value, assets: &Path, out_dir: &Path, hash: &
 }
 
 /// The host loop: answer `needs()` from the local assets until it is empty, then render.
-fn render(style: &Value, view: View, max_zoom: Option<f64>, cross_source_collisions: bool, assets: &Path) -> Result<Vec<u8>, String> {
+fn render(
+    style: &Value,
+    view: View,
+    max_zoom: Option<f64>,
+    cross_source_collisions: bool,
+    assets: &Path,
+) -> Result<Vec<u8>, String> {
     let mut r = Renderer::new(&style.to_string(), view).map_err(|e| e.to_string())?;
     r.set_cross_source_collisions(cross_source_collisions);
     if let Some(z) = max_zoom {
@@ -182,7 +196,11 @@ fn render(style: &Value, view: View, max_zoom: Option<f64>, cross_source_collisi
         }
         for res in needs {
             // The upstream test server answers 204 (empty body) for these, 404 otherwise.
-            let bytes = if res.url.contains("/sparse204/1-") { Some(vec![]) } else { local_path(&res.url, assets).and_then(|p| fs::read(p).ok()) };
+            let bytes = if res.url.contains("/sparse204/1-") {
+                Some(vec![])
+            } else {
+                local_path(&res.url, assets).and_then(|p| fs::read(p).ok())
+            };
             r.provide(&res.url, bytes.as_deref());
         }
     }
@@ -259,8 +277,10 @@ fn decode_png(path: &Path) -> Option<(usize, usize, Vec<u8>)> {
     buf.truncate(info.buffer_size());
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf,
-        png::ColorType::Rgb => buf.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Rgb => buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => {
+            buf.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect()
+        }
         png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return None, // EXPAND removes palettes
     };

@@ -1,5 +1,5 @@
 // Overlapping renders on one MapRenderer fetch each URL once.
-// Run: node --experimental-transform-types tests/single-flight.ts (after pnpm build:wasm)
+// Run: node tests/single-flight.ts (after pnpm build:wasm)
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { MapRenderer } from '../src/index.ts';

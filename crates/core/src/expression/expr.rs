@@ -3,7 +3,7 @@
 use super::color::{Color, ColorSpace};
 use super::geometry;
 use super::intl::{self, Collator};
-use super::types::{check_subtype, Type};
+use super::types::{Type, check_subtype};
 use super::value::*;
 use crate::hash::HashMap;
 use std::rc::Rc;
@@ -78,10 +78,13 @@ impl Properties {
     pub fn get(&self, key: &str) -> Option<&Value> {
         match self {
             Properties::Object(o) => o.get(key),
-            Properties::Tags(t, start, end) => t.tags[*start as usize..*end as usize]
-                .chunks_exact(2)
-                .rev()
-                .find_map(|kv| (t.keys.get(kv[0] as usize).is_some_and(|k| &**k == key)).then(|| t.values.get(kv[1] as usize)).flatten()),
+            Properties::Tags(t, start, end) => {
+                t.tags[*start as usize..*end as usize].as_chunks::<2>().0.iter().rev().find_map(|kv| {
+                    (t.keys.get(kv[0] as usize).is_some_and(|k| &**k == key))
+                        .then(|| t.values.get(kv[1] as usize))
+                        .flatten()
+                })
+            }
         }
     }
 
@@ -95,7 +98,7 @@ impl Properties {
             Properties::Tags(t, start, end) => {
                 let tags = &t.tags[*start as usize..*end as usize];
                 let mut o = Object::with_capacity_and_hasher(tags.len() / 2, Default::default());
-                for kv in tags.chunks_exact(2) {
+                for kv in tags.as_chunks::<2>().0 {
                     if let (Some(k), Some(v)) = (t.keys.get(kv[0] as usize), t.values.get(kv[1] as usize)) {
                         o.insert(k.clone(), v.clone());
                     }
@@ -249,25 +252,100 @@ pub struct Expr {
 #[derive(Debug, Clone)]
 pub enum Node {
     Literal(Value),
-    Compound { name: String, f: CompoundFn, args: Vec<Expr>, key: String },
-    Assertion { args: Vec<Expr>, key: String },
-    Coercion { args: Vec<Expr>, key: String },
-    Let { bindings: Vec<(String, Rc<Expr>)>, result: Box<Expr> },
-    Var { bound: Rc<Expr> },
-    At { index: Box<Expr>, input: Box<Expr>, key: String },
-    In { needle: Box<Expr>, haystack: Box<Expr>, key: String },
-    IndexOf { needle: Box<Expr>, haystack: Box<Expr>, from: Option<Box<Expr>>, key: String },
-    Slice { input: Box<Expr>, begin: Box<Expr>, end: Option<Box<Expr>>, key: String },
-    Length { input: Box<Expr>, key: String },
-    Case { branches: Vec<(Expr, Expr)>, otherwise: Box<Expr> },
-    Match { input_type: Type, input: Box<Expr>, cases: HashMap<String, usize>, outputs: Vec<Expr>, otherwise: Box<Expr> },
+    Compound {
+        name: String,
+        f: CompoundFn,
+        args: Vec<Expr>,
+        key: String,
+    },
+    Assertion {
+        args: Vec<Expr>,
+        key: String,
+    },
+    Coercion {
+        args: Vec<Expr>,
+        key: String,
+    },
+    Let {
+        bindings: Vec<(String, Rc<Expr>)>,
+        result: Box<Expr>,
+    },
+    Var {
+        bound: Rc<Expr>,
+    },
+    At {
+        index: Box<Expr>,
+        input: Box<Expr>,
+        key: String,
+    },
+    In {
+        needle: Box<Expr>,
+        haystack: Box<Expr>,
+        key: String,
+    },
+    IndexOf {
+        needle: Box<Expr>,
+        haystack: Box<Expr>,
+        from: Option<Box<Expr>>,
+        key: String,
+    },
+    Slice {
+        input: Box<Expr>,
+        begin: Box<Expr>,
+        end: Option<Box<Expr>>,
+        key: String,
+    },
+    Length {
+        input: Box<Expr>,
+        key: String,
+    },
+    Case {
+        branches: Vec<(Expr, Expr)>,
+        otherwise: Box<Expr>,
+    },
+    Match {
+        input_type: Type,
+        input: Box<Expr>,
+        cases: HashMap<String, usize>,
+        outputs: Vec<Expr>,
+        otherwise: Box<Expr>,
+    },
     Coalesce(Vec<Expr>),
-    Step { input: Box<Expr>, labels: Vec<f64>, outputs: Vec<Expr>, key: String },
-    Interpolate { space: ColorSpace, interpolation: Interpolation, input: Box<Expr>, labels: Vec<f64>, outputs: Vec<Expr>, key: String },
-    Comparison { op: CmpOp, lhs: Box<Expr>, rhs: Box<Expr>, collator: Option<Box<Expr>>, key: String },
-    Collator { case_sensitive: Box<Expr>, diacritic_sensitive: Box<Expr>, locale: Option<Box<Expr>> },
+    Step {
+        input: Box<Expr>,
+        labels: Vec<f64>,
+        outputs: Vec<Expr>,
+        key: String,
+    },
+    Interpolate {
+        space: ColorSpace,
+        interpolation: Interpolation,
+        input: Box<Expr>,
+        labels: Vec<f64>,
+        outputs: Vec<Expr>,
+        key: String,
+    },
+    Comparison {
+        op: CmpOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        collator: Option<Box<Expr>>,
+        key: String,
+    },
+    Collator {
+        case_sensitive: Box<Expr>,
+        diacritic_sensitive: Box<Expr>,
+        locale: Option<Box<Expr>>,
+    },
     Format(Vec<FormatSection>),
-    NumberFormat { number: Box<Expr>, locale: Option<Box<Expr>>, currency: Option<Box<Expr>>, unit: Option<Box<Expr>>, min: Option<Box<Expr>>, max: Option<Box<Expr>> },
+    NumberFormat {
+        number: Box<Expr>,
+        locale: Option<Box<Expr>>,
+        currency: Option<Box<Expr>>,
+        unit: Option<Box<Expr>>,
+        min: Option<Box<Expr>>,
+        max: Option<Box<Expr>>,
+    },
     Image(Box<Expr>),
     GlobalState(String),
     /// Multipolygon in lng/lat.
@@ -284,9 +362,11 @@ impl Expr {
     pub fn each_child(&self, f: &mut dyn FnMut(&Expr)) {
         match &self.node {
             Node::Literal(_) | Node::Var { .. } | Node::GlobalState(_) | Node::Within(_) | Node::Distance(_) => {}
-            Node::Compound { args, .. } | Node::Assertion { args, .. } | Node::Coercion { args, .. } | Node::Coalesce(args) | Node::Semiliteral(args) => {
-                args.iter().for_each(f)
-            }
+            Node::Compound { args, .. }
+            | Node::Assertion { args, .. }
+            | Node::Coercion { args, .. }
+            | Node::Coalesce(args)
+            | Node::Semiliteral(args) => args.iter().for_each(f),
             Node::Let { bindings, result } => {
                 for (_, b) in bindings {
                     f(b);
@@ -381,7 +461,10 @@ impl Expr {
                     if check_subtype(&self.ty, &t).is_none() {
                         return Ok(v);
                     } else if i == args.len() - 1 {
-                        return Err(err(format!("Expected value to be of type {}, but found {t} instead.", self.ty), key));
+                        return Err(err(
+                            format!("Expected value to be of type {}, but found {t} instead.", self.ty),
+                            key,
+                        ));
                     }
                 }
                 Err(err("", ""))
@@ -404,7 +487,10 @@ impl Expr {
                     ));
                 }
                 if i != i.floor() {
-                    return Err(err(format!("Array index must be an integer, but found {} instead.", js_number_to_string(i)), key));
+                    return Err(err(
+                        format!("Array index must be an integer, but found {} instead.", js_number_to_string(i)),
+                        key,
+                    ));
                 }
                 match arr {
                     Value::Array(a) => Ok(a[i as usize].clone()),
@@ -437,7 +523,11 @@ impl Expr {
                     Value::Array(a) => {
                         let start = relative_index(from, a.len());
                         Ok(Value::Number(
-                            a.iter().enumerate().skip(start).find(|(_, v)| v.strict_eq(&n)).map_or(-1.0, |(i, _)| i as f64),
+                            a.iter()
+                                .enumerate()
+                                .skip(start)
+                                .find(|(_, v)| v.strict_eq(&n))
+                                .map_or(-1.0, |(i, _)| i as f64),
                         ))
                     }
                     _ => Err(haystack_error("second argument", &h, key)),
@@ -461,7 +551,10 @@ impl Expr {
                         Ok(Value::Array(Rc::new(a[b..e].to_vec())))
                     }
                     _ => Err(err(
-                        format!("Expected first argument to be of type array or string, but found {} instead.", v.type_of()),
+                        format!(
+                            "Expected first argument to be of type array or string, but found {} instead.",
+                            v.type_of()
+                        ),
                         key,
                     )),
                 }
@@ -469,7 +562,10 @@ impl Expr {
             Node::Length { input, key } => match input.evaluate(ctx)? {
                 Value::String(s) => Ok(Value::Number(s.chars().count() as f64)),
                 Value::Array(a) => Ok(Value::Number(a.len() as f64)),
-                v => Err(err(format!("Expected value to be of type string or array, but found {} instead.", v.type_of()), key)),
+                v => Err(err(
+                    format!("Expected value to be of type string or array, but found {} instead.", v.type_of()),
+                    key,
+                )),
             },
             Node::Case { branches, otherwise } => {
                 for (test, out) in branches {
@@ -598,7 +694,14 @@ impl Expr {
                         None => None,
                     };
                     if let Value::ResolvedImage(img) = content {
-                        out.push(FormattedSection { text: String::new(), image: Some(img), scale: None, font_stack: None, text_color: None, vertical_align });
+                        out.push(FormattedSection {
+                            text: String::new(),
+                            image: Some(img),
+                            scale: None,
+                            font_stack: None,
+                            text_color: None,
+                            vertical_align,
+                        });
                         continue;
                     }
                     let scale = match &s.scale {
@@ -619,7 +722,14 @@ impl Expr {
                         },
                         None => None,
                     };
-                    out.push(FormattedSection { text: content.to_js_string(), image: None, scale, font_stack, text_color, vertical_align });
+                    out.push(FormattedSection {
+                        text: content.to_js_string(),
+                        image: None,
+                        scale,
+                        font_stack,
+                        text_color,
+                        vertical_align,
+                    });
                 }
                 Ok(Value::Formatted(Rc::new(Formatted { sections: out })))
             }
@@ -652,21 +762,24 @@ impl Expr {
                 let available = ctx.available_images.is_some_and(|imgs| imgs.contains(&name));
                 Ok(Value::ResolvedImage(Rc::new(ResolvedImage { name, available })))
             }
-            Node::GlobalState(key) => Ok(ctx
-                .globals
-                .global_state
-                .as_ref()
-                .and_then(|s| s.get(key.as_str()).cloned())
-                .unwrap_or(Value::Null)),
-            Node::Within(polygons) => Ok(Value::Bool(match (ctx.feature.and_then(|f| f.geometry.as_ref()), ctx.canonical) {
-                (Some(g), Some(c)) => geometry::within(ctx.geometry_type(), g, c, polygons),
-                _ => false,
-            })),
-            Node::Distance(geoms) => Ok(Value::Number(match (ctx.feature.and_then(|f| f.geometry.as_ref()), ctx.canonical) {
-                (Some(g), Some(c)) => geometry::distance(ctx.geometry_type(), g, c, geoms),
-                _ => f64::NAN,
-            })),
-            Node::Semiliteral(items) => Ok(Value::Array(Rc::new(items.iter().map(|e| e.evaluate(ctx)).collect::<Result<_, _>>()?))),
+            Node::GlobalState(key) => {
+                Ok(ctx.globals.global_state.as_ref().and_then(|s| s.get(key.as_str()).cloned()).unwrap_or(Value::Null))
+            }
+            Node::Within(polygons) => {
+                Ok(Value::Bool(match (ctx.feature.and_then(|f| f.geometry.as_ref()), ctx.canonical) {
+                    (Some(g), Some(c)) => geometry::within(ctx.geometry_type(), g, c, polygons),
+                    _ => false,
+                }))
+            }
+            Node::Distance(geoms) => {
+                Ok(Value::Number(match (ctx.feature.and_then(|f| f.geometry.as_ref()), ctx.canonical) {
+                    (Some(g), Some(c)) => geometry::distance(ctx.geometry_type(), g, c, geoms),
+                    _ => f64::NAN,
+                }))
+            }
+            Node::Semiliteral(items) => {
+                Ok(Value::Array(Rc::new(items.iter().map(|e| e.evaluate(ctx)).collect::<Result<_, _>>()?)))
+            }
         }
     }
 
@@ -708,7 +821,10 @@ impl Expr {
                         _ => {}
                     }
                 }
-                Err(err(error.unwrap_or_else(|| format!("Could not parse color from value '{}'", describe(&input))), key))
+                Err(err(
+                    error.unwrap_or_else(|| format!("Could not parse color from value '{}'", describe(&input))),
+                    key,
+                ))
             }
             Type::Padding | Type::NumberArray | Type::ColorArray | Type::VariableAnchorOffsetCollection => {
                 let mut input = Value::Null;
@@ -740,10 +856,16 @@ impl Expr {
                 }
                 Err(err(format!("Could not convert {} to number.", js_stringify(&value.to_json())), key))
             }
-            Type::Formatted => Ok(Value::Formatted(Rc::new(Formatted::from_string(args[0].evaluate(ctx)?.to_js_string())))),
+            Type::Formatted => {
+                Ok(Value::Formatted(Rc::new(Formatted::from_string(args[0].evaluate(ctx)?.to_js_string()))))
+            }
             Type::ResolvedImage => {
                 let name = args[0].evaluate(ctx)?.to_js_string();
-                Ok(if name.is_empty() { Value::Null } else { Value::ResolvedImage(Rc::new(ResolvedImage { name, available: false })) })
+                Ok(if name.is_empty() {
+                    Value::Null
+                } else {
+                    Value::ResolvedImage(Rc::new(ResolvedImage { name, available: false }))
+                })
             }
             Type::ProjectionDefinition => {
                 let input = args[0].evaluate(ctx)?;
@@ -768,7 +890,10 @@ fn check_needle(n: &Value, key: &str) -> Result<(), RuntimeError> {
         Ok(())
     } else {
         Err(err(
-            format!("Expected first argument to be of type boolean, string, number or null, but found {} instead.", n.type_of()),
+            format!(
+                "Expected first argument to be of type boolean, string, number or null, but found {} instead.",
+                n.type_of()
+            ),
             key,
         ))
     }
@@ -856,22 +981,38 @@ pub fn js_string_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 fn interpolate_values(ty: &Type, space: ColorSpace, lo: &Value, hi: &Value, t: f64, key: &str) -> EvalResult {
     let lerp = |a: f64, b: f64| a + t * (b - a);
-    let lerp_arr = |a: &[f64], b: &[f64]| -> Vec<f64> { a.iter().enumerate().map(|(i, &x)| lerp(x, b.get(i).copied().unwrap_or(f64::NAN))).collect() };
+    let lerp_arr = |a: &[f64], b: &[f64]| -> Vec<f64> {
+        a.iter().enumerate().map(|(i, &x)| lerp(x, b.get(i).copied().unwrap_or(f64::NAN))).collect()
+    };
     Ok(match (ty, lo, hi) {
         (Type::Number, Value::Number(a), Value::Number(b)) => Value::Number(lerp(*a, *b)),
         (Type::Color, Value::Color(a), Value::Color(b)) => Value::Color(Color::interpolate(a, b, t, space)),
-        (Type::Padding, Value::Padding(a), Value::Padding(b)) => Value::Padding(std::array::from_fn(|i| lerp(a[i], b[i]))),
-        (Type::NumberArray, Value::NumberArray(a), Value::NumberArray(b)) => Value::NumberArray(Rc::new(lerp_arr(a, b))),
+        (Type::Padding, Value::Padding(a), Value::Padding(b)) => {
+            Value::Padding(std::array::from_fn(|i| lerp(a[i], b[i])))
+        }
+        (Type::NumberArray, Value::NumberArray(a), Value::NumberArray(b)) => {
+            Value::NumberArray(Rc::new(lerp_arr(a, b)))
+        }
         (Type::ColorArray, Value::ColorArray(a), Value::ColorArray(b)) => {
             if a.len() != b.len() {
                 return Err(err(
-                    format!("colorArray: Arrays have mismatched length ({} vs. {}), cannot interpolate.", a.len(), b.len()),
+                    format!(
+                        "colorArray: Arrays have mismatched length ({} vs. {}), cannot interpolate.",
+                        a.len(),
+                        b.len()
+                    ),
                     "",
                 ));
             }
-            Value::ColorArray(Rc::new(a.iter().zip(b.iter()).map(|(x, y)| Color::interpolate(x, y, t, space)).collect()))
+            Value::ColorArray(Rc::new(
+                a.iter().zip(b.iter()).map(|(x, y)| Color::interpolate(x, y, t, space)).collect(),
+            ))
         }
-        (Type::VariableAnchorOffsetCollection, Value::VariableAnchorOffsetCollection(a), Value::VariableAnchorOffsetCollection(b)) => {
+        (
+            Type::VariableAnchorOffsetCollection,
+            Value::VariableAnchorOffsetCollection(a),
+            Value::VariableAnchorOffsetCollection(b),
+        ) => {
             if a.len() != b.len() {
                 return Err(err(
                     format!(
@@ -909,7 +1050,12 @@ fn interpolate_values(ty: &Type, space: ColorSpace, lo: &Value, hi: &Value, t: f
         (Type::Array(..), Value::Array(a), Value::Array(b)) => Value::Array(Rc::new(
             a.iter()
                 .enumerate()
-                .map(|(i, x)| Value::Number(lerp(x.as_f64().unwrap_or(f64::NAN), b.get(i).and_then(Value::as_f64).unwrap_or(f64::NAN))))
+                .map(|(i, x)| {
+                    Value::Number(lerp(
+                        x.as_f64().unwrap_or(f64::NAN),
+                        b.get(i).and_then(Value::as_f64).unwrap_or(f64::NAN),
+                    ))
+                })
                 .collect(),
         )),
         (Type::ProjectionDefinition, a, b) => {
@@ -969,13 +1115,16 @@ pub fn parse_color_array(v: &Value) -> Option<Value> {
     match v {
         Value::ColorArray(_) => Some(v.clone()),
         Value::String(s) => Some(Value::ColorArray(Rc::new(vec![Color::parse(s)?]))),
-        Value::Array(a) => Some(Value::ColorArray(Rc::new(a.iter().map(|c| c.as_str().and_then(Color::parse)).collect::<Option<_>>()?))),
+        Value::Array(a) => Some(Value::ColorArray(Rc::new(
+            a.iter().map(|c| c.as_str().and_then(Color::parse)).collect::<Option<_>>()?,
+        ))),
         _ => None,
     }
 }
 
 pub fn parse_variable_anchor_offset_collection(v: &Value) -> Option<Value> {
-    const ANCHORS: [&str; 9] = ["center", "left", "right", "top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right"];
+    const ANCHORS: [&str; 9] =
+        ["center", "left", "right", "top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right"];
     match v {
         Value::VariableAnchorOffsetCollection(_) => Some(v.clone()),
         Value::Array(a) if !a.is_empty() && a.len() % 2 == 0 => {

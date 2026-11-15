@@ -33,7 +33,17 @@ pub type Rgba = [f32; 4];
 impl Target {
     pub fn new(w: usize, h: usize) -> Target {
         let memo = ([0; 4], [0; 4], blend_pixel([0; 4], [0.0; 4]));
-        Target { w, h, px: vec![[0; 4]; w * h], opaque: Vec::new(), occ: Vec::new(), layer: 0, cull: false, clip: [0, 0, w, h], memo }
+        Target {
+            w,
+            h,
+            px: vec![[0; 4]; w * h],
+            opaque: Vec::new(),
+            occ: Vec::new(),
+            layer: 0,
+            cull: false,
+            clip: [0, 0, w, h],
+            memo,
+        }
     }
 
     /// `gl.blendFunc(ONE, ONE_MINUS_SRC_ALPHA)` into a unorm8 target.
@@ -147,7 +157,12 @@ pub fn blend_pixel(d: [u8; 4], c: Rgba) -> [u8; 4] {
             f32x4_mul(src, f32x4_splat(255.0))
         } else {
             let inv = f32x4_splat(1.0 - c[3].clamp(0.0, 1.0));
-            let dst = f32x4_convert_u32x4(u32x4_extend_low_u16x8(u16x8_extend_low_u8x16(u32x4(u32::from_ne_bytes(d), 0, 0, 0))));
+            let dst = f32x4_convert_u32x4(u32x4_extend_low_u16x8(u16x8_extend_low_u8x16(u32x4(
+                u32::from_ne_bytes(d),
+                0,
+                0,
+                0,
+            ))));
             f32x4_mul(f32x4_add(src, f32x4_mul(f32x4_div(dst, f32x4_splat(255.0)), inv)), f32x4_splat(255.0))
         };
         let t = f32x4_trunc(x);
@@ -195,7 +210,10 @@ pub struct Mask {
 
 #[derive(Clone)]
 enum Coverage {
-    Rectangle { x: [usize; 2], y: [usize; 2] },
+    Rectangle {
+        x: [usize; 2],
+        y: [usize; 2],
+    },
     Pixels(Vec<bool>),
     /// The pixels whose entry in a row-major map shared by disjoint masks is this one's index.
     Owner(Rc<Vec<u32>>, u32),
@@ -215,7 +233,9 @@ impl Mask {
     /// The part of row `y`'s pixels `x0..x1` inside a rectangular mask (`None` for other masks).
     pub fn rect_run(&self, y: usize, x0: usize, x1: usize) -> Option<std::ops::Range<usize>> {
         match &self.coverage {
-            Coverage::Rectangle { x: xs, y: ys } if y >= ys[0] && y < ys[1] => Some(x0.max(xs[0])..x1.min(xs[1]).max(x0.max(xs[0]))),
+            Coverage::Rectangle { x: xs, y: ys } if y >= ys[0] && y < ys[1] => {
+                Some(x0.max(xs[0])..x1.min(xs[1]).max(x0.max(xs[0])))
+            }
             Coverage::Rectangle { .. } => Some(x0..x0),
             _ => None,
         }
@@ -268,13 +288,25 @@ impl Mask {
         // Decide from screen geometry, never from the geographic projection
         // or camera bearing. Rotated/warped quads keep the general coverage path.
         let area = (q[1][0] - q[0][0]) * (q[3][1] - q[0][1]);
-        if area != 0.0 && area.is_finite() && q.iter().flatten().all(|v| v.is_finite())
-            && q[0][1] == q[1][1] && q[2][1] == q[3][1] && q[0][0] == q[3][0] && q[1][0] == q[2][0] {
+        if area != 0.0
+            && area.is_finite()
+            && q.iter().flatten().all(|v| v.is_finite())
+            && q[0][1] == q[1][1]
+            && q[2][1] == q[3][1]
+            && q[0][0] == q[3][0]
+            && q[1][0] == q[2][0]
+        {
             let (left, right) = (q[0][0].min(q[1][0]), q[0][0].max(q[1][0]));
             let (top, bottom) = (q[0][1].min(q[3][1]), q[0][1].max(q[3][1]));
             // GL includes the left and bottom boundaries, excludes the right and top.
-            let x = [(left - 0.5).ceil().max(0.0).min(w as f64) as usize, (right - 0.5).ceil().max(0.0).min(w as f64) as usize];
-            let y = [((top - 0.5).floor() + 1.0).max(0.0).min(h as f64) as usize, ((bottom - 0.5).floor() + 1.0).max(0.0).min(h as f64) as usize];
+            let x = [
+                (left - 0.5).ceil().max(0.0).min(w as f64) as usize,
+                (right - 0.5).ceil().max(0.0).min(w as f64) as usize,
+            ];
+            let y = [
+                ((top - 0.5).floor() + 1.0).max(0.0).min(h as f64) as usize,
+                ((bottom - 0.5).floor() + 1.0).max(0.0).min(h as f64) as usize,
+            ];
             return Mask { w, h, coverage: Coverage::Rectangle { x, y } };
         }
         let mut bits = vec![false; w * h];
@@ -396,7 +428,11 @@ impl Setup {
                     let (mut lo, mut hi) = (row_x0, row_x1);
                     let crossing = a[0] + dx * (cy - a[1]) / dy - 0.5;
                     let hint = (if left_out { crossing.ceil() } else { crossing.floor() + 1.0 }) as i64;
-                    if hint > lo && hint <= hi && outside(value(hint - 1)) == left_out && outside(value(hint)) != left_out {
+                    if hint > lo
+                        && hint <= hi
+                        && outside(value(hint - 1)) == left_out
+                        && outside(value(hint)) != left_out
+                    {
                         lo = hint - 1;
                         hi = hint;
                     }
@@ -474,7 +510,11 @@ pub fn triangle<const N: usize>(
 
 /// A triangle's coverage within `clip` and its varyings' screen gradients:
 /// v(x, y) = v0 + gx (x - p0x) + gy (y - p0y).
-pub(super) fn triangle_setup<const N: usize>(clip: [usize; 4], p: [[f64; 2]; 3], v: [[f32; N]; 3]) -> Option<(Setup, [f64; N], [f64; N])> {
+pub(super) fn triangle_setup<const N: usize>(
+    clip: [usize; 4],
+    p: [[f64; 2]; 3],
+    v: [[f32; N]; 3],
+) -> Option<(Setup, [f64; N], [f64; N])> {
     let setup = Setup::new(clip, p)?;
     let (e1, e2) = ([p[1][0] - p[0][0], p[1][1] - p[0][1]], [p[2][0] - p[0][0], p[2][1] - p[0][1]]);
     let det = e1[0] * e2[1] - e1[1] * e2[0];
@@ -490,7 +530,13 @@ pub(super) fn triangle_setup<const N: usize>(clip: [usize; 4], p: [[f64; 2]; 3],
 
 /// Aliased 1px GL line (`gl.LINES`); `shade` gets the distance of the fragment center from
 /// the line and the position along it (0 at `a`, 1 at `b`) for interpolating varyings.
-pub fn line(t: &mut Target, accept: &dyn Fn(usize, usize) -> bool, a: [f64; 2], b: [f64; 2], shade: &mut impl FnMut(f64, f64) -> Option<Rgba>) {
+pub fn line(
+    t: &mut Target,
+    accept: &dyn Fn(usize, usize) -> bool,
+    a: [f64; 2],
+    b: [f64; 2],
+    shade: &mut impl FnMut(f64, f64) -> Option<Rgba>,
+) {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     if (dx == 0.0 && dy == 0.0) || !(dx.is_finite() && dy.is_finite()) {
         return;
@@ -551,7 +597,8 @@ mod tests {
     #[test]
     fn round_matches_std() {
         // A sweep of the blend's range, a few ulps around every tie and integer, non-finite values.
-        let near = (0..=512).flat_map(|k| (k as f32 * 0.5).to_bits().saturating_sub(4)..=(k as f32 * 0.5).to_bits() + 4);
+        let near =
+            (0..=512).flat_map(|k| (k as f32 * 0.5).to_bits().saturating_sub(4)..=(k as f32 * 0.5).to_bits() + 4);
         let sweep = (0..=256.0f32.to_bits()).step_by(4099);
         for bits in near.chain(sweep).chain([f32::INFINITY.to_bits(), f32::NAN.to_bits()]) {
             for x in [f32::from_bits(bits), -f32::from_bits(bits)] {
@@ -578,8 +625,10 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let center = [x as f64 + 0.5, y as f64 + 0.5];
-                if (0..2).any(|k| center[k] < p.iter().map(|v| v[k]).fold(f64::INFINITY, f64::min)
-                    || center[k] > p.iter().map(|v| v[k]).fold(f64::NEG_INFINITY, f64::max)) {
+                if (0..2).any(|k| {
+                    center[k] < p.iter().map(|v| v[k]).fold(f64::INFINITY, f64::min)
+                        || center[k] > p.iter().map(|v| v[k]).fold(f64::NEG_INFINITY, f64::max)
+                }) {
                     continue;
                 }
                 let mut weights = [0.0; 3];
@@ -588,7 +637,8 @@ mod tests {
                     let (a, b) = (p[(i + 1) % 3], p[(i + 2) % 3]);
                     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
                     let include = dy < 0.0 || (dy == 0.0 && dx < 0.0);
-                    let (base, dx, dy, sign) = if (b[0], b[1]) < (a[0], a[1]) { (b, -dx, -dy, -1.0) } else { (a, dx, dy, 1.0) };
+                    let (base, dx, dy, sign) =
+                        if (b[0], b[1]) < (a[0], a[1]) { (b, -dx, -dy, -1.0) } else { (a, dx, dy, 1.0) };
                     let e = sign * (dx * (center[1] - base[1]) - dy * (center[0] - base[0]));
                     if e < 0.0 || (e == 0.0 && !include) {
                         inside = false;
@@ -631,10 +681,7 @@ mod tests {
             }
         }
         let base = [[-1.0, -1.0], [65.0, -1.0], [65.0, 33.0], [-1.0, 33.0]];
-        let holes = [
-            [[16.5, 8.5], [48.5, 8.5], [48.5, 24.5], [16.5, 24.5]],
-            quads[2],
-        ];
+        let holes = [[[16.5, 8.5], [48.5, 8.5], [48.5, 24.5], [16.5, 24.5]], quads[2]];
         let mut mask = Mask::from_quad(w, h, base);
         let mut expected = coverage(base);
         for q in holes {
@@ -677,10 +724,12 @@ mod tests {
         // both windings, thin slivers, horizontal edges, and exact boundary ties.
         let mut seed = 0x12345678u32;
         for i in 0..2000 {
-            let p = std::array::from_fn(|_| std::array::from_fn(|_| {
-                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-                if i % 2 == 0 { (seed % 256) as f64 - 64.5 } else { seed as f64 / u32::MAX as f64 * 256.0 - 64.0 }
-            }));
+            let p = std::array::from_fn(|_| {
+                std::array::from_fn(|_| {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    if i % 2 == 0 { (seed % 256) as f64 - 64.5 } else { seed as f64 / u32::MAX as f64 * 256.0 - 64.0 }
+                })
+            });
             check(p);
         }
     }

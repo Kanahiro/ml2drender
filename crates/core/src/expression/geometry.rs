@@ -55,7 +55,9 @@ pub fn within_polygons(g: &J) -> Option<Vec<Vec<Vec<P>>>> {
 pub fn distance_geometries(g: &J) -> Option<Vec<SimpleGeometry>> {
     fn simple(geom: &J) -> Vec<SimpleGeometry> {
         let c = &geom["coordinates"];
-        let each = |f: &dyn Fn(&J) -> Option<SimpleGeometry>| c.as_array().map(|a| a.iter().filter_map(f).collect()).unwrap_or_default();
+        let each = |f: &dyn Fn(&J) -> Option<SimpleGeometry>| {
+            c.as_array().map(|a| a.iter().filter_map(f).collect()).unwrap_or_default()
+        };
         match geom["type"].as_str() {
             Some("Point") => coords(c).map(SimpleGeometry::Point).into_iter().collect(),
             Some("LineString") => line(c).map(SimpleGeometry::LineString).into_iter().collect(),
@@ -68,7 +70,9 @@ pub fn distance_geometries(g: &J) -> Option<Vec<SimpleGeometry>> {
     }
     let o = g.as_object()?;
     match o.get("type")?.as_str() {
-        Some("FeatureCollection") => Some(g["features"].as_array()?.iter().flat_map(|f| simple(&f["geometry"])).collect()),
+        Some("FeatureCollection") => {
+            Some(g["features"].as_array()?.iter().flat_map(|f| simple(&f["geometry"])).collect())
+        }
         Some("Feature") => Some(simple(&g["geometry"])),
         _ if o.contains_key("coordinates") => Some(simple(g)),
         _ => None,
@@ -80,7 +84,9 @@ fn mercator_x(lng: f64) -> f64 {
 }
 
 fn mercator_y(lat: f64) -> f64 {
-    (180.0 - (180.0 / std::f64::consts::PI) * (std::f64::consts::PI / 4.0 + lat * std::f64::consts::PI / 360.0).tan().ln()) / 360.0
+    (180.0
+        - (180.0 / std::f64::consts::PI) * (std::f64::consts::PI / 4.0 + lat * std::f64::consts::PI / 360.0).tan().ln())
+        / 360.0
 }
 
 pub fn tile_coordinates(p: P, c: CanonicalTileId) -> P {
@@ -93,7 +99,10 @@ fn lnglat_from_tile(p: P, c: CanonicalTileId) -> P {
     let tiles = 2f64.powi(c.z as i32);
     let x = (p[0] / EXTENT + c.x as f64) / tiles;
     let y = (p[1] / EXTENT + c.y as f64) / tiles;
-    [x * 360.0 - 180.0, (360.0 / std::f64::consts::PI) * ((180.0 - y * 360.0) * std::f64::consts::PI / 180.0).exp().atan() - 90.0]
+    [
+        x * 360.0 - 180.0,
+        (360.0 / std::f64::consts::PI) * ((180.0 - y * 360.0) * std::f64::consts::PI / 180.0).exp().atan() - 90.0,
+    ]
 }
 
 fn update_bbox(b: &mut BBox, p: P) {
@@ -160,7 +169,8 @@ fn line_intersect_polygon(p1: P, p2: P, polygon: &[Vec<P>]) -> bool {
 }
 
 fn line_within_polygon(line: &[P], polygon: &[Vec<P>]) -> bool {
-    line.iter().all(|&p| point_within_polygon(p, polygon, false)) && !line.windows(2).any(|w| line_intersect_polygon(w[0], w[1], polygon))
+    line.iter().all(|&p| point_within_polygon(p, polygon, false))
+        && !line.windows(2).any(|w| line_intersect_polygon(w[0], w[1], polygon))
 }
 
 /// Shift `p` by a world width if that brings it next to `poly`.
@@ -365,7 +375,9 @@ fn polygon_bbox(poly: &[Vec<P>]) -> BBox {
 }
 
 fn bbox_distance(a: &BBox, b: &BBox, ruler: &CheapRuler) -> f64 {
-    let valid = |b: &BBox| b[0] != f64::NEG_INFINITY && b[1] != f64::NEG_INFINITY && b[2] != f64::INFINITY && b[3] != f64::INFINITY;
+    let valid = |b: &BBox| {
+        b[0] != f64::NEG_INFINITY && b[1] != f64::NEG_INFINITY && b[2] != f64::INFINITY && b[3] != f64::INFINITY
+    };
     if !valid(a) || !valid(b) {
         return f64::NAN;
     }
@@ -686,8 +698,10 @@ pub fn distance(geom_type: Option<&str>, geometry: &[Vec<P>], c: CanonicalTileId
             if geometry.is_empty() || geometry[0].is_empty() {
                 return f64::NAN;
             }
-            let polygons: Vec<Vec<Vec<P>>> =
-                classify_rings(geometry).into_iter().map(|poly| poly.iter().map(|r| r.iter().map(to_ll).collect()).collect()).collect();
+            let polygons: Vec<Vec<Vec<P>>> = classify_rings(geometry)
+                .into_iter()
+                .map(|poly| poly.iter().map(|r| r.iter().map(to_ll).collect()).collect())
+                .collect();
             let ruler = CheapRuler::new(polygons[0][0][0][1]);
             let mut d = f64::INFINITY;
             for g in geoms {

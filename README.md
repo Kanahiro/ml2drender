@@ -2,13 +2,13 @@
 
 **A 2D map renderer for MapLibre styles, written in Rust. It needs no GPU.** It compiles to WebAssembly and runs in browsers, Cloudflare Workers, Deno and Node.js. Node-API and Python bindings are also included.
 
-[Live demo](https://kanahiro.github.io/ml2drender/) · [API reference](https://kanahiro.github.io/ml2drender/api/) · [Quick start](#quick-start) · [Projected CRSs](#projected-coordinate-reference-systems) · [Cloudflare Workers](#cloudflare-workers)
+[Live demo](https://kanahiro.github.io/ml2drender/) · [API reference](https://kanahiro.github.io/ml2drender/api/) · [Quick start](#quick-start) · [Projected CRSs](#projected-coordinate-reference-systems) · [Node.js addon](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) · [Python](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme)
 
 - **No GPU, no native dependencies.** It is a software rasterizer in pure Rust. It runs on `wasm32-unknown-unknown` and links no C libraries.
 - **Faithful to MapLibre.** Bucket building, shader math and quantization are ported from MapLibre GL JS. It passes 98.0% of the applicable upstream render tests at GL JS's own tolerances ([conformance](#conformance)).
 - **Any projected CRS.** It draws maps directly in a CRS given as PROJJSON: UTM, national grids, LAEA, polar stereographic, Equal Earth, geostationary views and more.
 - **MapLibre GL JS in any CRS.** Every source of a style (vector tiles, GeoJSON, raster, DEM) can be reprojected and served on a CRS's tile grid. MapLibre GL JS can then draw the original style in that CRS, with interaction and feature queries.
-- **Made for serverless.** The core does no network or file I/O; the host fetches everything. Memory use is kept within Cloudflare Workers' 128 MB limit.
+- **Made for serverless.** The core does no network or file I/O; the host fetches everything.
 
 > [!NOTE]
 > ml2drender draws flat 2D maps. 3D features (fill-extrusion, terrain, globe, pitch) are out of scope; fill-extrusion layers are drawn as fills by default. Styles are fixed when a renderer is created: there is no API for changing a style at runtime.
@@ -25,20 +25,23 @@ const image = await renderer.renderView({ center: [139.767, 35.681], zoom: 5, wi
 const png = image.toPng(); // or image.toWebp(), image.toJpeg(80); raw RGBA in image.data
 ```
 
-The renderer works out which tiles, TileJSON, sprites and glyphs it needs, and fetches them. In browsers (with Vite or similar), the bundled WASM loads automatically. In Node.js and Cloudflare Workers, pass a compiled module as the `wasm` option, for example `WebAssembly.compile(readFileSync(...))` in Node.js.
+The renderer works out which tiles, TileJSON, sprites and glyphs it needs, and fetches them. In browsers (with Vite or similar), the bundled WASM loads automatically. Elsewhere, pass the compiled module as the `wasm` option: `await WebAssembly.compile(readFileSync(new URL(import.meta.resolve('ml2drender/renderer.wasm'))))` in Node.js and Deno, or `import wasm from 'ml2drender/renderer.wasm'` in Cloudflare Workers (Wrangler).
 
 ### Installation
 
-ml2drender is not on npm yet. Build it from this repository and use it as the pnpm workspace package `ml2drender` (`"ml2drender": "workspace:*"`).
-
-You need Node.js (version in `.node-version`), pnpm (version in `packageManager`), and Rust with the `wasm32-unknown-unknown` target.
-
 ```sh
-pnpm install
-rustup target add wasm32-unknown-unknown
-pnpm build:wasm   # builds the WASM into packages/ml2drender/wasm/
-pnpm demo         # starts the demo (examples/browser)
+npm install ml2drender        # WebAssembly: browsers, Node.js, Deno, Workers
+npm install ml2drender-node   # native Node.js addon
+pip install ml2drender        # Python
 ```
+
+| Package | Runs in | API |
+|---|---|---|
+| [`ml2drender`](#javascript-api) | browsers, Node.js, Deno, Cloudflare Workers | Everything below: fetching, Web Mercator and projected views, reprojected sources for GL JS. |
+| [`ml2drender-node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) | Node.js (Linux, macOS, Windows) | Low level: you fetch resources yourself. Web Mercator views only. Renders run in parallel off the JS thread. |
+| [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) | CPython 3.11+ (Linux, macOS, Windows) | Low level, with a `load(url)` callback. Web Mercator views only. |
+
+All three draw with the same Rust core. To build from source, see [Development](#development).
 
 ## Usage
 
@@ -96,7 +99,7 @@ Give `addProjection` the projection from `loadProjection`. It is the same code m
 
 ## JavaScript API
 
-This section is an overview. Every type and option is documented in the [API reference](https://kanahiro.github.io/ml2drender/api/).
+The `ml2drender` package (WebAssembly). This section is an overview. Every type and option is documented in the [API reference](https://kanahiro.github.io/ml2drender/api/).
 
 ### MapRenderer.init(style, options?)
 
@@ -107,10 +110,18 @@ Takes a style object (the official `StyleSpecification` type) and loads the WASM
 | `loadResource` | HTTP `fetch` | `(url) => Promise<Uint8Array \| null>`. Fetches tiles, TileJSON, sprites and glyphs. Return `null` (HTTP 404) for a missing resource and rendering goes on without it; any other failure should reject. Concurrency limits, retries and caching belong here. |
 | `wasm` | bundled WASM | A compiled `WebAssembly.Module`. Required in Node.js and Cloudflare Workers. |
 | `cache.ttlMs` | `300_000` | How long the renderer inside WASM (decoded tiles, geometry, glyphs) is reused across renders. `0` creates and frees one per render, for the least memory; `Infinity` never expires. |
-| `exclusive` | `false` | Runs renders on the same WASM instance one at a time. Without it, overlapping renders each hold their decoded data while they wait for fetches. Meant for Workers. |
 | `transformFillExtrusion` | convert to fill | Replaces each fill-extrusion layer with a 2D layer. By default it becomes a fill with the same color, opacity, pattern and translation. |
 
 Concurrent requests for the same URL are fetched once. Fetched bytes are not cached: rely on the browser's HTTP cache, or cache inside `loadResource` (for example with the Cache API on Workers).
+
+Renderers with `cache.ttlMs: 0` share one WASM instance per module, and WASM memory never shrinks. Overlapping renders each hold their decoded data while they wait for fetches, so peak memory grows with the number of renders in flight. Where memory is tight, limit that number yourself:
+
+```ts
+import pLimit from 'p-limit';
+
+const limit = pLimit(2); // one limit for every renderer of the module
+const image = await limit(() => renderer.renderTile({ z, x, y }));
+```
 
 ### Rendering methods
 
@@ -189,43 +200,13 @@ CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`). PROJ strings and
 - **Axis order:** always easting first, then northing (longitude, latitude), whatever the CRS's declared axis order.
 - **How layers are drawn:** background, fill, line, circle, heatmap and symbol layers are drawn from projected vertices directly into the output. Pixel lengths such as line widths, circle radii and text sizes stay constant on screen. raster, hillshade and color-relief layers are drawn in Web Mercator and warped onto a mesh. Areas outside the projection's domain are transparent.
 
-## Cloudflare Workers
-
-Import `ml2drender/renderer.wasm` with Wrangler and pass the module it gives you:
-
-```ts
-import { MapRenderer } from 'ml2drender';
-import wasm from 'ml2drender/renderer.wasm';
-
-export default {
-  async fetch() {
-    const style = await (await fetch('https://demotiles.maplibre.org/style.json')).json();
-    const renderer = await MapRenderer.init(style, { wasm, cache: { ttlMs: 0 }, exclusive: true });
-    const image = await renderer.renderView({ center: [0, 0], zoom: 0, width: 512, height: 512, margin: 64 });
-    return new Response(image.toWebp(), { headers: { 'Content-Type': 'image/webp' } });
-  },
-};
-```
-
-An isolate's 128 MB limit covers the JS heap plus WASM memory, and WASM memory never shrinks. Create a renderer per request with `ttlMs: 0` and `exclusive: true`. Such renderers share one WASM instance per isolate and draw concurrent requests one at a time.
-
-Measured example: OpenFreeMap Liberty at z14 around Tokyo Station (512 px, margin 64) uses about 75 MiB of WASM memory. The figure is the same with 8 concurrent requests on a local workerd.
-
 ## Other bindings
 
 The core is a plain Rust crate with no I/O, so it can be wrapped for other hosts. Each host runs the same loop: ask the renderer what it `needs`, fetch it, `provide` the bytes, repeat until nothing is needed, then `render`.
 
-- **Rust:** the `ml2drender` crate in [`crates/core`](https://github.com/Kanahiro/ml2drender/tree/main/crates/core). `Renderer::new(style, View::tile(z, x, y, 256))`, then `needs()` / `provide()` / `render()`.
-- **Node-API:** [`crates/napi`](https://github.com/Kanahiro/ml2drender/tree/main/crates/napi). `pnpm build:native` builds `native/ml2drender.<platform>-<arch>.node`. `needs`, `provide`, `render` and the encoders run on libuv's thread pool, so the JS thread stays free and renderers run in parallel. There is no TypeScript wrapper: the host writes its own fetch loop.
-- **Python:** [`crates/python`](https://github.com/Kanahiro/ml2drender/tree/main/crates/python), built with PyO3 (abi3, Python 3.9+) and maturin. Build a wheel with `pnpm build:python`.
-
-  ```python
-  import ml2drender
-
-  view = ml2drender.View.tile(5, 28, 12, 256)
-  rgba = ml2drender.render(style_json, view, load)  # load(url) -> bytes | None
-  png = ml2drender.encode_png(rgba, *view.size)
-  ```
+- **Node.js (Node-API):** [`ml2drender-node`](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme), from [`crates/napi`](https://github.com/Kanahiro/ml2drender/tree/main/crates/napi).
+- **Python:** [`ml2drender` on PyPI](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme), from [`crates/python`](https://github.com/Kanahiro/ml2drender/tree/main/crates/python) (PyO3, abi3).
+- **Rust:** the `ml2drender` crate in [`crates/core`](https://github.com/Kanahiro/ml2drender/tree/main/crates/core) (not on crates.io). `Renderer::new(style, View::tile(z, x, y, 256))`, then `needs()` / `provide()` / `render()`.
 
 ## Conformance
 
@@ -264,25 +245,34 @@ The renderer does not imitate the GPU pipeline. It ports MapLibre's bucket build
 ## Development
 
 ```sh
+pnpm install
+pnpm build:wasm        # WASM → packages/ml2drender/wasm/
+pnpm demo              # starts the demo (examples/browser)
 pnpm test              # Rust unit tests
 pnpm typecheck         # TypeScript type checks, including the API type tests
+pnpm lint              # rustfmt, clippy and Ruff
 pnpm fixtures          # fetches the upstream test data (first time only, about 144 MB)
 pnpm test:render       # render tests → target/test-report/render/
 pnpm test:expression   # expression tests → target/test-report/expression/
+pnpm build:native      # Node-API addon → packages/ml2drender-node/native/
+pnpm test:node         # Node-API addon tests
 pnpm test:python       # Python binding tests (uses uv)
 pnpm build:docs        # API reference (TypeDoc) → target/docs/
 pnpm bench base=<dir> head=.   # compares WASM performance between two checkouts
 ```
 
 ```text
-crates/core/          rendering engine (sans-IO)
-crates/wasm/          C ABI for WebAssembly
-crates/napi/          Node-API addon
-crates/python/        Python extension
-crates/cli/           test runner and native checks
-packages/ml2drender/  JavaScript API
-examples/browser/     demo (Vite + MapLibre GL JS)
+crates/core/               rendering engine (sans-IO)
+crates/wasm/               C ABI for WebAssembly
+crates/napi/               Node-API addon
+crates/python/             Python extension
+crates/cli/                test runner and native checks
+packages/ml2drender/       JavaScript API (WebAssembly)
+packages/ml2drender-node/  Node-API addon package
+examples/browser/          demo (Vite + MapLibre GL JS)
 ```
+
+You need Node.js (version in `.node-version`), pnpm (version in `packageManager`), Rust via rustup (version in `rust-toolchain.toml`), and uv for Python. CI (`.github/workflows/build.yml`) builds and tests every package on Linux, macOS and Windows; `publish.yml` publishes to npm and PyPI.
 
 Design constraints and conventions are described in [AGENTS.md](https://github.com/Kanahiro/ml2drender/blob/main/AGENTS.md) (in Japanese). Issues and pull requests are welcome. A change to rendering should keep `pnpm test:render` results unchanged, or explain why they change.
 

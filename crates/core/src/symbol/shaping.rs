@@ -2,11 +2,11 @@
 //! anchor alignment from PBF glyph metrics. Grapheme clusters are taken one code point at a time,
 //! which is what MapLibre does for clusters no glyph file covers.
 
-use super::glyphs::{Glyph, Glyphs, Metrics, BORDER};
+use super::glyphs::{BORDER, Glyph, Glyphs, Metrics};
 use super::unicode;
 use crate::expression::value::Formatted;
-use crate::sprite::StyleImage;
 use crate::hash::HashMap;
+use crate::sprite::StyleImage;
 use std::rc::Rc;
 
 pub const ONE_EM: f64 = 24.0;
@@ -149,7 +149,11 @@ impl Ctx<'_> {
     }
 
     fn total_width(&self, t: &Tagged, spacing: f64, layout_text_size: f64) -> f64 {
-        t.chars.iter().zip(&t.section).map(|(&c, &s)| self.advance(c, &self.sections[s], spacing, layout_text_size)).sum()
+        t.chars
+            .iter()
+            .zip(&t.section)
+            .map(|(&c, &s)| self.advance(c, &self.sections[s], spacing, layout_text_size))
+            .sum()
     }
 
     /// `determineLineBreaks`: indices to break at, chosen by least badness.
@@ -195,7 +199,19 @@ impl Ctx<'_> {
                 let ideographic = unicode::allows_ideographic_breaking(prev);
                 let breakable = matches!(
                     prev as u32,
-                    0x0a | 0x0d | 0x20 | 0x26 | 0x29 | 0x2b | 0x2d | 0x2f | 0xad | 0xb7 | 0x200b | 0x2010 | 0x2013 | 0x2027
+                    0x0a | 0x0d
+                        | 0x20
+                        | 0x26
+                        | 0x29
+                        | 0x2b
+                        | 0x2d
+                        | 0x2f
+                        | 0xad
+                        | 0xb7
+                        | 0x200b
+                        | 0x2010
+                        | 0x2013
+                        | 0x2027
                 );
                 let image_before = matches!(self.sections[t.section[i - 1]].kind, SectionKind::Image { .. });
                 // ponytail: no word segmenter, so scripts written without spaces (Thai, ...) only
@@ -269,9 +285,15 @@ pub fn shape_text(
                 (SectionKind::Image { name: img.name.clone() }, vec![c])
             }
             Some(_) => continue,
-            None => (SectionKind::Text { font_stack: s.font_stack.clone().unwrap_or_else(|| default_font_stack.to_string()) }, s.text.chars().collect()),
+            None => (
+                SectionKind::Text {
+                    font_stack: s.font_stack.clone().unwrap_or_else(|| default_font_stack.to_string()),
+                },
+                s.text.chars().collect(),
+            ),
         };
-        let scale = if matches!(kind, SectionKind::Image { .. }) { 1.0 } else { s.scale.filter(|&v| v != 0.0).unwrap_or(1.0) };
+        let scale =
+            if matches!(kind, SectionKind::Image { .. }) { 1.0 } else { s.scale.filter(|&v| v != 0.0).unwrap_or(1.0) };
         ctx.sections.push(Section { scale, valign, kind });
         input.section.extend(std::iter::repeat_n(ctx.sections.len() - 1, chars.len()));
         input.chars.extend(chars);
@@ -301,7 +323,18 @@ pub fn shape_text(
         icons_in_text: false,
         verticalizable: false,
     };
-    shape_lines(&mut shaping, &mut ctx, lines, line_height, text_anchor, text_justify, writing_mode, allow_vertical_placement, spacing, layout_text_size_this_zoom);
+    shape_lines(
+        &mut shaping,
+        &mut ctx,
+        lines,
+        line_height,
+        text_anchor,
+        text_justify,
+        writing_mode,
+        allow_vertical_placement,
+        spacing,
+        layout_text_size_this_zoom,
+    );
     if shaping.lines.iter().all(|l| l.glyphs.is_empty()) {
         return None;
     }
@@ -349,10 +382,16 @@ fn shape_lines(
             continue;
         }
         // calculateLineContentSize
-        let max_image = |k: usize| line.section.iter().filter_map(|&s| ctx.image(&ctx.sections[s]).map(|i| display_size(i)[k])).fold(0.0, f64::max);
+        let max_image = |k: usize| {
+            line.section
+                .iter()
+                .filter_map(|&s| ctx.image(&ctx.sections[s]).map(|i| display_size(i)[k]))
+                .fold(0.0, f64::max)
+        };
         let content_height = (line_max_scale * ONE_EM).max(max_image(1) * size_factor);
         let content_width = (line_max_scale * ONE_EM).max(max_image(0) * size_factor);
-        let line_verticals = (writing_mode == WritingMode::Vertical && !allow_vertical_placement).then(|| line_verticals(&mut line, &ctx.sections));
+        let line_verticals = (writing_mode == WritingMode::Vertical && !allow_vertical_placement)
+            .then(|| line_verticals(&mut line, &ctx.sections));
         for i in 0..line.chars.len() {
             let c = line.chars[i];
             let si = line.section[i];
@@ -368,15 +407,30 @@ fn shape_lines(
             let (tex, metrics, baseline_offset) = match &section.kind {
                 SectionKind::Text { .. } => {
                     let Some(g) = ctx.glyph(section, c) else { continue };
-                    let offset = if vertical { content_width - section.scale * ONE_EM } else { (content_height - section.scale * ONE_EM) * section.valign };
+                    let offset = if vertical {
+                        content_width - section.scale * ONE_EM
+                    } else {
+                        (content_height - section.scale * ONE_EM) * section.valign
+                    };
                     (Tex::Glyph(g.clone()), g.metrics, offset)
                 }
                 SectionKind::Image { .. } => {
                     let Some(img) = ctx.image(section) else { continue };
                     let size = display_size(img);
-                    let metrics = Metrics { width: size[0], height: size[1], left: IMAGE_PADDING, top: -BORDER as f64, advance: if vertical { size[1] } else { size[0] } };
-                    let offset = if vertical { content_width - size[1] * section.scale } else { (content_height - size[1] * section.scale) * section.valign };
-                    image_offset = image_offset.max((if vertical { size[0] } else { size[1] }) * section.scale - ONE_EM * line_max_scale);
+                    let metrics = Metrics {
+                        width: size[0],
+                        height: size[1],
+                        left: IMAGE_PADDING,
+                        top: -BORDER as f64,
+                        advance: if vertical { size[1] } else { size[0] },
+                    };
+                    let offset = if vertical {
+                        content_width - size[1] * section.scale
+                    } else {
+                        (content_height - size[1] * section.scale) * section.valign
+                    };
+                    image_offset = image_offset
+                        .max((if vertical { size[0] } else { size[1] }) * section.scale - ONE_EM * line_max_scale);
                     (Tex::Image(img.clone()), metrics, offset)
                 }
             };
@@ -442,7 +496,8 @@ fn is_line_vertical(mode: WritingMode, allow_vertical_placement: bool, c: char) 
 
 /// `runIsUpright`: numbers (with symbols) and short uppercase codes stand upright.
 fn run_is_upright(run: &[char]) -> bool {
-    let number = run.iter().any(|&c| unicode::is_decimal_digit(c)) && run.iter().all(|&c| unicode::is_decimal_digit(c) || unicode::is_symbol_or_punctuation(c));
+    let number = run.iter().any(|&c| unicode::is_decimal_digit(c))
+        && run.iter().all(|&c| unicode::is_decimal_digit(c) || unicode::is_symbol_or_punctuation(c));
     let code = run.len() <= 3 && run.iter().all(|&c| unicode::is_uppercase_letter(c) || unicode::is_decimal_digit(c));
     number || code
 }
@@ -531,7 +586,14 @@ pub fn apply_text_fit(icon: &PositionedIcon) -> [f64; 4] {
 }
 
 /// `fitIconToText`.
-pub fn fit_icon_to_text(icon: &PositionedIcon, text: &Shaping, fit: &str, padding: [f64; 4], offset: [f64; 2], font_scale: f64) -> PositionedIcon {
+pub fn fit_icon_to_text(
+    icon: &PositionedIcon,
+    text: &Shaping,
+    fit: &str,
+    padding: [f64; 4],
+    offset: [f64; 2],
+    font_scale: f64,
+) -> PositionedIcon {
     let image = icon.image.clone();
     let size = display_size(&image);
     let collision_padding = image.content.map(|c| {

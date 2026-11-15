@@ -152,7 +152,9 @@ fn decode_geometry(cmds: &[u32]) -> Vec<Vec<[i32; 2]>> {
                         // Sized for the LineTo (and ClosePath) that usually follow: growing by
                         // doubling would leave up to half of each ring unused.
                         let mut n = 1;
-                        if let Some(&next) = cmds.get(i) && next & 7 == 2 {
+                        if let Some(&next) = cmds.get(i)
+                            && next & 7 == 2
+                        {
                             n += (next >> 3) as usize;
                             let close = i + 1 + 2 * (next >> 3) as usize;
                             n += cmds.get(close).is_some_and(|&c| c & 7 == 7) as usize;
@@ -234,7 +236,12 @@ fn decode_layer(data: &[u8]) -> Option<Layer> {
     let table = Rc::new(table);
     let features = decoded
         .into_iter()
-        .map(|(id, ty, start, end, geometry)| Feature { id, ty, properties: Properties::Tags(table.clone(), start, end), geometry })
+        .map(|(id, ty, start, end, geometry)| Feature {
+            id,
+            ty,
+            properties: Properties::Tags(table.clone(), start, end),
+            geometry,
+        })
         .collect();
     Some(Layer { name, extent, features })
 }
@@ -295,13 +302,21 @@ pub fn slice_layer(layer: &Layer, parent: crate::tile::TileId, target: crate::ti
     let (lo, hi) = (-buffer, extent + buffer);
     let mut features = Vec::new();
     for f in &layer.features {
-        let geom: Vec<Vec<[f64; 2]>> =
-            f.geometry.iter().map(|r| r.iter().map(|p| [p[0] as f64 * scale - ox, p[1] as f64 * scale - oy]).collect()).collect();
+        let geom: Vec<Vec<[f64; 2]>> = f
+            .geometry
+            .iter()
+            .map(|r| r.iter().map(|p| [p[0] as f64 * scale - ox, p[1] as f64 * scale - oy]).collect())
+            .collect();
         let clipped = clip_axis(&clip_axis(&geom, f.ty, lo, hi, 0), f.ty, lo, hi, 1);
         if clipped.is_empty() {
             continue;
         }
-        features.push(Feature { id: f.id.clone(), ty: f.ty, properties: f.properties.clone(), geometry: reencode(&clipped, f.ty) });
+        features.push(Feature {
+            id: f.id.clone(),
+            ty: f.ty,
+            properties: f.properties.clone(),
+            geometry: reencode(&clipped, f.ty),
+        });
     }
     Layer { name: layer.name.clone(), extent: layer.extent, features }
 }
@@ -557,7 +572,12 @@ mod tests {
         props.insert("n".into(), Value::Number(-3.0));
         props.insert("f".into(), Value::Number(1.5));
         props.insert("skip".into(), Value::Null);
-        let feature = |ty, geometry| Feature { id: Some(Value::Number(7.0)), ty, properties: Properties::Object(Rc::new(props.clone())), geometry };
+        let feature = |ty, geometry| Feature {
+            id: Some(Value::Number(7.0)),
+            ty,
+            properties: Properties::Object(Rc::new(props.clone())),
+            geometry,
+        };
         let layer = Layer {
             name: "l".into(),
             extent: 4096,

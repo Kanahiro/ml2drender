@@ -7,3 +7,7 @@ rustflags = ["-C", "target-feature=+simd128"]
 # renders; v3 (AVX2) measured no faster. Applies to native builds (the Node-API addon, the CLI).
 [target.'cfg(target_arch = "x86_64")']
 rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+# Supply chain: don't resolve crate versions published less than a week ago.
+[registry]
+global-min-publish-age = "7 days"

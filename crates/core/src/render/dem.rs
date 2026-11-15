@@ -3,7 +3,7 @@
 //! shader with its five methods); color-relief (elevation stops and color ramp textures).
 
 use super::raster::{self, Mask, Rgba, Target};
-use super::{color, num, Ctx, EXTENT};
+use super::{Ctx, EXTENT, color, num};
 use crate::expression::Value;
 use crate::image::{Filter, Image, Texture};
 use crate::style::Layer;
@@ -38,7 +38,10 @@ impl Dem {
         let mut data = Vec::with_capacity(stride * stride);
         for y in 0..stride {
             for x in 0..stride {
-                let (sx, sy) = ((x as isize - 2).clamp(0, dim as isize - 1) as usize, (y as isize - 2).clamp(0, dim as isize - 1) as usize);
+                let (sx, sy) = (
+                    (x as isize - 2).clamp(0, dim as isize - 1) as usize,
+                    (y as isize - 2).clamp(0, dim as isize - 1) as usize,
+                );
                 let i = (sy * dim + sx) * 4;
                 data.push([img.data[i], img.data[i + 1], img.data[i + 2], img.data[i + 3]]);
             }
@@ -104,10 +107,17 @@ impl Dem {
     pub fn prepare(&self, zoom: f64) -> Texture {
         let size = self.dim + 2;
         let u = self.unpack;
-        let elevations: Vec<f32> = self.data.iter().map(|p| p[0] as f32 * u[0] + p[1] as f32 * u[1] + p[2] as f32 * u[2] - u[3]).collect();
+        let elevations: Vec<f32> =
+            self.data.iter().map(|p| p[0] as f32 * u[0] + p[1] as f32 * u[1] + p[2] as f32 * u[2] - u[3]).collect();
         let elevation = |x: usize, y: usize| elevations[y * self.stride + x];
         let zoom = zoom as f32;
-        let factor = if zoom < 2.0 { 0.4 } else if zoom < 4.5 { 0.35 } else { 0.3 };
+        let factor = if zoom < 2.0 {
+            0.4
+        } else if zoom < 4.5 {
+            0.35
+        } else {
+            0.3
+        };
         let exaggeration = if zoom < 15.0 { (zoom - 15.0) * factor } else { 0.0 };
         // log2 of the mercator world width in meters.
         let scale = self.dim as f32 / (exaggeration + (3.0 + 25.2562 - zoom)).exp2();
@@ -195,7 +205,8 @@ impl HillshadeParams {
         pad(&mut shadows, n, [0.0, 0.0, 0.0, 1.0]);
         let viewport = p("hillshade-illumination-anchor").as_str() != Some("map");
         let bearing = -ctx.transform.bearing_rad;
-        let azimuths: Vec<f32> = direction.iter().map(|d| (d.to_radians() + if viewport { bearing } else { 0.0 }) as f32).collect();
+        let azimuths: Vec<f32> =
+            direction.iter().map(|d| (d.to_radians() + if viewport { bearing } else { 0.0 }) as f32).collect();
         let altitudes: Vec<f32> = altitude.iter().map(|a| a.to_radians() as f32).collect();
         let method = match p("hillshade-method").as_str() {
             Some("basic") => 4,
@@ -207,7 +218,8 @@ impl HillshadeParams {
         let azimuth = azimuths[0] + PI;
         let lights = (0..if method == 3 { sources } else { 1 })
             .map(|i| {
-                let (cos_az, sin_az) = if method == 3 { (-azimuths[i].cos(), -azimuths[i].sin()) } else { (azimuth.cos(), azimuth.sin()) };
+                let (cos_az, sin_az) =
+                    if method == 3 { (-azimuths[i].cos(), -azimuths[i].sin()) } else { (azimuth.cos(), azimuth.sin()) };
                 [altitudes[i].sin(), altitudes[i].cos(), cos_az, sin_az]
             })
             .collect();
@@ -234,21 +246,27 @@ impl HillshadeParams {
         let scale = |c: Rgba, s: f32| -> Rgba { c.map(|v| v * s) };
         let add = |a: Rgba, b: Rgba| -> Rgba { std::array::from_fn(|k| a[k] + b[k]) };
         let len = |d: [f32; 2]| (d[0] * d[0] + d[1] * d[1]).sqrt();
-        let aspect = |d: [f32; 2]| if d[0] != 0.0 { d[1].atan2(-d[0]) } else { PI / 2.0 * if d[1] > 0.0 { 1.0 } else { -1.0 } };
+        let aspect =
+            |d: [f32; 2]| if d[0] != 0.0 { d[1].atan2(-d[0]) } else { PI / 2.0 * if d[1] > 0.0 { 1.0 } else { -1.0 } };
         // GLSL `mod`.
         let gmod = |x: f32, y: f32| x - y * (x / y).floor();
         let boosted = [deriv[0] * self.exaggeration * 2.0, deriv[1] * self.exaggeration * 2.0];
         let cang = |d: [f32; 2], [sin_alt, cos_alt, cos_az, sin_az]: [f32; 4]| {
             (sin_alt - (d[1] * cos_az * cos_alt - d[0] * sin_az * cos_alt)) / (1.0 + d[0] * d[0] + d[1] * d[1]).sqrt()
         };
-        let lit = |shade: f32, hi: Rgba, sh: Rgba| if shade > 0.5 { scale(hi, 2.0 * shade - 1.0) } else { scale(sh, 1.0 - 2.0 * shade) };
+        let lit = |shade: f32, hi: Rgba, sh: Rgba| {
+            if shade > 0.5 { scale(hi, 2.0 * shade - 1.0) } else { scale(sh, 1.0 - 2.0 * shade) }
+        };
         match self.method {
             // igor
             2 => {
                 let d = boosted;
                 let slope = len(d).atan() * 2.0 / PI;
                 let aspect_strength = 1.0 - (gmod((aspect(d) + self.azimuth) / PI + 0.5, 2.0) - 1.0).abs();
-                add(scale(self.shadows[0], slope * aspect_strength), scale(self.highlights[0], slope * (1.0 - aspect_strength)))
+                add(
+                    scale(self.shadows[0], slope * aspect_strength),
+                    scale(self.highlights[0], slope * (1.0 - aspect_strength)),
+                )
             }
             // basic
             4 => {
@@ -276,7 +294,8 @@ impl HillshadeParams {
                 let slope = (0.625 * len(deriv)).atan();
                 let intensity = self.exaggeration;
                 let max = 0.5 * PI;
-                let scaled = if intensity != 0.5 { ((self.base.powf(slope) - 1.0) / self.base_max) * max } else { slope };
+                let scaled =
+                    if intensity != 0.5 { ((self.base.powf(slope) - 1.0) / self.base_max) * max } else { slope };
                 let k = (intensity * 2.0).clamp(0.0, 1.0);
                 let accent = scale(self.accent, (1.0 - scaled.cos()) * k);
                 let shade = (gmod((aspect(deriv) + self.azimuth) / PI + 0.5, 2.0) - 1.0).abs();
@@ -288,7 +307,13 @@ impl HillshadeParams {
 }
 
 /// Draw a tile quad, pixel-aligned like rasters; `shade` gets the tile fraction (`a_pos / 8192`).
-fn draw_quad(target: &mut Target, ctx: &Ctx, tile: &RenderTile, mask: Option<&Mask>, shade: &mut impl FnMut(&[f32; 2]) -> Option<Rgba>) {
+fn draw_quad(
+    target: &mut Target,
+    ctx: &Ctx,
+    tile: &RenderTile,
+    mask: Option<&Mask>,
+    shade: &mut impl FnMut(&[f32; 2]) -> Option<Rgba>,
+) {
     let to_world = ctx.tile_to_world(tile);
     let off = ctx.transform.aligned_offset();
     let screen = |p: [f64; 2]| {
@@ -305,7 +330,14 @@ fn draw_quad(target: &mut Target, ctx: &Ctx, tile: &RenderTile, mask: Option<&Ma
 
 /// Draw one tile's hillshade, preparing its slopes only if a pixel is drawn (a tile in the
 /// cropped margin only lends its border to its neighbors).
-pub fn draw_hillshade_tile(target: &mut Target, ctx: &Ctx, tile: &RenderTile, dem: &DemTile, params: &HillshadeParams, mask: Option<&Mask>) {
+pub fn draw_hillshade_tile(
+    target: &mut Target,
+    ctx: &Ctx,
+    tile: &RenderTile,
+    dem: &DemTile,
+    params: &HillshadeParams,
+    mask: Option<&Mask>,
+) {
     // `u_latrange`: latitudes of the tile's top and bottom edges.
     let n = (1u64 << tile.canonical.z) as f64;
     let lat = |y: f64| crate::tile::mercator_lat(y / n);
@@ -349,17 +381,23 @@ impl ColorRamp {
         let mut elevations = Vec::new();
         let mut colors = Vec::new();
         if let crate::style::PropValue::Expr(e) = prop
-            && let (true, Some(labels)) = (e.is_zoom_constant(), e.interpolate_labels()) {
-                for &l in labels {
-                    let g = crate::expression::Globals { zoom: ctx.transform.zoom, elevation: Some(l), global_state: Some(ctx.global_state.clone()), ..Default::default() };
-                    let c = match prop.eval_globals(g) {
-                        Value::Color(c) => c,
-                        _ => crate::expression::color::Color::TRANSPARENT,
-                    };
-                    elevations.push(l);
-                    colors.push(ramp_texel(&c));
-                }
+            && let (true, Some(labels)) = (e.is_zoom_constant(), e.interpolate_labels())
+        {
+            for &l in labels {
+                let g = crate::expression::Globals {
+                    zoom: ctx.transform.zoom,
+                    elevation: Some(l),
+                    global_state: Some(ctx.global_state.clone()),
+                    ..Default::default()
+                };
+                let c = match prop.eval_globals(g) {
+                    Value::Color(c) => c,
+                    _ => crate::expression::color::Color::TRANSPARENT,
+                };
+                elevations.push(l);
+                colors.push(ramp_texel(&c));
             }
+        }
         if elevations.is_empty() {
             elevations.push(0.0);
             colors.push([0; 4]);
@@ -372,7 +410,11 @@ impl ColorRamp {
             elevations,
             colors,
             opacity: num(&ctx.paint(layer, "color-relief-opacity", None, &t)) as f32,
-            filter: if ctx.paint(layer, "resampling", None, &t).as_str() == Some("nearest") { Filter::Nearest } else { Filter::Linear },
+            filter: if ctx.paint(layer, "resampling", None, &t).as_str() == Some("nearest") {
+                Filter::Nearest
+            } else {
+                Filter::Linear
+            },
         }
     }
 }
@@ -390,7 +432,14 @@ fn pack(v: f64, u: [f32; 4]) -> [u8; 3] {
 }
 
 /// Draw one tile of a color-relief layer.
-pub fn draw_color_relief_tile(target: &mut Target, ctx: &Ctx, tile: &RenderTile, dem: &Dem, ramp: &ColorRamp, mask: Option<&Mask>) {
+pub fn draw_color_relief_tile(
+    target: &mut Target,
+    ctx: &Ctx,
+    tile: &RenderTile,
+    dem: &Dem,
+    ramp: &ColorRamp,
+    mask: Option<&Mask>,
+) {
     let u = dem.unpack;
     let unpack = |p: [f32; 3]| p[0] * 255.0 * u[0] + p[1] * 255.0 * u[1] + p[2] * 255.0 * u[2] - u[3];
     // Elevation stops round-trip through the 8-bit encoding.
@@ -411,7 +460,12 @@ pub fn draw_color_relief_tile(target: &mut Target, ctx: &Ctx, tile: &RenderTile,
         let (x, y) = (x - 0.5, y - 0.5);
         let (x0, y0) = (x.floor(), y.floor());
         let (fx, fy) = (x - x0, y - y0);
-        let (a, b, c, d) = (texel(x0 as i64, y0 as i64), texel(x0 as i64 + 1, y0 as i64), texel(x0 as i64, y0 as i64 + 1), texel(x0 as i64 + 1, y0 as i64 + 1));
+        let (a, b, c, d) = (
+            texel(x0 as i64, y0 as i64),
+            texel(x0 as i64 + 1, y0 as i64),
+            texel(x0 as i64, y0 as i64 + 1),
+            texel(x0 as i64 + 1, y0 as i64 + 1),
+        );
         std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
     };
     let color = |x: f32| -> Rgba {

@@ -4,7 +4,7 @@
 
 use super::dem::ramp_texel;
 use super::raster::{self, Rgba, Target};
-use super::{num, Ctx, TileFeatures, EXTENT};
+use super::{Ctx, EXTENT, TileFeatures, num};
 use crate::expression::{Globals, Value};
 use crate::style::Layer;
 
@@ -26,7 +26,12 @@ fn color_ramp(layer: &Layer, ctx: &Ctx) -> Vec<[u8; 4]> {
     let prop = layer.paint("heatmap-color");
     (0..256)
         .map(|i| {
-            let g = Globals { zoom: ctx.transform.zoom, heatmap_density: Some(i as f64 / 255.0), global_state: Some(ctx.global_state.clone()), ..Default::default() };
+            let g = Globals {
+                zoom: ctx.transform.zoom,
+                heatmap_density: Some(i as f64 / 255.0),
+                global_state: Some(ctx.global_state.clone()),
+                ..Default::default()
+            };
             match prop.eval_globals(g) {
                 Value::Color(c) => ramp_texel(&c),
                 _ => [0; 4],
@@ -87,10 +92,7 @@ pub fn draw_heatmap(target: &Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeat
                         }
                         None => {
                             let off = (s * radius) as f64 * extrude_scale;
-                            t.world_to_screen(to_world([
-                                p[0] + e[0] as f64 * off,
-                                p[1] + e[1] as f64 * off,
-                            ]))
+                            t.world_to_screen(to_world([p[0] + e[0] as f64 * off, p[1] + e[1] as f64 * off]))
                         }
                     };
                     [d[0] * sx, d[1] * sy]
@@ -98,7 +100,11 @@ pub fn draw_heatmap(target: &Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeat
                 let vary = corners.map(|e| [e[0] * s, e[1] * s]);
                 for tri in [[0, 3, 1], [0, 2, 3]] {
                     raster::for_each_pixel(w4, h4, tri.map(|i| pos[i]), |x, y, b| {
-                        let v = [0, 1].map(|k| (vary[tri[0]][k] as f64 * b[0] + vary[tri[1]][k] as f64 * b[1] + vary[tri[2]][k] as f64 * b[2]) as f32);
+                        let v = [0, 1].map(|k| {
+                            (vary[tri[0]][k] as f64 * b[0]
+                                + vary[tri[1]][k] as f64 * b[1]
+                                + vary[tri[2]][k] as f64 * b[2]) as f32
+                        });
                         let d = -0.5 * 3.0 * 3.0 * (v[0] * v[0] + v[1] * v[1]);
                         let i = y * w4 + x;
                         density[i] = f16(density[i] + f16(val0 * d.exp()));
@@ -109,7 +115,8 @@ pub fn draw_heatmap(target: &Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeat
     }
     // `heatmap_texture`: upsample the density (LINEAR, clamp) and look up the ramp.
     let ramp = color_ramp(layer, ctx);
-    let texel = |x: i64, y: i64| density[(y.clamp(0, h4 as i64 - 1) as usize) * w4 + x.clamp(0, w4 as i64 - 1) as usize];
+    let texel =
+        |x: i64, y: i64| density[(y.clamp(0, h4 as i64 - 1) as usize) * w4 + x.clamp(0, w4 as i64 - 1) as usize];
     let ramp_at = |u: f32| -> Rgba {
         let tx = u * 256.0 - 0.5;
         let i0 = tx.floor();
@@ -125,7 +132,8 @@ pub fn draw_heatmap(target: &Target, layer: &Layer, ctx: &Ctx, tiles: &[TileFeat
             let (x0, y0) = (u.floor(), v.floor());
             let (fx, fy) = (u - x0, v - y0);
             let (x0, y0) = (x0 as i64, y0 as i64);
-            let d = (texel(x0, y0) * (1.0 - fx) + texel(x0 + 1, y0) * fx) * (1.0 - fy) + (texel(x0, y0 + 1) * (1.0 - fx) + texel(x0 + 1, y0 + 1) * fx) * fy;
+            let d = (texel(x0, y0) * (1.0 - fx) + texel(x0 + 1, y0) * fx) * (1.0 - fy)
+                + (texel(x0, y0 + 1) * (1.0 - fx) + texel(x0 + 1, y0 + 1) * fx) * fy;
             out[y * target.w + x] = ramp_at(d).map(|v| v * opacity);
         }
     }
@@ -141,6 +149,16 @@ pub fn blend(target: &mut Target, colors: &[Rgba], only: Option<&[bool]>) {
     }
 }
 
+/// Blend the heatmaps again over the pixels the last layer wrote in the opaque pass.
+pub fn reapply(target: &mut Target, heatmaps: &[Vec<Rgba>]) {
+    let only = std::mem::take(&mut target.opaque);
+    if only.iter().any(|&o| o) {
+        for colors in heatmaps {
+            blend(target, colors, Some(&only));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::f16;
@@ -151,15 +169,5 @@ mod tests {
         assert_eq!(f16(1.0 + 1.0 / 4096.0), 1.0);
         assert_eq!(f16(1.0 + 3.0 / 2048.0), 1.0 + 2.0 / 1024.0);
         assert_eq!(f16(1e-9), 0.0);
-    }
-}
-
-/// Blend the heatmaps again over the pixels the last layer wrote in the opaque pass.
-pub fn reapply(target: &mut Target, heatmaps: &[Vec<Rgba>]) {
-    let only = std::mem::take(&mut target.opaque);
-    if only.iter().any(|&o| o) {
-        for colors in heatmaps {
-            blend(target, colors, Some(&only));
-        }
     }
 }

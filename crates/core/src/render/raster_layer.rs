@@ -1,7 +1,7 @@
 //! Raster layers (raster tiles and image sources): MapLibre's `raster` shaders.
 
 use super::raster::{self, Mask, Target};
-use super::{num, Ctx, EXTENT};
+use super::{Ctx, EXTENT, num};
 use crate::image::{Filter, Texture};
 use crate::style::Layer;
 use crate::tile::RenderTile;
@@ -34,7 +34,11 @@ impl RasterParams {
             brightness_high: num(&p("raster-brightness-max")) as f32,
             saturation: (if sat > 0.0 { 1.0 - 1.0 / (1.001 - sat) } else { -sat }) as f32,
             contrast: (if con > 0.0 { 1.0 / (1.0 - con) } else { 1.0 + con }) as f32,
-            spin: [((2.0 * c + 1.0) / 3.0) as f32, ((-(3f64.sqrt()) * s - c + 1.0) / 3.0) as f32, ((3f64.sqrt() * s - c + 1.0) / 3.0) as f32],
+            spin: [
+                ((2.0 * c + 1.0) / 3.0) as f32,
+                ((-(3f64.sqrt()) * s - c + 1.0) / 3.0) as f32,
+                ((3f64.sqrt() * s - c + 1.0) / 3.0) as f32,
+            ],
             mag: if nearest { Filter::Nearest } else { Filter::Linear },
         }
     }
@@ -74,7 +78,12 @@ pub struct Quad {
 
 impl Quad {
     pub fn tile(tile: RenderTile) -> Quad {
-        Quad { tile, corners: [[0.0, 0.0], [EXTENT, 0.0], [EXTENT, EXTENT], [0.0, EXTENT]], warp: [0.0, 0.0, 1.0], subdivided: false }
+        Quad {
+            tile,
+            corners: [[0.0, 0.0], [EXTENT, 0.0], [EXTENT, EXTENT], [0.0, EXTENT]],
+            warp: [0.0, 0.0, 1.0],
+            subdivided: false,
+        }
     }
 }
 
@@ -90,7 +99,8 @@ pub fn draw_quad(target: &mut Target, ctx: &Ctx, q: &Quad, tex: &Texture, params
         let den = w[0] * f[0] + w[1] * f[1] + 1.0;
         let across = [tr[0] - tl[0] + w[0] * tr[0], tr[1] - tl[1] + w[0] * tr[1]];
         let down = [bl[0] - tl[0] + w[1] * bl[0], bl[1] - tl[1] + w[1] * bl[1]];
-        let projective = [(across[0] * f[0] + down[0] * f[1] + tl[0]) / den, (across[1] * f[0] + down[1] * f[1] + tl[1]) / den];
+        let projective =
+            [(across[0] * f[0] + down[0] * f[1] + tl[0]) / den, (across[1] * f[0] + down[1] * f[1] + tl[1]) / den];
         let pos = lerp(projective, bilinear, w[2]);
         let wp = to_world(pos);
         let s = ctx.transform.world_to_screen([wp[0] + off[0], wp[1] + off[1]]);
@@ -98,7 +108,8 @@ pub fn draw_quad(target: &mut Target, ctx: &Ctx, q: &Quad, tex: &Texture, params
         (s, [(f[0] * ratio) as f32, (f[1] * ratio) as f32, ratio as f32])
     };
     let g = if q.subdivided { 16 } else { 1 };
-    let verts: Vec<(P, [f32; 3])> = (0..=g).flat_map(|y| (0..=g).map(move |x| [x as f64 / g as f64, y as f64 / g as f64])).map(vertex).collect();
+    let verts: Vec<(P, [f32; 3])> =
+        (0..=g).flat_map(|y| (0..=g).map(move |x| [x as f64 / g as f64, y as f64 / g as f64])).map(vertex).collect();
     let (tw, th) = tex.size();
     for y in 0..g {
         for x in 0..g {

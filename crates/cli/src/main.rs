@@ -22,7 +22,9 @@ fn main() {
             println!("{diff}");
         }
         _ => {
-            eprintln!("usage: ml2drender (render-tests | expression-tests) [id-substring-filter]\n       ml2drender compare <a.png> <b.png> [threshold]  # mismatched pixel count");
+            eprintln!(
+                "usage: ml2drender (render-tests | expression-tests) [id-substring-filter]\n       ml2drender compare <a.png> <b.png> [threshold]  # mismatched pixel count"
+            );
             std::process::exit(2);
         }
     }

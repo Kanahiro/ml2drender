@@ -8,8 +8,8 @@
 //! a few glyphs from each of many ranges); a range is needed again when text needs one of its
 //! code points that was not looked up yet.
 
-use crate::mvt::Reader;
 use crate::hash::HashMap;
+use crate::mvt::Reader;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -78,7 +78,9 @@ pub fn parse(data: &[u8], wanted: &BTreeSet<u32>) -> HashMap<u32, Rc<Glyph>> {
     let mut out = HashMap::default();
     let mut r = Reader { buf: data, pos: 0 };
     while let Some((field, wire)) = r.field() {
-        let Some(stack) = (if (field, wire) == (1, 2) { r.bytes() } else { r.skip(wire).map(|_| &[][..]) }) else { break };
+        let Some(stack) = (if (field, wire) == (1, 2) { r.bytes() } else { r.skip(wire).map(|_| &[][..]) }) else {
+            break;
+        };
         let mut s = Reader { buf: stack, pos: 0 };
         while let Some((field, wire)) = s.field() {
             if (field, wire) == (3, 2) {
@@ -179,7 +181,10 @@ mod tests {
 
     #[test]
     fn parse_fixture_range() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/render/assets/glyphs/Open Sans Semibold,Arial Unicode MS Bold/0-255.pbf");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/render/assets/glyphs/Open Sans Semibold,Arial Unicode MS Bold/0-255.pbf"
+        );
         let Ok(bytes) = std::fs::read(path) else { return };
         let glyphs = parse(&bytes, &(0..256).collect());
         let a = &glyphs[&('A' as u32)];

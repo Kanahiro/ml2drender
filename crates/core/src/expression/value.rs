@@ -107,7 +107,7 @@ impl Value {
 
     /// JSON view mirroring the enumerable own properties of the upstream JS objects.
     pub fn to_json(&self) -> serde_json::Value {
-        use serde_json::{json, Value as J};
+        use serde_json::{Value as J, json};
         let num = |n: f64| serde_json::Number::from_f64(n).map_or(J::Null, J::Number);
         match self {
             Value::Null => J::Null,
@@ -188,9 +188,10 @@ impl Value {
             Value::ProjectionDefinition(p) => {
                 format!("[{},{},{}]", json_string(&p.from), json_string(&p.to), js_number_to_string(p.transition))
             }
-            Value::Padding(_) | Value::NumberArray(_) | Value::ColorArray(_) | Value::VariableAnchorOffsetCollection(_) => {
-                js_stringify(&self.to_json()["values"])
-            }
+            Value::Padding(_)
+            | Value::NumberArray(_)
+            | Value::ColorArray(_)
+            | Value::VariableAnchorOffsetCollection(_) => js_stringify(&self.to_json()["values"]),
             _ => js_stringify(&self.to_json()),
         }
     }

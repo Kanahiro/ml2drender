@@ -3,9 +3,9 @@
 //! where the settled state is "visible iff placed").
 
 use super::anchors::{self, P};
-use super::layout::{overlap_mode, CollisionBox, Resolved, SymbolBucket};
+use super::layout::{CollisionBox, Resolved, SymbolBucket, overlap_mode};
 use super::shaping::{self, WritingMode};
-use crate::render::{num, Ctx, EXTENT};
+use crate::render::{Ctx, EXTENT, num};
 use crate::style::Layer;
 use std::rc::Rc;
 
@@ -106,7 +106,13 @@ impl GridIndex {
                     continue;
                 }
                 let (o, key, g) = self.boxes[uid];
-                if x1 <= o[2] + eps && y1 <= o[3] + eps && x2 >= o[0] - eps && y2 >= o[1] - eps && (group == 0 || g == group) && !overlap_allowed(mode, key) {
+                if x1 <= o[2] + eps
+                    && y1 <= o[3] + eps
+                    && x2 >= o[0] - eps
+                    && y2 >= o[1] - eps
+                    && (group == 0 || g == group)
+                    && !overlap_allowed(mode, key)
+                {
                     return true;
                 }
             }
@@ -115,7 +121,10 @@ impl GridIndex {
                     continue;
                 }
                 let (c, key, g) = self.circles[uid];
-                if circle_and_rect(c[0], c[1], c[2], x1, y1, x2, y2) && (group == 0 || g == group) && !overlap_allowed(mode, key) {
+                if circle_and_rect(c[0], c[1], c[2], x1, y1, x2, y2)
+                    && (group == 0 || g == group)
+                    && !overlap_allowed(mode, key)
+                {
                     return true;
                 }
             }
@@ -136,7 +145,10 @@ impl GridIndex {
                     continue;
                 }
                 let (o, key, g) = self.boxes[uid];
-                if circle_and_rect(x, y, r, o[0], o[1], o[2], o[3]) && (group == 0 || g == group) && !overlap_allowed(mode, key) {
+                if circle_and_rect(x, y, r, o[0], o[1], o[2], o[3])
+                    && (group == 0 || g == group)
+                    && !overlap_allowed(mode, key)
+                {
                     return true;
                 }
             }
@@ -238,20 +250,22 @@ pub struct TileProjection {
 
 impl TileProjection {
     pub fn new(ctx: &Ctx, tile: &crate::tile::RenderTile) -> TileProjection {
-        TileProjection { origin: ctx.tile_origin(tile), scale: ctx.tile_px(tile) / EXTENT, transform: ctx.transform.clone() }
+        TileProjection {
+            origin: ctx.tile_origin(tile),
+            scale: ctx.tile_px(tile) / EXTENT,
+            transform: ctx.transform.clone(),
+        }
     }
 
     /// Whether a tile point is on the map (see `Transform::in_domain`).
     pub fn in_domain(&self, p: P) -> bool {
-        self.transform.in_domain([
-            self.origin[0] + p[0] * self.scale,
-            self.origin[1] + p[1] * self.scale,
-        ])
+        self.transform.in_domain([self.origin[0] + p[0] * self.scale, self.origin[1] + p[1] * self.scale])
     }
 
     /// Tile units → CSS px of the collision grid.
     pub fn project(&self, p: P) -> P {
-        let s = self.transform.world_to_screen([self.origin[0] + p[0] * self.scale, self.origin[1] + p[1] * self.scale]);
+        let s =
+            self.transform.world_to_screen([self.origin[0] + p[0] * self.scale, self.origin[1] + p[1] * self.scale]);
         let r = self.transform.pixel_ratio;
         [s[0] / r + VIEWPORT_PADDING, s[1] / r + VIEWPORT_PADDING]
     }
@@ -325,8 +339,10 @@ pub struct LayerBuckets<'a> {
 pub fn place(ctx: &Ctx, layers: &[LayerBuckets]) -> Vec<Vec<Vec<InstancePlacement>>> {
     let t = ctx.transform;
     let mut index = CollisionIndex::new(t.width, t.height);
-    let mut out: Vec<Vec<Vec<InstancePlacement>>> =
-        layers.iter().map(|l| l.buckets.iter().map(|b| vec![InstancePlacement::default(); b.instances.len()]).collect()).collect();
+    let mut out: Vec<Vec<Vec<InstancePlacement>>> = layers
+        .iter()
+        .map(|l| l.buckets.iter().map(|b| vec![InstancePlacement::default(); b.instances.len()]).collect())
+        .collect();
     for li in (0..layers.len()).rev() {
         let lb = &layers[li];
         let Some(first) = lb.buckets.first() else { continue };
@@ -377,8 +393,10 @@ fn place_bucket_part(
     let icon_mode = Overlap::from(overlap_mode(layer, ctx, &tile, lb.raw, "icon"));
     let has_text_data = !bucket.text.is_empty();
     let has_icon_data = !bucket.icon.is_empty();
-    let always_show_text = text_mode == Overlap::Always && (icon_mode == Overlap::Always || !has_icon_data || icon_optional);
-    let always_show_icon = icon_mode == Overlap::Always && (text_mode == Overlap::Always || !has_text_data || text_optional);
+    let always_show_text =
+        text_mode == Overlap::Always && (icon_mode == Overlap::Always || !has_icon_data || icon_optional);
+    let always_show_icon =
+        icon_mode == Overlap::Always && (text_mode == Overlap::Always || !has_text_data || text_optional);
     let rotate_with_map = res.text_rotation_alignment == "map";
     let has_icon_text_fit = lay("icon-text-fit").as_str().is_some_and(|s| s != "none");
     let text_ignore = lay("text-ignore-placement").truthy();
@@ -411,33 +429,44 @@ fn place_bucket_part(
         if let Some(text_box) = &inst.text_box {
             // Variable anchors: try each anchor, first without overlap, then with the layer's
             // overlap mode.
-            let mut place_variable = |text_box: &CollisionBox, icon_box: Option<&CollisionBox>, out: &mut InstancePlacement| {
-                let (width, height) = (text_box.x2 - text_box.x1, text_box.y2 - text_box.y1);
-                let icon_box = if has_icon_text_fit && icon_mode == Overlap::Never { icon_box } else { None };
-                let passes = if text_mode == Overlap::Never { 1 } else { 2 };
-                let mut mode = Overlap::Never;
-                let mut last = None;
-                for _ in 0..passes {
-                    for (anchor, offset) in &inst.anchor_offsets {
-                        let s = variable_layout_shift(anchor, width, height, *offset, inst.text_box_scale);
-                        let r = index.place_box(text_box, mode, &text_params, Some(s));
-                        if let Some(ib) = icon_box
-                            && !index.place_box(ib, mode, &icon_params, Some(s)).1 {
+            let mut place_variable =
+                |text_box: &CollisionBox, icon_box: Option<&CollisionBox>, out: &mut InstancePlacement| {
+                    let (width, height) = (text_box.x2 - text_box.x1, text_box.y2 - text_box.y1);
+                    let icon_box = if has_icon_text_fit && icon_mode == Overlap::Never { icon_box } else { None };
+                    let passes = if text_mode == Overlap::Never { 1 } else { 2 };
+                    let mut mode = Overlap::Never;
+                    let mut last = None;
+                    for _ in 0..passes {
+                        for (anchor, offset) in &inst.anchor_offsets {
+                            let s = variable_layout_shift(anchor, width, height, *offset, inst.text_box_scale);
+                            let r = index.place_box(text_box, mode, &text_params, Some(s));
+                            if let Some(ib) = icon_box
+                                && !index.place_box(ib, mode, &icon_params, Some(s)).1
+                            {
                                 continue;
                             }
-                        if r.1 {
-                            out.variable = Some(VariableOffset { text_offset: *offset, width, height, anchor: anchor.clone(), text_box_scale: inst.text_box_scale });
-                            shift = Some(s);
-                            return Some(r);
+                            if r.1 {
+                                out.variable = Some(VariableOffset {
+                                    text_offset: *offset,
+                                    width,
+                                    height,
+                                    anchor: anchor.clone(),
+                                    text_box_scale: inst.text_box_scale,
+                                });
+                                shift = Some(s);
+                                return Some(r);
+                            }
+                            last = Some((r.0, false));
                         }
-                        last = Some((r.0, false));
+                        mode = text_mode;
                     }
-                    mode = text_mode;
-                }
-                last
-            };
-            let vertical_box = inst.vertical_text_box.filter(|_| bucket.allow_vertical_placement && inst.num_vertical_glyph_vertices > 0);
-            let modes: &[WritingMode] = if vertical_box.is_some() { &bucket.writing_modes } else { &[WritingMode::Horizontal] };
+                    last
+                };
+            let vertical_box = inst
+                .vertical_text_box
+                .filter(|_| bucket.allow_vertical_placement && inst.num_vertical_glyph_vertices > 0);
+            let modes: &[WritingMode] =
+                if vertical_box.is_some() { &bucket.writing_modes } else { &[WritingMode::Horizontal] };
             for &m in modes {
                 let r = match (m, vertical_box) {
                     (WritingMode::Vertical, Some(vb)) => {
@@ -451,7 +480,9 @@ fn place_bucket_part(
                         placed_vertical = r.is_some_and(|r| r.1);
                         r
                     }
-                    _ if inst.anchor_offsets.is_empty() => Some(index.place_box(text_box, text_mode, &text_params, None)),
+                    _ if inst.anchor_offsets.is_empty() => {
+                        Some(index.place_box(text_box, text_mode, &text_params, None))
+                    }
                     _ => place_variable(text_box, inst.icon_box.as_ref(), out),
                 };
                 placed_text = r;
@@ -464,17 +495,29 @@ fn place_bucket_part(
         let mut place_text = placed_text.is_some_and(|p| p.1);
         let mut circles: Option<(Vec<[f64; 3]>, bool)> = None;
         if let (Some(d), Some(sym)) = (inst.collision_circle_diameter, inst.text[1]) {
-            let c = place_circles(ctx, bucket, &bucket.text[sym], index, text_mode, group, d, text_padding, text_params.translation);
+            let c = place_circles(
+                ctx,
+                bucket,
+                &bucket.text[sym],
+                index,
+                text_mode,
+                group,
+                d,
+                text_padding,
+                text_params.translation,
+            );
             place_text = text_mode == Overlap::Always || (!c.0.is_empty() && !c.1);
             circles = Some(c);
         }
         let mut placed_icon: Option<([f64; 4], bool)> = None;
         if let Some(icon_box) = &inst.icon_box {
             let b = if placed_vertical { inst.vertical_icon_box.as_ref().unwrap_or(icon_box) } else { icon_box };
-            placed_icon = Some(index.place_box(b, icon_mode, &icon_params, if has_icon_text_fit { shift } else { None }));
+            placed_icon =
+                Some(index.place_box(b, icon_mode, &icon_params, if has_icon_text_fit { shift } else { None }));
         }
         let mut place_icon = placed_icon.is_some_and(|p| p.1);
-        let icon_without_text = text_optional || (inst.num_glyph_vertices == 0 && inst.num_vertical_glyph_vertices == 0);
+        let icon_without_text =
+            text_optional || (inst.num_glyph_vertices == 0 && inst.num_vertical_glyph_vertices == 0);
         let text_without_icon = icon_optional || inst.num_icon_vertices == 0;
         if !icon_without_text && !text_without_icon {
             place_text = place_text && place_icon;
@@ -514,9 +557,15 @@ fn place_bucket_part(
 /// `getSortedSymbolIndexes`: by rotated anchor y, then feature index (descending).
 pub fn sorted_symbol_indexes(bucket: &SymbolBucket, angle: f64) -> Vec<usize> {
     let (sin, cos) = angle.sin_cos();
-    let ys: Vec<i64> = bucket.instances.iter().map(|s| crate::expression::value::js_round(sin * s.anchor[0] + cos * s.anchor[1]) as i64).collect();
+    let ys: Vec<i64> = bucket
+        .instances
+        .iter()
+        .map(|s| crate::expression::value::js_round(sin * s.anchor[0] + cos * s.anchor[1]) as i64)
+        .collect();
     let mut idx: Vec<usize> = (0..bucket.instances.len()).collect();
-    idx.sort_by(|&a, &b| ys[a].cmp(&ys[b]).then(bucket.instances[b].feature_index.cmp(&bucket.instances[a].feature_index)));
+    idx.sort_by(|&a, &b| {
+        ys[a].cmp(&ys[b]).then(bucket.instances[b].feature_index.cmp(&bucket.instances[a].feature_index))
+    });
     idx
 }
 
@@ -535,7 +584,9 @@ fn place_circles(
     translation: P,
 ) -> (Vec<[f64; 3]>, bool) {
     let font_size = bucket.text_size.for_feature(ctx.transform.zoom, symbol.size);
-    let Some(path) = super::projection::label_path(ctx, bucket, symbol, font_size, translation) else { return (vec![], false) };
+    let Some(path) = super::projection::label_path(ctx, bucket, symbol, font_size, translation) else {
+        return (vec![], false);
+    };
     let radius = diameter * 0.5 + padding;
     let (min, max) = ([-VIEWPORT_PADDING; 2], [index.screen_right, index.screen_bottom]);
     let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
@@ -554,7 +605,8 @@ fn place_circles(
     let mut in_grid = false;
     for seg in &segments {
         let interp = anchors::PathInterpolator::new(seg, radius * 0.25);
-        let n = if interp.length <= 0.5 * radius { 1 } else { (interp.padded_length / (radius * 2.5)).ceil() as usize + 1 };
+        let n =
+            if interp.length <= 0.5 * radius { 1 } else { (interp.padded_length / (radius * 2.5)).ceil() as usize + 1 };
         for i in 0..n {
             let t = i as f64 / (n.max(2) - 1) as f64;
             let p = interp.lerp(t);

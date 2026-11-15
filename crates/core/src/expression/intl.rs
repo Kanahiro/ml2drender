@@ -45,7 +45,8 @@ impl Collator {
 
     /// Multi-level comparison: base letters, then accents, then case (lowercase first).
     pub fn compare(&self, a: &str, b: &str) -> Ordering {
-        let base = |s: &str| -> String { s.nfd().filter(|c| !is_combining_mark(*c)).collect::<String>().to_lowercase() };
+        let base =
+            |s: &str| -> String { s.nfd().filter(|c| !is_combining_mark(*c)).collect::<String>().to_lowercase() };
         let ord = base(a).cmp(&base(b));
         if ord != Ordering::Equal {
             return ord;
@@ -83,7 +84,8 @@ pub fn format_number(n: f64, o: &NumberFormatOptions) -> String {
     if n.is_nan() {
         return "NaN".into();
     }
-    let currency_digits = o.currency.map(|c| if matches!(c.to_ascii_uppercase().as_str(), "JPY" | "KRW") { 0 } else { 2 });
+    let currency_digits =
+        o.currency.map(|c| if matches!(c.to_ascii_uppercase().as_str(), "JPY" | "KRW") { 0 } else { 2 });
     let default_min = currency_digits.unwrap_or(0);
     let default_max = currency_digits.unwrap_or(3);
     let min = o.min_fraction_digits.map_or(default_min, |v| v as usize);
@@ -205,7 +207,13 @@ mod tests {
 
     #[test]
     fn number_format() {
-        let o = |min, max| NumberFormatOptions { locale: None, currency: None, unit: None, min_fraction_digits: min, max_fraction_digits: max };
+        let o = |min, max| NumberFormatOptions {
+            locale: None,
+            currency: None,
+            unit: None,
+            min_fraction_digits: min,
+            max_fraction_digits: max,
+        };
         assert_eq!(format_number(123456.789, &o(None, None)), "123,456.789");
         assert_eq!(format_number(987654321.234567, &o(Some(2.0), Some(4.0))), "987,654,321.2346");
         assert_eq!(format_number(0.5, &o(None, Some(0.0))), "1");

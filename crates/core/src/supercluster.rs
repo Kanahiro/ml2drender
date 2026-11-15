@@ -102,7 +102,12 @@ impl KdBush {
     }
 
     /// Depth-first traversal of the kd nodes in kdbush's stack order.
-    fn visit(&self, inside_node: impl Fn(f64, f64) -> bool, go_left: impl Fn(usize, f64, f64) -> bool, go_right: impl Fn(usize, f64, f64) -> bool) -> Vec<usize> {
+    fn visit(
+        &self,
+        inside_node: impl Fn(f64, f64) -> bool,
+        go_left: impl Fn(usize, f64, f64) -> bool,
+        go_right: impl Fn(usize, f64, f64) -> bool,
+    ) -> Vec<usize> {
         let mut out = Vec::new();
         if self.ids.is_empty() {
             return out;
@@ -198,14 +203,24 @@ pub struct ClusterIndex {
 
 fn eval(e: &Expression, props: &Rc<Object>, accumulated: Option<Value>) -> Value {
     let f = EvalFeature { properties: crate::expression::Properties::Object(props.clone()), ..Default::default() };
-    let mut ctx = EvalCtx { globals: Globals { zoom: 0.0, accumulated, ..Default::default() }, feature: Some(&f), ..Default::default() };
+    let mut ctx = EvalCtx {
+        globals: Globals { zoom: 0.0, accumulated, ..Default::default() },
+        feature: Some(&f),
+        ..Default::default()
+    };
     e.evaluate(&mut ctx)
 }
 
 impl ClusterIndex {
     pub fn new(points: Vec<Point>, options: Options) -> ClusterIndex {
         let max_zoom = options.max_zoom as usize;
-        let mut idx = ClusterIndex { options, points, trees: Vec::new(), zoom_tree: vec![0; max_zoom + 2], cluster_props: Vec::new() };
+        let mut idx = ClusterIndex {
+            options,
+            points,
+            trees: Vec::new(),
+            zoom_tree: vec![0; max_zoom + 2],
+            cluster_props: Vec::new(),
+        };
         let fits = |c: f64| encode(c).abs() < MAX_INTEGER;
         let (mut coords, mut data) = (Vec::new(), Vec::new());
         for (i, p) in idx.points.iter().enumerate() {
@@ -222,7 +237,8 @@ impl ClusterIndex {
         idx.zoom_tree[max_zoom + 1] = 0;
         for z in (0..=max_zoom).rev() {
             let (next_coords, next_data) = idx.cluster(&mut trees[cur], z as i64);
-            let same = next_data.len() == trees[cur].data.len() && next_data.iter().zip(&trees[cur].data).all(|(a, b)| a.id == b.id);
+            let same = next_data.len() == trees[cur].data.len()
+                && next_data.iter().zip(&trees[cur].data).all(|(a, b)| a.id == b.id);
             if !same {
                 trees.push(Tree { kd: KdBush::new(&next_coords, 64), coords: next_coords, data: next_data });
                 cur = trees.len() - 1;
@@ -317,7 +333,14 @@ impl ClusterIndex {
         let p = self.options.radius / self.options.extent;
         let (x, y) = (x as f64, y as f64);
         let (top, bottom) = (encode((y - p) / z2), encode((y + 1.0 + p) / z2));
-        self.add(&mut layer, tree, tree.kd.range(encode((x - p) / z2), top, encode((x + 1.0 + p) / z2), bottom), x, y, z2);
+        self.add(
+            &mut layer,
+            tree,
+            tree.kd.range(encode((x - p) / z2), top, encode((x + 1.0 + p) / z2), bottom),
+            x,
+            y,
+            z2,
+        );
         if x == 0.0 {
             self.add(&mut layer, tree, tree.kd.range(encode(1.0 - p / z2), top, encode(1.0), bottom), z2, y, z2);
         }
@@ -333,7 +356,8 @@ impl ClusterIndex {
             let d = &tree.data[i];
             let cluster = d.num > 1;
             let (props, px, py, id) = if cluster {
-                let mut props = if d.prop < 0 { Object::default() } else { self.cluster_props[d.prop as usize].clone() };
+                let mut props =
+                    if d.prop < 0 { Object::default() } else { self.cluster_props[d.prop as usize].clone() };
                 let count = d.num as f64;
                 let abbrev = if count >= 10000.0 {
                     Value::str(&format!("{}k", js_number_to_string(js_round(count / 1000.0))))
@@ -346,14 +370,24 @@ impl ClusterIndex {
                 props.insert("cluster_id".into(), Value::Number(d.id as f64));
                 props.insert("point_count".into(), Value::Number(count));
                 props.insert("point_count_abbreviated".into(), abbrev);
-                (Rc::new(props), decode(tree.coords[i * 2] as f64), decode(tree.coords[i * 2 + 1] as f64), Some(Value::Number(d.id as f64)))
+                (
+                    Rc::new(props),
+                    decode(tree.coords[i * 2] as f64),
+                    decode(tree.coords[i * 2 + 1] as f64),
+                    Some(Value::Number(d.id as f64)),
+                )
             } else {
                 let p = &self.points[d.id as usize];
                 let id = if self.options.generate_id { Some(Value::Number(d.id as f64)) } else { p.id.clone() };
                 (p.props.clone(), p.xy[0], p.xy[1], id)
             };
             let g = [js_round(extent * (px * z2 - x)) as i32, js_round(extent * (py * z2 - y)) as i32];
-            layer.features.push(Feature { id, ty: GeomType::Point, properties: crate::expression::Properties::Object(props), geometry: vec![vec![g]] });
+            layer.features.push(Feature {
+                id,
+                ty: GeomType::Point,
+                properties: crate::expression::Properties::Object(props),
+                geometry: vec![vec![g]],
+            });
         }
     }
 }
@@ -365,7 +399,14 @@ mod tests {
     #[test]
     fn clusters_nearby_points() {
         let pt = |x: f64, y: f64| Point { id: None, xy: [x, y], props: Rc::new(Object::default()) };
-        let opts = Options { max_zoom: 16, min_points: 2, radius: 800.0, extent: 8192.0, generate_id: false, properties: vec![] };
+        let opts = Options {
+            max_zoom: 16,
+            min_points: 2,
+            radius: 800.0,
+            extent: 8192.0,
+            generate_id: false,
+            properties: vec![],
+        };
         let idx = ClusterIndex::new(vec![pt(0.5, 0.5), pt(0.500001, 0.5), pt(0.9, 0.9)], opts);
         let z0 = idx.tile(0, 0, 0);
         assert_eq!(z0.features.len(), 2);

@@ -181,7 +181,14 @@ impl GeoJsonIndex {
             let points = features
                 .iter()
                 .flat_map(|f| match &f.geom {
-                    Geom::Points(ps) => ps.iter().map(|p| crate::supercluster::Point { id: f.id.clone(), xy: [p[0], p[1]], props: f.props.clone() }).collect(),
+                    Geom::Points(ps) => ps
+                        .iter()
+                        .map(|p| crate::supercluster::Point {
+                            id: f.id.clone(),
+                            xy: [p[0], p[1]],
+                            props: f.props.clone(),
+                        })
+                        .collect(),
                     _ => vec![],
                 })
                 .collect();
@@ -232,7 +239,12 @@ impl GeoJsonIndex {
                         let mut props = (*f.props).clone();
                         props.insert(CLIP_START.into(), Value::Number(l.start / l.size));
                         props.insert(CLIP_END.into(), Value::Number(l.end / l.size));
-                        features.push(Feature { id: f.id.clone(), ty: GeomType::LineString, properties: Properties::Object(Rc::new(props)), geometry: g });
+                        features.push(Feature {
+                            id: f.id.clone(),
+                            ty: GeomType::LineString,
+                            properties: Properties::Object(Rc::new(props)),
+                            geometry: g,
+                        });
                     }
                     continue;
                 }
@@ -304,7 +316,9 @@ fn convert_feature(out: &mut Vec<GFeature>, f: &J, index: usize, sq_tolerance: f
         f.get("id").filter(|v| !v.is_null()).map(Value::from_json)
     };
     let point = |p: &J| position(p).map(|[x, y]| [project_x(x), project_y(y), 0.0]);
-    let lines = |ls: &J, poly: bool| -> Vec<Slice> { ls.as_array().into_iter().flatten().filter_map(|l| convert_line(l, sq_tolerance, poly)).collect() };
+    let lines = |ls: &J, poly: bool| -> Vec<Slice> {
+        ls.as_array().into_iter().flatten().filter_map(|l| convert_line(l, sq_tolerance, poly)).collect()
+    };
     let geom = match geometry["type"].as_str() {
         Some("Point") => Geom::Points(point(coords).into_iter().collect()),
         Some("MultiPoint") => Geom::Points(coords.as_array().into_iter().flatten().filter_map(point).collect()),
@@ -317,14 +331,17 @@ fn convert_feature(out: &mut Vec<GFeature>, f: &J, index: usize, sq_tolerance: f
         }
         Some("MultiLineString") => Geom::Lines(lines(coords, false)),
         Some("Polygon") => Geom::Polygons(vec![lines(coords, true)]),
-        Some("MultiPolygon") => Geom::Polygons(coords.as_array().into_iter().flatten().map(|p| lines(p, true)).filter(|p| !p.is_empty()).collect()),
+        Some("MultiPolygon") => Geom::Polygons(
+            coords.as_array().into_iter().flatten().map(|p| lines(p, true)).filter(|p| !p.is_empty()).collect(),
+        ),
         _ => return,
     };
     out.push(with_bbox(id, geom, props));
 }
 
 fn with_bbox(id: Option<Value>, geom: Geom, props: Rc<Object>) -> GFeature {
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    let (mut min_x, mut max_x, mut min_y, mut max_y) =
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
     let mut upd = |p: &[f64; 3]| {
         min_x = min_x.min(p[0]);
         max_x = max_x.max(p[0]);

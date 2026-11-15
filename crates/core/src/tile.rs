@@ -77,7 +77,18 @@ impl Transform {
         }
         let bearing_rad = -bearing_deg.to_radians();
         let rot = [bearing_rad.sin_cos(), (-bearing_rad).sin_cos()];
-        Transform { zoom, world_size, center: c, bearing_rad, width, height, pixel_ratio, viewport_size: [width, height], rot, warp: None }
+        Transform {
+            zoom,
+            world_size,
+            center: c,
+            bearing_rad,
+            width,
+            height,
+            pixel_ratio,
+            viewport_size: [width, height],
+            rot,
+            warp: None,
+        }
     }
 
     /// Extend coverage without constraining the camera again or shifting its pixel grid.
@@ -91,13 +102,7 @@ impl Transform {
     /// from vertices (background, fill, line, circle, heatmap, symbol).
     pub fn reprojected(&self, warp: std::rc::Rc<crate::reproject::Warp>) -> Transform {
         let [width, height] = warp.css_size;
-        Transform {
-            width,
-            height,
-            viewport_size: [width, height],
-            warp: Some(warp),
-            ..self.clone()
-        }
+        Transform { width, height, viewport_size: [width, height], warp: Some(warp), ..self.clone() }
     }
 
     /// Whether world positions map to a projected output (`reprojected`), where straight
@@ -124,9 +129,7 @@ impl Transform {
     /// Whether world point `p` is on a projected output's map (see `Warp::in_domain`); always for
     /// Mercator.
     pub fn in_domain(&self, p: [f64; 2]) -> bool {
-        self.warp
-            .as_ref()
-            .is_none_or(|w| w.in_domain([p[0] / self.world_size, p[1] / self.world_size]))
+        self.warp.as_ref().is_none_or(|w| w.in_domain([p[0] / self.world_size, p[1] / self.world_size]))
     }
 
     /// `world_to_screen` of world point `p` if it is `in_domain`, projecting it once.
@@ -145,20 +148,10 @@ impl Transform {
         if self.warp.is_none() {
             return (s, self.rot[0]);
         }
-        let (ex, ey) = (
-            self.world_to_screen([p[0] + 1.0, p[1]]),
-            self.world_to_screen([p[0], p[1] + 1.0]),
-        );
+        let (ex, ey) = (self.world_to_screen([p[0] + 1.0, p[1]]), self.world_to_screen([p[0], p[1] + 1.0]));
         let (a, c, b, d) = (ex[0] - s[0], ex[1] - s[1], ey[0] - s[0], ey[1] - s[1]);
         let angle = (c - b).atan2(a + d);
-        (
-            s,
-            if angle.is_finite() {
-                angle.sin_cos()
-            } else {
-                (0.0, 1.0)
-            },
-        )
+        (s, if angle.is_finite() { angle.sin_cos() } else { (0.0, 1.0) })
     }
 
     /// World pixel (CSS) → screen device pixel.
@@ -169,7 +162,10 @@ impl Transform {
         let dx = p[0] - self.center[0];
         let dy = p[1] - self.center[1];
         let (s, c) = self.rot[0];
-        [(dx * c - dy * s + self.width / 2.0) * self.pixel_ratio, (dx * s + dy * c + self.height / 2.0) * self.pixel_ratio]
+        [
+            (dx * c - dy * s + self.width / 2.0) * self.pixel_ratio,
+            (dx * s + dy * c + self.height / 2.0) * self.pixel_ratio,
+        ]
     }
 
     /// World-space shift of MapLibre's pixel-aligned projection (`_alignedProjMatrix`), used

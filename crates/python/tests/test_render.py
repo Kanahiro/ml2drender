@@ -5,19 +5,25 @@ import unittest
 
 import ml2drender
 
-STYLE = json.dumps({
-    "version": 8,
-    "sources": {"points": {"type": "geojson", "data": "test://points.geojson"}},
-    "layers": [
-        {"id": "bg", "type": "background", "paint": {"background-color": "#ffffff"}},
-        {"id": "points", "type": "circle", "source": "points", "paint": {"circle-color": "#ff0000"}},
-    ],
-})
+STYLE = json.dumps(
+    {
+        "version": 8,
+        "sources": {"points": {"type": "geojson", "data": "test://points.geojson"}},
+        "layers": [
+            {"id": "bg", "type": "background", "paint": {"background-color": "#ffffff"}},
+            {"id": "points", "type": "circle", "source": "points", "paint": {"circle-color": "#ff0000"}},
+        ],
+    }
+)
 
-POINTS = json.dumps({
-    "type": "FeatureCollection",
-    "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [140.0, 37.0]}}],
-}).encode()
+POINTS = json.dumps(
+    {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [140.0, 37.0]}}
+        ],
+    }
+).encode()
 
 
 def load(url):

@@ -1,8 +1,12 @@
 {
   "name": "ml2drender",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "description": "MapLibre style 2D renderer in pure Rust / WebAssembly, no GPU",
+  "license": "BSD-3-Clause",
+  "repository": { "type": "git", "url": "git+https://github.com/Kanahiro/ml2drender.git", "directory": "packages/ml2drender" },
+  "homepage": "https://kanahiro.github.io/ml2drender/",
   "type": "module",
+  "engines": { "node": "^22.23.4 || ^24.22.1 || >=26.12.1" },
   "exports": {
     ".": "./src/index.ts",
     "./renderer.wasm": {
@@ -10,9 +14,20 @@
       "default": "./wasm/ml2drender_wasm.wasm"
     }
   },
+  "publishConfig": {
+    "exports": {
+      ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "./renderer.wasm": {
+        "types": "./src/wasm.d.ts",
+        "default": "./wasm/ml2drender_wasm.wasm"
+      }
+    }
+  },
+  "files": ["dist", "src/wasm.d.ts", "wasm"],
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-transform-types tests/single-flight.ts && node --experimental-transform-types tests/shared-instance.ts && node --experimental-transform-types tests/projected-view.ts",
+    "test": "node tests/single-flight.ts && node tests/shared-instance.ts && node tests/projected-view.ts",
     "docs": "typedoc"
   },
   "peerDependencies": {

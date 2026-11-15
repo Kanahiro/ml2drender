@@ -17,7 +17,7 @@ pub use parse::ParseError;
 pub use value::{Object, Value};
 
 use expr::{Expr, Node};
-use parse::{is_feature_constant, is_global_property_constant, Annotation, ParseCtx};
+use parse::{Annotation, ParseCtx, is_feature_constant, is_global_property_constant};
 use serde_json::Value as J;
 use types::Type;
 
@@ -77,7 +77,9 @@ impl Expression {
         match self.evaluate_without_error_handling(ctx) {
             Ok(Value::Null) | Err(_) => self.default.clone(),
             Ok(Value::Number(n)) if n.is_nan() => self.default.clone(),
-            Ok(Value::String(s)) if self.enum_values.as_ref().is_some_and(|e| !e.iter().any(|v| **v == *s)) => self.default.clone(),
+            Ok(Value::String(s)) if self.enum_values.as_ref().is_some_and(|e| !e.iter().any(|v| **v == *s)) => {
+                self.default.clone()
+            }
             Ok(v) => v,
         }
     }
@@ -113,7 +115,10 @@ fn expected_type(spec: &J) -> Option<Type> {
         })
     };
     match spec["type"].as_str()? {
-        "array" => Some(Type::array(spec["value"].as_str().and_then(base).unwrap_or(Type::Value), spec["length"].as_u64().map(|n| n as usize))),
+        "array" => Some(Type::array(
+            spec["value"].as_str().and_then(base).unwrap_or(Type::Value),
+            spec["length"].as_u64().map(|n| n as usize),
+        )),
         t => base(t),
     }
 }
@@ -128,7 +133,9 @@ pub fn default_value(spec: &J) -> Value {
         Some("padding") => expr::parse_padding(&v).unwrap_or(Value::Null),
         Some("numberArray") => expr::parse_number_array(&v).unwrap_or(Value::Null),
         Some("colorArray") => expr::parse_color_array(&v).unwrap_or(Value::Null),
-        Some("variableAnchorOffsetCollection") => expr::parse_variable_anchor_offset_collection(&v).unwrap_or(Value::Null),
+        Some("variableAnchorOffsetCollection") => {
+            expr::parse_variable_anchor_offset_collection(&v).unwrap_or(Value::Null)
+        }
         _ => v,
     }
 }
@@ -139,7 +146,8 @@ enum ZoomCurve<'a> {
     Error(&'static str),
 }
 
-const ZOOM_CURVE_ERROR: &str = "\"zoom\" expression may only be used as input to a top-level \"step\" or \"interpolate\" expression.";
+const ZOOM_CURVE_ERROR: &str =
+    "\"zoom\" expression may only be used as input to a top-level \"step\" or \"interpolate\" expression.";
 
 fn find_zoom_curve(e: &Expr) -> ZoomCurve<'_> {
     let mut result = match &e.node {
@@ -154,7 +162,9 @@ fn find_zoom_curve(e: &Expr) -> ZoomCurve<'_> {
             }
             r
         }
-        Node::Step { input, .. } | Node::Interpolate { input, .. } if input.compound_name() == Some("zoom") => ZoomCurve::Found(e),
+        Node::Step { input, .. } | Node::Interpolate { input, .. } if input.compound_name() == Some("zoom") => {
+            ZoomCurve::Found(e)
+        }
         _ => ZoomCurve::None,
     };
     if matches!(result, ZoomCurve::Error(_)) {
@@ -165,9 +175,9 @@ fn find_zoom_curve(e: &Expr) -> ZoomCurve<'_> {
         result = match (std::mem::replace(&mut result, ZoomCurve::None), c) {
             (_, ZoomCurve::Error(m)) => ZoomCurve::Error(m),
             (ZoomCurve::None, ZoomCurve::Found(_)) => ZoomCurve::Error(ZOOM_CURVE_ERROR),
-            (ZoomCurve::Found(a), ZoomCurve::Found(b)) if !std::ptr::eq(a, b) => {
-                ZoomCurve::Error("Only one zoom-based \"step\" or \"interpolate\" subexpression may be used in an expression.")
-            }
+            (ZoomCurve::Found(a), ZoomCurve::Found(b)) if !std::ptr::eq(a, b) => ZoomCurve::Error(
+                "Only one zoom-based \"step\" or \"interpolate\" subexpression may be used in an expression.",
+            ),
             (r, _) => r,
         };
     });
@@ -176,7 +186,11 @@ fn find_zoom_curve(e: &Expr) -> ZoomCurve<'_> {
 
 /// `createPropertyExpression`: accepts expressions and legacy functions.
 /// `spec` is the property specification JSON (`type`, `property-type`, `expression`, `default`, ...).
-pub fn create_property_expression(input: &J, spec: &J, global_state: Option<&J>) -> Result<Expression, Vec<ParseError>> {
+pub fn create_property_expression(
+    input: &J,
+    spec: &J,
+    global_state: Option<&J>,
+) -> Result<Expression, Vec<ParseError>> {
     create(input, spec, global_state, true)
 }
 
@@ -213,7 +227,15 @@ fn create(input: &J, spec: &J, global_state: Option<&J>, property: bool) -> Resu
             Value::Object(o) => o,
             _ => Default::default(),
         });
-        return Ok(Expression { expr: parsed, kind, zoom_stops: vec![], interpolation: None, default: default_value(spec), enum_values: None, global_state });
+        return Ok(Expression {
+            expr: parsed,
+            kind,
+            zoom_stops: vec![],
+            interpolation: None,
+            default: default_value(spec),
+            enum_values: None,
+            global_state,
+        });
     }
     let property_type = spec["property-type"].as_str().unwrap_or("");
     if !feature_constant && !matches!(property_type, "data-driven" | "cross-faded-data-driven") {
@@ -254,7 +276,15 @@ fn create(input: &J, spec: &J, global_state: Option<&J>, property: bool) -> Resu
         Value::Object(o) => o,
         _ => Default::default(),
     });
-    Ok(Expression { expr: parsed, kind, zoom_stops, interpolation, default: default_value(spec), enum_values, global_state })
+    Ok(Expression {
+        expr: parsed,
+        kind,
+        zoom_stops,
+        interpolation,
+        default: default_value(spec),
+        enum_values,
+        global_state,
+    })
 }
 
 /// Upstream `isExpression`: an array whose first element names a known operator.

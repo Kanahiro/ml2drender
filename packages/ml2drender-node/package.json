@@ -1,0 +1,35 @@
+{
+  "name": "ml2drender-node",
+  "version": "0.1.0",
+  "description": "MapLibre style 2D renderer in pure Rust, as a native Node.js addon (Node-API)",
+  "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kanahiro/ml2drender.git",
+    "directory": "packages/ml2drender-node"
+  },
+  "homepage": "https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node",
+  "type": "module",
+  "engines": {
+    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
+  },
+  "exports": "./src/index.ts",
+  "publishConfig": {
+    "exports": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node tests/render.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  }
+}

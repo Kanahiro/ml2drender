@@ -103,7 +103,8 @@ pub fn check_max_angle(line: &[P], anchor: &Anchor, label_length: f64, window_si
         let (prev, current) = (line[index - 1], line[index]);
         let Some(&next) = line.get(index + 1) else { return false };
         let delta = angle_to(prev, current) - angle_to(current, next);
-        let delta = (((delta + 3.0 * std::f64::consts::PI) % (std::f64::consts::PI * 2.0)) - std::f64::consts::PI).abs();
+        let delta =
+            (((delta + 3.0 * std::f64::consts::PI) % (std::f64::consts::PI * 2.0)) - std::f64::consts::PI).abs();
         recent.push_back((anchor_distance, delta));
         recent_delta += delta;
         while anchor_distance - recent[0].0 > window_size {
@@ -129,7 +130,9 @@ pub fn center_anchor(line: &[P], max_angle: f64, angle_window_size: f64, label_l
             let t = (center - prev) / d;
             let p = round([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
             let anchor = Anchor { x: p[0], y: p[1], segment: Some(i) };
-            return (angle_window_size == 0.0 || check_max_angle(line, &anchor, label_length, angle_window_size, max_angle)).then_some(anchor);
+            return (angle_window_size == 0.0
+                || check_max_angle(line, &anchor, label_length, angle_window_size, max_angle))
+            .then_some(anchor);
         }
         prev += d;
     }
@@ -138,7 +141,16 @@ pub fn center_anchor(line: &[P], max_angle: f64, angle_window_size: f64, label_l
 
 /// `getAnchors` (`symbol-placement: line`).
 #[allow(clippy::too_many_arguments)]
-pub fn line_anchors(line: &[P], spacing: f64, max_angle: f64, angle_window_size: f64, shaped_label_length: f64, box_scale: f64, overscaling: f64, extent: f64) -> Vec<Anchor> {
+pub fn line_anchors(
+    line: &[P],
+    spacing: f64,
+    max_angle: f64,
+    angle_window_size: f64,
+    shaped_label_length: f64,
+    box_scale: f64,
+    overscaling: f64,
+    extent: f64,
+) -> Vec<Anchor> {
     let label_length = shaped_label_length * box_scale;
     let continued = line[0][0] == 0.0 || line[0][0] == extent || line[0][1] == 0.0 || line[0][1] == extent;
     let mut spacing = spacing;
@@ -155,7 +167,17 @@ pub fn line_anchors(line: &[P], spacing: f64, max_angle: f64, angle_window_size:
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resample(line: &[P], offset: f64, spacing: f64, window: f64, max_angle: f64, label_length: f64, continued: bool, middle: bool, extent: f64) -> Vec<Anchor> {
+fn resample(
+    line: &[P],
+    offset: f64,
+    spacing: f64,
+    window: f64,
+    max_angle: f64,
+    label_length: f64,
+    continued: bool,
+    middle: bool,
+    extent: f64,
+) -> Vec<Anchor> {
     let half = label_length / 2.0;
     let length = line_length(line);
     let mut distance = 0.0;
@@ -297,7 +319,8 @@ pub fn pole_of_inaccessibility(polygon: &[Vec<P>], precision: f64) -> P {
         Cell { p: [x, y], h, d, max: d + h * std::f64::consts::SQRT_2 }
     };
     let ring = &polygon[0];
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let (mut min_x, mut min_y, mut max_x, mut max_y) =
+        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     for p in ring {
         min_x = min_x.min(p[0]);
         min_y = min_y.min(p[1]);
@@ -405,7 +428,11 @@ mod tests {
         let clipped = clip_line(&[vec![[-10.0, 5.0], [10.0, 5.0], [10.0, 20.0]]], 0.0, 0.0, 8.0, 8.0);
         assert_eq!(clipped, vec![vec![[0.0, 5.0], [8.0, 5.0]]]);
         let t = Some("a".to_string());
-        let merged = merge_lines(&[(t.clone(), vec![[0.0, 0.0], [1.0, 0.0]]), (t.clone(), vec![[2.0, 0.0], [3.0, 0.0]]), (t, vec![[1.0, 0.0], [2.0, 0.0]])]);
+        let merged = merge_lines(&[
+            (t.clone(), vec![[0.0, 0.0], [1.0, 0.0]]),
+            (t.clone(), vec![[2.0, 0.0], [3.0, 0.0]]),
+            (t, vec![[1.0, 0.0], [2.0, 0.0]]),
+        ]);
         assert_eq!(merged[0], Some(vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]]));
         assert_eq!((merged[1].as_ref(), merged[2].as_ref()), (None, None));
     }

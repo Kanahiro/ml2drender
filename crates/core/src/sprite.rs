@@ -1,9 +1,9 @@
 //! Sprites (style `sprite`): JSON index + sheet image, `@2x` for pixel ratios above 1.
 //! Images of sprite `id` are registered as `id:name`, except for the `default` sprite.
 
+use crate::hash::HashMap;
 use crate::image::{Image, Texture};
 use serde_json::Value as J;
-use crate::hash::HashMap;
 use std::rc::Rc;
 
 pub struct StyleImage {
@@ -47,7 +47,9 @@ impl Sprites {
         let format = if pixel_ratio > 1.0 { "@2x" } else { "" };
         let list: Vec<(String, String)> = match sprite {
             J::String(url) => vec![("default".into(), url.clone())],
-            J::Array(a) => a.iter().filter_map(|s| Some((s["id"].as_str()?.to_string(), s["url"].as_str()?.to_string()))).collect(),
+            J::Array(a) => {
+                a.iter().filter_map(|s| Some((s["id"].as_str()?.to_string(), s["url"].as_str()?.to_string()))).collect()
+            }
             _ => vec![],
         };
         Sprites {
@@ -107,8 +109,15 @@ impl Sprites {
                 }
                 let pattern = Texture::new(&image.with_wrapped_padding(), false);
                 let icon = Texture::new(&image.with_padding(), false);
-                let ranges = |k: &str| e[k].as_array().map(|a| a.iter().map(|r| [r[0].as_f64().unwrap_or(0.0), r[1].as_f64().unwrap_or(0.0)]).collect());
-                let content = e["content"].as_array().filter(|c| c.len() == 4).map(|c| std::array::from_fn(|i| c[i].as_f64().unwrap_or(0.0)));
+                let ranges = |k: &str| {
+                    e[k].as_array().map(|a| {
+                        a.iter().map(|r| [r[0].as_f64().unwrap_or(0.0), r[1].as_f64().unwrap_or(0.0)]).collect()
+                    })
+                };
+                let content = e["content"]
+                    .as_array()
+                    .filter(|c| c.len() == 4)
+                    .map(|c| std::array::from_fn(|i| c[i].as_f64().unwrap_or(0.0)));
                 self.images.insert(
                     key,
                     Rc::new(StyleImage {
