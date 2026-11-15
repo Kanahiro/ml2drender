@@ -41,7 +41,7 @@ impl View {
 
     /// Output width and height in pixels.
     #[getter]
-    fn size(&self) -> (u32, u32) {
+    fn pixels(&self) -> (u32, u32) {
         pixels(self.0.width, self.0.height, self.0.pixel_ratio)
     }
 }
@@ -51,7 +51,8 @@ fn pixels(width: u32, height: u32, pixel_ratio: f64) -> (u32, u32) {
 }
 
 /// A box of a CRS: `bbox` (min x, min y, max x, max y) in CRS units, turned around its center by
-/// `bearing` degrees; the output size as in `View`. The CRS is given with it (`set_projected_view`).
+/// `bearing` degrees, in an image of its aspect ratio with `size` CSS pixels on the long side;
+/// `pixel_ratio` and `margin` as in `View`. The CRS is given with it (`set_projected_view`).
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
 struct ProjectedBox(ml2drender::reproject::ProjectedView);
@@ -59,23 +60,14 @@ struct ProjectedBox(ml2drender::reproject::ProjectedView);
 #[pymethods]
 impl ProjectedBox {
     #[new]
-    #[pyo3(signature = (bbox, width, height, bearing = 0.0, pixel_ratio = 1.0, margin = 0))]
-    fn new(bbox: [f64; 4], width: u32, height: u32, bearing: f64, pixel_ratio: f64, margin: u32) -> Self {
-        let projjson = String::new();
-        ProjectedBox(ml2drender::reproject::ProjectedView {
-            projjson,
-            bbox,
-            bearing,
-            width,
-            height,
-            pixel_ratio,
-            margin,
-        })
+    #[pyo3(signature = (bbox, size, bearing = 0.0, pixel_ratio = 1.0, margin = 0))]
+    fn new(bbox: [f64; 4], size: u32, bearing: f64, pixel_ratio: f64, margin: u32) -> Self {
+        ProjectedBox(ml2drender::reproject::ProjectedView::fit("", bbox, bearing, size, pixel_ratio, margin))
     }
 
     /// Output width and height in pixels.
     #[getter]
-    fn size(&self) -> (u32, u32) {
+    fn pixels(&self) -> (u32, u32) {
         pixels(self.0.width, self.0.height, self.0.pixel_ratio)
     }
 }
@@ -146,7 +138,7 @@ impl Renderer {
         self.0.provide(url, data);
     }
 
-    /// RGBA8 pixels, row by row (see `View.size`).
+    /// RGBA8 pixels, row by row (see `View.pixels`).
     fn render<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         Ok(PyBytes::new(py, &self.0.render().map_err(error)?))
     }

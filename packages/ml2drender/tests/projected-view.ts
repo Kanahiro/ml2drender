@@ -46,13 +46,13 @@ assert.equal(turnedAlpha(228, 88), 0);
 await assert.rejects(renderer.projected(crs).renderView({ center, zoom, bearing: NaN, width: 256, height: 128 }), RangeError);
 // `render` draws the same from the box in CRS units, turned around its center.
 const half = 128 * unit;
-const box = await renderer.projected(crs).render({ bbox: [x - half, y - half, x + half, y + half], bearing: 90, width: 256, height: 256 });
+const box = await renderer.projected(crs).render({ bbox: [x - half, y - half, x + half, y + half], bearing: 90, size: 256 });
 const boxAlpha = (px: number, py: number) => box.data[(py * box.width + px) * 4 + 3];
 assert.deepEqual([boxAlpha(128, 128), boxAlpha(88, 28), boxAlpha(228, 88)], [255, 255, 0]);
-await assert.rejects(renderer.projected(crs).render({ bbox: [0, 0, 1, 1], bearing: NaN, width: 256, height: 256 }), RangeError);
+await assert.rejects(renderer.projected(crs).render({ bbox: [0, 0, 1, 1], bearing: NaN, size: 256 }), RangeError);
 // A box needs only the PROJJSON; tiles and cameras need the grid, and `toStyle` the name.
 const bare = renderer.projected({ projjson });
-assert.deepEqual((await bare.render({ bbox: [x - half, y - half, x + half, y + half], bearing: 90, width: 256, height: 256 })).data, box.data);
+assert.deepEqual((await bare.render({ bbox: [x - half, y - half, x + half, y + half], bearing: 90, size: 256 })).data, box.data);
 await assert.rejects(bare.renderTile({ z: 0, x: 0, y: 0 }), TypeError);
 await assert.rejects(bare.renderView({ center, zoom, width: 256, height: 128 }), TypeError);
 assert.throws(() => bare.toStyle({ tiles: () => '' }), TypeError);

@@ -15,7 +15,7 @@ const crs = { name: 'EPSG:32654', projjson: utm, tileMatrixSet: { origin: [-2000
 
 async function projectedPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuffer>[]> {
   const utmRenderer = renderer.projected(crs);
-  const box = await utmRenderer.render({ bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
+  const box = await utmRenderer.render({ bbox: [300000, 3900000, 400000, 4000000], size: 512 });
   const tile = await utmRenderer.renderTile({ z: 3, x: 4, y: 2, tileSize: 512 });
   // The same camera as `renderer.renderView`.
   const view: Parameters<MapRenderer['renderView']>[0] = { center: [139.76, 35.68], zoom: 4, width: 512, height: 512 };
@@ -46,6 +46,8 @@ async function wrongPath(renderer: MapRenderer) {
   await renderer.renderView({ bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
   // @ts-expect-error A Mercator camera renders with `renderView`.
   await renderer.projected(crs).render({ center: [0, 0], zoom: 0, width: 256, height: 256 });
+  // @ts-expect-error A box is sized like `render`'s lng/lat box: `size` on its long side.
+  await renderer.projected(crs).render({ bbox: [300000, 3900000, 400000, 4000000], width: 512, height: 512 });
   // @ts-expect-error A CRS is PROJJSON, not a PROJ string.
   renderer.projected({ ...crs, projjson: '+proj=utm +zone=54 +ellps=GRS80' });
 }

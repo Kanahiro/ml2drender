@@ -46,7 +46,7 @@ assert.deepEqual(loaded, ['test://points.geojson']);
 
 // A box of a CRS (PROJJSON), here longitude/latitude: the point is in the middle of 130..150°E, 32..42°N.
 const longlat = { type: 'GeographicCRS', datum: { ellipsoid: { semi_major_axis: 6378137, inverse_flattening: 298.257223563 } } };
-const box = { bbox: [130, 32, 150, 42] as [number, number, number, number], bearing: 0, width: 64, height: 32, pixelRatio: 2, margin: 0 };
+const box = { bbox: [130, 32, 150, 42] as [number, number, number, number], bearing: 0, size: 64, pixelRatio: 2, margin: 0 };
 const crs = renderer.projected({ projjson: longlat });
 const projected = await crs.render(box);
 assert.equal(projected.length, 128 * 64 * 4);
@@ -68,7 +68,7 @@ assert.deepEqual(await new Renderer(style, { loadResource: async () => points })
 // On a grid whose tile 0/0/0 is 80° wide from 90°E 62°N, a tile and GL JS's camera are boxes: tile 2/2/1 is
 // 130..150°E, 22..42°N, and at zoom -1 (80° in 256 CSS pixels) 64 x 32 CSS pixels are the box above.
 const grid = renderer.projected({ projjson: longlat, tileMatrixSet: { origin: [90, 62], extentAtZoom0: 80 } });
-assert.deepEqual(await grid.renderTile({ z: 2, x: 2, y: 1, tileSize: 64, pixelRatio: 1, margin: 0 }), await crs.render({ ...box, bbox: [130, 22, 150, 42], height: 64, pixelRatio: 1 }));
+assert.deepEqual(await grid.renderTile({ z: 2, x: 2, y: 1, tileSize: 64, pixelRatio: 1, margin: 0 }), await crs.render({ ...box, bbox: [130, 22, 150, 42], pixelRatio: 1 }));
 assert.deepEqual(await grid.renderView({ ...view, zoom: -1, pixelRatio: 2 }), projected);
 assert.deepEqual(await grid.renderView({ ...view, lng: 143.125, zoom: -1, bearing: 90, pixelRatio: 2 }), turned);
 await assert.rejects(grid.renderTile({ z: 2, x: 4, y: 1, tileSize: 64, pixelRatio: 1, margin: 0 }), /unsupported/);

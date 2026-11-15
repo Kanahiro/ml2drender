@@ -28,7 +28,7 @@ class View:
     def tile(z: int, x: int, y: int, tile_size: int = 256) -> View:
         """The XYZ tile ``z/x/y`` of the Web Mercator grid, ``tile_size`` CSS pixels square."""
     @property
-    def size(self) -> tuple[int, int]:
+    def pixels(self) -> tuple[int, int]:
         """Output width and height in pixels."""
 
 class ProjectedBox:
@@ -37,8 +37,8 @@ class ProjectedBox:
     ``bbox`` is (min x, min y, max x, max y) in CRS units (degrees for longlat),
     easting/longitude first whatever the CRS's axis order: what is drawn at bearing 0. ``bearing``
     is the degrees clockwise from the CRS's y axis of the direction that is up: the view turns
-    around the center of ``bbox``. ``width``, ``height``, ``pixel_ratio`` and ``margin`` are those
-    of :class:`View`.
+    around the center of ``bbox``. The image has the aspect ratio of ``bbox`` and ``size`` CSS
+    pixels on its long side. ``pixel_ratio`` and ``margin`` are those of :class:`View`.
 
     Vector layers are drawn with projected vertices; raster, hillshade and color-relief are
     rendered in Web Mercator and warped.
@@ -47,14 +47,13 @@ class ProjectedBox:
     def __init__(
         self,
         bbox: tuple[float, float, float, float],
-        width: int,
-        height: int,
+        size: int,
         bearing: float = 0.0,
         pixel_ratio: float = 1.0,
         margin: int = 0,
     ) -> None: ...
     @property
-    def size(self) -> tuple[int, int]:
+    def pixels(self) -> tuple[int, int]:
         """Output width and height in pixels."""
 
 class Renderer:

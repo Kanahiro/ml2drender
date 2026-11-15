@@ -49,7 +49,7 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
     async def test_render_tile(self):
         view = ml2drender.View.tile(5, 28, 12, 256)
         rgba = await render(STYLE, view, load)
-        width, height = view.size
+        width, height = view.pixels
         self.assertEqual(len(rgba), width * height * 4)
         pixels = {bytes(rgba[i : i + 4]) for i in range(0, len(rgba), 4)}
         self.assertIn(bytes([255, 255, 255, 255]), pixels)  # background
@@ -84,8 +84,8 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         }
         renderer = ml2drender.Renderer(STYLE, load)
         crs = renderer.projected(longlat)
-        box = ml2drender.ProjectedBox((130, 32, 150, 42), 64, 32, pixel_ratio=2)
-        self.assertEqual(box.size, (128, 64))
+        box = ml2drender.ProjectedBox((130, 32, 150, 42), 64, pixel_ratio=2)
+        self.assertEqual(box.pixels, (128, 64))
 
         def at(rgba, x, y):
             return tuple(rgba[(y * 128 + x) * 4 :][:4])
@@ -97,14 +97,14 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         # With the box 3.125 degrees further east, the circle (10 pixels in radius) is 20 pixels
         # left of the middle; turned 90 degrees, east is up, so it is below the middle.
         east = (133.125, 32, 153.125, 42)
-        rgba = await crs.render(ml2drender.ProjectedBox(east, 64, 32, pixel_ratio=2))
+        rgba = await crs.render(ml2drender.ProjectedBox(east, 64, pixel_ratio=2))
         self.assertEqual((at(rgba, 44, 32), at(rgba, 64, 32)), (red, white))
-        rgba = await crs.render(ml2drender.ProjectedBox(east, 64, 32, bearing=90, pixel_ratio=2))
+        rgba = await crs.render(ml2drender.ProjectedBox(east, 64, bearing=90, pixel_ratio=2))
         self.assertEqual((at(rgba, 64, 52), at(rgba, 64, 32), at(rgba, 44, 32)), (red, white, white))
         # An unsupported CRS raises, and Mercator views still draw afterwards.
         robinson = {"type": "ProjectedCRS", "conversion": {"method": {"name": "Robinson"}}}
         with self.assertRaises(RuntimeError):
-            await renderer.projected(robinson).render(ml2drender.ProjectedBox((0, 0, 1, 1), 64, 32))
+            await renderer.projected(robinson).render(ml2drender.ProjectedBox((0, 0, 1, 1), 64))
         with self.assertRaises(TypeError):  # PROJJSON is a dict, not a PROJ string
             renderer.projected("+proj=longlat")
         with self.assertRaises(TypeError):  # tiles and cameras need a grid
@@ -113,7 +113,7 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         # 130..150 E, 22..42 N, and at zoom -1 a 64 x 32 view is the first box.
         grid = renderer.projected(longlat, ml2drender.TileMatrixSet((90, 62), 80))
         tile = await grid.render_tile(2, 2, 1, tile_size=64)
-        self.assertEqual(tile, await crs.render(ml2drender.ProjectedBox((130, 22, 150, 42), 64, 64)))
+        self.assertEqual(tile, await crs.render(ml2drender.ProjectedBox((130, 22, 150, 42), 64)))
         camera = ml2drender.View((140.0, 37.0), -1.0, 64, 32, pixel_ratio=2)
         self.assertEqual(await grid.render_view(camera), await crs.render(box))
         with self.assertRaises(RuntimeError):

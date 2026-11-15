@@ -75,7 +75,7 @@ const utm = renderer.projected({
 });
 
 // a box in CRS units
-await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000], bearing: 0, width: 512, height: 512, pixelRatio: 1, margin: 0 });
+await utm.render({ bbox: [300_000, 3_900_000, 500_000, 4_100_000], bearing: 0, size: 512, pixelRatio: 1, margin: 0 });
 // a tile of the CRS's grid
 await utm.renderTile({ z: 3, x: 4, y: 2, tileSize: 256, pixelRatio: 1, margin: 0 });
 // a camera: the same view as renderView takes
@@ -95,7 +95,8 @@ Vector layers are drawn with projected vertices; raster, hillshade and color-rel
 |---|---|
 | `bbox` | `[minX, minY, maxX, maxY]` in CRS units (degrees for longlat), easting first: the area drawn at bearing 0. |
 | `bearing` | Degrees clockwise from the CRS's y axis of the direction that is up. The view turns around the center of `bbox`. |
-| `width`, `height`, `pixelRatio`, `margin` | As in `renderView`. |
+| `size` | CSS pixels of the image's long side. The image has the box's aspect ratio. |
+| `pixelRatio`, `margin` | As in `renderView`. |
 
 A tile has `z`, `x`, `y`, `tileSize` (CSS pixels), `pixelRatio` and `margin`, all required.
 
