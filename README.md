@@ -98,7 +98,7 @@ new Map({ container: 'map', style: glStyle });
 `addProjection` takes any `forward` / `inverse` pair between lng/lat and CRS coordinates, such as a [proj4js](https://github.com/proj4js/proj4js) converter, which reads PROJJSON. ml2drender draws with its own formulas; for the CRSs of the demo the two agree within a few micrometres. Two things to know:
 
 - proj4js does not read the Geostationary Satellite method from PROJJSON. Give it the PROJ string (`+proj=geos ...`) instead, as the [demo](https://github.com/Kanahiro/ml2drender/blob/main/examples/browser/src/proj.ts) does.
-- If GL JS also draws GeoJSON sources itself, its workers need the same converter. Set it with `setProjectionHandler`, loaded through `importScriptInWorkers`.
+- If GL JS also draws GeoJSON sources itself, its workers need the same converter. Set it with `setProjectionHandler`, as the [demo](https://github.com/Kanahiro/ml2drender/blob/main/examples/browser/src/gl-projection-handler.ts) does.
 
 ## JavaScript API
 
