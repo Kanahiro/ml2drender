@@ -9,6 +9,8 @@ import { stylePresets } from './styles';
 import { TileWorker } from './worker-client';
 
 const TILE_SIZE = 256;
+/** Output pixels per CSS pixel of the rendered tiles. At most 2: a render's memory grows with its pixels (at 3, 2.25 times as many). */
+const PIXEL_RATIO = Math.min(devicePixelRatio, 2);
 /** Sources of a Mercator map for GL JS: EPSG:3857 on GL JS's own tile grid. */
 const WEB_MERCATOR: RendererCrs = {
   name: 'mercator',
@@ -110,7 +112,7 @@ function recordTile(renderMs: number, started: number) {
 addProtocol('ml2drender', async (request, controller) => {
   const { z, x, y, checkActive } = tileRequest(request.url, controller.signal);
   const started = performance.now();
-  const { bitmap, renderMs } = await tileWorker.render({ z, x, y, tileSize: TILE_SIZE, pixelRatio: devicePixelRatio, margin: MARGIN }, rendererCrs());
+  const { bitmap, renderMs } = await tileWorker.render({ z, x, y, tileSize: TILE_SIZE, pixelRatio: PIXEL_RATIO, margin: MARGIN }, rendererCrs());
   try {
     checkActive();
     recordTile(renderMs, started);
