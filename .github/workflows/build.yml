@@ -1,7 +1,7 @@
 # Lint, build and test every package on every runtime, and keep what would be published as artifacts:
 #   npm         @ml2drender/wasm (TypeScript + WASM) and @ml2drender/node (the addon's loader) tarballs
 #   napi-*      the Node-API addon of each platform
-#   wheel-*     the Python wheel of each platform, and sdist
+#   wheel-*     the Python wheel of each platform (no sdist: installing never builds on the user's machine)
 # Called by ci.yml (pull requests, main) and publish.yml. Rust comes from rust-toolchain.toml.
 name: Build
 
@@ -138,16 +138,3 @@ jobs:
         with:
           name: wheel-${{ matrix.platform }}-${{ matrix.arch }}
           path: wheels/*.whl
-
-  sdist:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
-        with:
-          command: sdist
-          args: -m crates/python/Cargo.toml -o wheels
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: wheel-sdist
-          path: wheels/*.tar.gz

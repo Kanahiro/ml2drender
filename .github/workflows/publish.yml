@@ -1,6 +1,6 @@
 # Publish the version in the repository (all packages share it) to npm and PyPI.
 #   npm:  @ml2drender/wasm, @ml2drender/node and its platform packages (@ml2drender/node-<platform>-<arch>)
-#   PyPI: ml2drender (wheels and sdist)
+#   PyPI: ml2drender (wheels only)
 # Both use trusted publishing (OIDC) with provenance. npm accepts trusted publishing only for packages
 # that exist, so the first npm release needs an NPM_TOKEN secret of the `npm` environment (not a
 # repository secret); remove it after configuring trusted publishers. PyPI accepts a pending publisher
