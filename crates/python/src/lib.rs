@@ -94,34 +94,27 @@ impl Renderer {
         self.0.set_projected_view(&view).map_err(error)
     }
 
-    /// Point the renderer at tile `z/x/y` of the grid (`origin`, `extent_at_zoom0`) of the CRS `projjson`.
+    /// Point the renderer at tile `z/x/y` of the grid `grid` (JSON) of the CRS `projjson`.
     #[allow(clippy::too_many_arguments)]
     fn set_projected_tile(
         &mut self,
         projjson: &str,
-        origin: [f64; 2],
-        extent_at_zoom0: f64,
-        z: u8,
+        grid: &str,
+        z: u32,
         x: u32,
         y: u32,
         tile_size: u32,
         pixel_ratio: f64,
         margin: u32,
     ) -> PyResult<()> {
-        let grid = ml2drender::reproject::TileMatrixSet { origin, extent_at_zoom0 };
+        let grid = ml2drender::reproject::TileMatrixSet::parse(grid, projjson).map_err(error)?;
         let view = ml2drender::reproject::ProjectedView::tile(projjson, &grid, z, x, y, tile_size).map_err(error)?;
         self.0.set_projected_view(&ml2drender::reproject::ProjectedView { pixel_ratio, margin, ..view }).map_err(error)
     }
 
-    /// Point the renderer at MapLibre GL JS's camera `view` in the CRS `projjson` on its grid.
-    fn set_projected_camera(
-        &mut self,
-        projjson: &str,
-        origin: [f64; 2],
-        extent_at_zoom0: f64,
-        view: View,
-    ) -> PyResult<()> {
-        let grid = ml2drender::reproject::TileMatrixSet { origin, extent_at_zoom0 };
+    /// Point the renderer at MapLibre GL JS's camera `view` in the CRS `projjson` on its grid `grid` (JSON).
+    fn set_projected_camera(&mut self, projjson: &str, grid: &str, view: View) -> PyResult<()> {
+        let grid = ml2drender::reproject::TileMatrixSet::parse(grid, projjson).map_err(error)?;
         let view = ml2drender::reproject::ProjectedView::camera(projjson, &grid, &view.0).map_err(error)?;
         self.0.set_projected_view(&view).map_err(error)
     }

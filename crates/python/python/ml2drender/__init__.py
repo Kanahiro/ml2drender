@@ -72,7 +72,9 @@ class Renderer:
         """
         return await self._render(lambda renderer: renderer.set_view(view))
 
-    def projected(self, projjson: dict[str, Any], tile_matrix_set: TileMatrixSet | None = None) -> "ProjectedRenderer":
+    def projected(
+        self, projjson: dict[str, Any], tile_matrix_set: TileMatrixSet | dict[str, Any] | None = None
+    ) -> "ProjectedRenderer":
         """Return this renderer drawing in the CRS ``projjson`` (PROJJSON as a dict).
 
         Supported methods: Transverse Mercator, Mercator, Pseudo Mercator, Lambert Conic Conformal,
@@ -84,8 +86,12 @@ class Renderer:
         one CRS serve the others, and Web Mercator views, too. Raises ``TypeError`` if ``projjson``
         is not a dict.
 
-        ``tile_matrix_set`` is the CRS's tile grid, which a CRS does not have by itself. Tiles and
-        cameras need it (a camera's zoom is the grid's); boxes do not.
+        ``tile_matrix_set`` is the CRS's tile grid, which a CRS does not have by itself: a
+        :class:`TileMatrixSet`, or an OGC 2D TileMatrixSet (2.0) as a dict, whose ``tileMatrices``
+        are the zoom levels (``cellSize``, ``pointOfOrigin`` in the CRS's axis order,
+        ``cornerOfOrigin``, ``tileWidth``, ``tileHeight``, ``matrixWidth`` and ``matrixHeight`` are
+        read; ``variableMatrixWidths`` are not supported). Tiles and cameras need it (a camera's
+        zoom is the grid's); boxes do not.
         """
         if not isinstance(projjson, dict):
             raise TypeError("projjson must be a PROJJSON dict")
@@ -133,16 +139,20 @@ class Renderer:
 class ProjectedRenderer:
     """A :class:`Renderer` drawing in a CRS (see :meth:`Renderer.projected`)."""
 
-    def __init__(self, renderer: Renderer, projjson: str, tile_matrix_set: TileMatrixSet | None) -> None:
+    def __init__(
+        self, renderer: Renderer, projjson: str, tile_matrix_set: TileMatrixSet | dict[str, Any] | None
+    ) -> None:
         self._renderer = renderer
         self._projjson = projjson
         self._tile_matrix_set = tile_matrix_set
 
-    def _grid(self) -> tuple[str, tuple[float, float], float]:
-        if self._tile_matrix_set is None:
+    def _grid(self) -> tuple[str, str]:
+        grid = self._tile_matrix_set
+        if grid is None:
             raise TypeError("tile_matrix_set is required for tiles and cameras")
-        origin, extent_at_zoom0 = self._tile_matrix_set
-        return self._projjson, origin, extent_at_zoom0
+        if isinstance(grid, TileMatrixSet):
+            grid = {"origin": grid.origin, "extentAtZoom0": grid.extent_at_zoom0}
+        return self._projjson, json.dumps(grid)
 
     async def render(self, box: ProjectedBox) -> bytes:
         """:meth:`Renderer.render_view` of a box of the CRS (see :attr:`ProjectedBox.pixels`).
@@ -154,10 +164,12 @@ class ProjectedRenderer:
     async def render_tile(
         self, z: int, x: int, y: int, tile_size: int = 256, pixel_ratio: float = 1.0, margin: int = 0
     ) -> bytes:
-        """:meth:`render` of tile ``z/x/y`` of the CRS's grid, ``tile_size`` CSS pixels square.
+        """:meth:`render` of tile ``z/x/y`` of the CRS's grid, ``tile_size`` CSS pixels wide.
 
-        The image is ``round(tile_size * pixel_ratio)`` pixels square. Raises ``TypeError`` without
-        a ``tile_matrix_set`` and ``RuntimeError`` for a tile that is not of the grid.
+        The image is ``round(tile_size * pixel_ratio)`` pixels wide, and as high as the grid's tiles
+        are (square in a :class:`TileMatrixSet`). ``z`` is a zoom level of the grid (an index of an
+        OGC set's ``tileMatrices``). Raises ``TypeError`` without a ``tile_matrix_set`` and
+        ``RuntimeError`` for a grid it does not read or a tile that is not of the grid.
         """
         grid = self._grid()
         tile = (z, x, y, tile_size, pixel_ratio, margin)
@@ -166,8 +178,8 @@ class ProjectedRenderer:
     async def render_view(self, view: View) -> bytes:
         """:meth:`render` of MapLibre GL JS's camera in the CRS (registered with ``addProjection``).
 
-        ``view.center`` (lng, lat) is in the middle, tile 0/0/0 of the grid is 512 CSS pixels wide
-        at zoom 0, and the view turns around the center by ``view.bearing`` (from the CRS's y
+        ``view.center`` (lng, lat) is in the middle, a tile of the grid's first level (tile 0/0/0
+        of a :class:`TileMatrixSet`) is 512 CSS pixels wide at zoom 0, and the view turns around the center by ``view.bearing`` (from the CRS's y
         axis). Raises ``TypeError`` without a ``tile_matrix_set`` and ``RuntimeError`` for a center
         outside the CRS.
         """

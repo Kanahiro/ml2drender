@@ -93,25 +93,63 @@ export interface ProjectedBox {
 }
 
 /**
+ * The tile grid of a CRS, which a CRS does not have by itself: MapLibre GL JS's (`addProjection`), or an OGC 2D
+ * TileMatrixSet.
+ */
+export type TileMatrixSet = QuadTileMatrixSet | OgcTileMatrixSet;
+
+/**
  * MapLibre GL JS's `TileMatrixSet` (`addProjection`): tile 0/0/0 is the square of side `extentAtZoom0` whose
  * top-left corner is `origin`, and each zoom splits every tile in four; x grows east, y south.
  */
-export interface TileMatrixSet {
+export interface QuadTileMatrixSet {
   /** CRS coordinates of the top-left corner of tile 0/0/0: [min x, max y]. */
   origin: [number, number];
   /** Width (= height) of tile 0/0/0 in CRS units. */
   extentAtZoom0: number;
 }
 
+/**
+ * An OGC 2D TileMatrixSet (2.0, JSON): a matrix of tiles for each zoom level, `z` its index in `tileMatrices`. Its
+ * other members (`id`, `crs`, `scaleDenominator`…) may be there and are not read.
+ */
+export interface OgcTileMatrixSet {
+  /**
+   * The CRS's axes in order. When the first is Lat, Lon, N or E (or their long names), it gives the order of each
+   * `pointOfOrigin`; otherwise the PROJJSON's axes do.
+   */
+  orderedAxes?: string[];
+  /** The zoom levels, from the coarsest. */
+  tileMatrices: TileMatrix[];
+}
+
+/** A zoom level of an {@link OgcTileMatrixSet}. `variableMatrixWidths` are not supported. */
+export interface TileMatrix {
+  /** CRS units per pixel. */
+  cellSize: number;
+  /** The corner rows and columns count from, in the CRS's axis order. */
+  pointOfOrigin: [number, number];
+  /** Rows count down from the top-left corner (default) or up from the bottom-left one. */
+  cornerOfOrigin?: 'topLeft' | 'bottomLeft';
+  /** Pixels across a tile. */
+  tileWidth: number;
+  /** Pixels down a tile. */
+  tileHeight: number;
+  /** Tiles across the matrix. */
+  matrixWidth: number;
+  /** Tiles down the matrix. */
+  matrixHeight: number;
+}
+
 /** A source of the style in a tile of a CRS's grid (see `ProjectedRenderer.getTile`). */
 export interface SourceTile {
   /** A vector, GeoJSON, raster, raster-dem or image source of the style. */
   source: string;
-  /** Zoom level of the CRS's grid: an integer in 0..=30. */
+  /** Zoom level of the CRS's grid: an integer in 0..=30 of GL JS's grid, an index of an OGC set's `tileMatrices`. */
   z: number;
-  /** Column, from the grid's west edge: an integer in 0..2^z. */
+  /** Column, from the grid's west edge: an integer below 2^z (GL JS's grid) or the level's `matrixWidth`. */
   x: number;
-  /** Row, from the grid's north edge: an integer in 0..2^z. */
+  /** Row, from the grid's north edge (south for `cornerOfOrigin: "bottomLeft"`): below 2^z or `matrixHeight`. */
   y: number;
 }
 
@@ -121,11 +159,15 @@ export interface ProjectedRenderer {
   readonly crs: Crs;
   /** Fetch required resources and return a new RGBA image of `box.bbox` (CRS units). */
   render(box: ProjectedBox): Promise<RenderedImage>;
-  /** `render` of tile `z/x/y` of the CRS's grid, `tileSize` CSS pixels (default 256) on a side. */
+  /**
+   * `render` of tile `z/x/y` of the CRS's grid, `tileSize` CSS pixels (default 256) wide and as high as the grid's
+   * tiles are (square in GL JS's grid). Zoom levels and ranges of `z`, `x` and `y` are the grid's.
+   */
   renderTile(tile: Tile): Promise<RenderedImage>;
   /**
-   * `render` of MapLibre GL JS's camera in the CRS (registered with `addProjection`): `center` in degrees, tile
-   * 0/0/0 of the grid in 512 CSS pixels at zoom 0, turned around `center` by `bearing`.
+   * `render` of MapLibre GL JS's camera in the CRS (registered with `addProjection`): `center` in degrees, a tile
+   * of the grid's first level (tile 0/0/0 of GL JS's) 512 CSS pixels wide at zoom 0, turned around `center` by
+   * `bearing`.
    */
   renderView(view: View): Promise<RenderedImage>;
   /**
@@ -210,6 +252,7 @@ interface WasmExports {
   projection_new(ptr: number, len: number): number;
   projection_forward(handle: number, lng: number, lat: number): number;
   projection_free(handle: number): void;
+  tile_matrix(projjsonPtr: number, projjsonLen: number, gridPtr: number, gridLen: number, z: number, x: number, y: number): number;
   xy_ptr(): number;
 }
 
@@ -464,24 +507,13 @@ export class MapRenderer {
   /** This renderer drawing in `crs`, on its tile grid. Resources fetched for one CRS serve the others too. */
   projected(crs: Crs): ProjectedRenderer {
     if (!crs.projjson || typeof crs.projjson !== 'object') throw new TypeError('crs.projjson must be a PROJJSON object');
-    const grid = (): TileMatrixSet => {
-      if (!crs.tileMatrixSet) throw new TypeError('crs.tileMatrixSet is required for tiles and cameras');
-      const { origin, extentAtZoom0 } = crs.tileMatrixSet;
-      if (!origin.every(Number.isFinite) || !(extentAtZoom0 > 0 && Number.isFinite(extentAtZoom0))) {
-        throw new RangeError('crs.tileMatrixSet must have a finite origin and a finite, positive extentAtZoom0');
-      }
-      return crs.tileMatrixSet;
-    };
     const projjson = encoder.encode(JSON.stringify(crs.projjson));
-    // The box of tile z/x/y of the grid.
-    const box = ({ z, x, y }: { z: number; x: number; y: number }): ProjectedBox['bbox'] => {
-      const { origin, extentAtZoom0 } = grid();
-      const n = 2 ** z;
-      if (!Number.isInteger(z) || z < 0 || z > 30) throw new RangeError('z must be an integer in 0..=30');
-      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) throw new RangeError('x and y must be integers in 0..2^z');
-      const s = extentAtZoom0 / n;
-      const [minX, maxY] = [origin[0] + x * s, origin[1] - y * s];
-      return [minX, maxY - s, minX + s, maxY];
+    const grid = crs.tileMatrixSet && encoder.encode(JSON.stringify(crs.tileMatrixSet));
+    // Tile z/x/y of the grid (0/0/0 for the grid's scale only).
+    const tile = ({ z, x, y }: { z: number; x: number; y: number }) => {
+      if (!grid) throw new TypeError('crs.tileMatrixSet is required for tiles and cameras');
+      if (![z, x, y].every((v) => Number.isInteger(v) && v >= 0 && v < 2 ** 32)) throw new RangeError('z, x and y must be non-negative integers');
+      return this.tileMatrix(projjson, grid, z, x, y);
     };
     const render = async (view: SizedBox) => this.draw(view, ...this.projectedArgs(projjson, view));
     return {
@@ -491,24 +523,25 @@ export class MapRenderer {
         const [width, height] = fitSize(maxX - minX, maxY - minY, size);
         return render({ bbox, width, height, pixelRatio, margin });
       },
-      renderTile: async ({ tileSize = 256, pixelRatio, margin, ...tile }) => {
+      renderTile: async ({ tileSize = 256, pixelRatio, margin, ...zxy }) => {
         if (!Number.isInteger(tileSize) || tileSize < 1) throw new RangeError('tileSize must be a positive integer');
-        return render({ bbox: box(tile), width: tileSize, height: tileSize, pixelRatio, margin });
+        const { bbox, aspect } = tile(zxy);
+        return render({ bbox, width: tileSize, height: Math.max(1, Math.round(tileSize * aspect)), pixelRatio, margin });
       },
       renderView: async ({ center: [lng, lat], zoom, bearing = 0, width, height, pixelRatio, margin }) => {
         if (![lng, lat, zoom, bearing].every(Number.isFinite)) throw new RangeError('center, zoom and bearing must be finite');
         const [x, y] = this.forward(projjson, lng, lat);
         if (!Number.isFinite(x) || !Number.isFinite(y)) throw new RangeError('center is outside the CRS');
         // CRS units per CSS pixel.
-        const unit = grid().extentAtZoom0 / (512 * 2 ** zoom);
+        const unit = tile({ z: 0, x: 0, y: 0 }).unit / 2 ** zoom;
         const [w, h] = [(width / 2) * unit, (height / 2) * unit];
         // The box at bearing 0, which the core turns around its center.
         return render({ bbox: [x - w, y - h, x + w, y + h], bearing, width, height, pixelRatio, margin });
       },
-      getTile: async (tile) => {
-        if (typeof tile.source !== 'string' || !tile.source) throw new TypeError('source must be a source id');
-        const view = { bbox: box(tile), width: 512, height: 512 };
-        return this.run(...this.projectedArgs(projjson, view), encoder.encode(tile.source), this.wasm.renderer_export_tile);
+      getTile: async (sourceTile) => {
+        if (typeof sourceTile.source !== 'string' || !sourceTile.source) throw new TypeError('source must be a source id');
+        const view = { bbox: tile(sourceTile).bbox, width: 512, height: 512 };
+        return this.run(...this.projectedArgs(projjson, view), encoder.encode(sourceTile.source), this.wasm.renderer_export_tile);
       },
       toStyle: ({ tiles }) => {
         if (typeof crs.name !== 'string' || !crs.name) throw new TypeError('crs.name is required for toStyle');
@@ -528,6 +561,20 @@ export class MapRenderer {
         return structuredClone({ ...style, projection: { type: crs.name }, sources, layers });
       },
     };
+  }
+
+  /**
+   * Tile z/x/y of the grid `grid` (encoded JSON) of the CRS `projjson` (encoded): its box, its height over its width,
+   * and the grid's CRS units per CSS pixel of a camera at zoom 0. Throws for a grid the core does not read or a tile
+   * not of it.
+   */
+  private tileMatrix(projjson: Uint8Array, grid: Uint8Array, z: number, x: number, y: number) {
+    this.assertUsable();
+    const w = this.wasm;
+    const ok = this.withBytes(projjson, (pp, pl) => this.withBytes(grid, (gp, gl) => w.tile_matrix(pp, pl, gp, gl, z, x, y)));
+    if (!ok) throw new RangeError(decoder.decode(this.output()));
+    const [minX, minY, maxX, maxY, aspect, unit] = new Float64Array(w.memory.buffer, w.xy_ptr(), 6);
+    return { bbox: [minX, minY, maxX, maxY] as ProjectedBox['bbox'], aspect, unit };
   }
 
   /** `[lng, lat]` in the CRS `projjson` (encoded); NaN where the CRS has no point. */

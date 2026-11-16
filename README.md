@@ -155,11 +155,13 @@ A `RenderedImage` has:
 Returns a `ProjectedRenderer` that draws in `crs`. The original renderer is unchanged. `crs` has the same shape as a CRS registered with MapLibre GL JS's `addProjection`:
 
 - `projjson`: the CRS as PROJJSON. `render` of a box needs nothing else.
-- `tileMatrixSet`: `{ origin: [minX, maxY], extentAtZoom0 }`, required by `renderTile`, `getTile` and `renderView`. A CRS has no tile grid of its own, so tiles and zoom levels mean nothing without one. Tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`. Each zoom level splits every tile into four. x grows to the east and y to the south.
+- `tileMatrixSet`: required by `renderTile`, `getTile` and `renderView`. A CRS has no tile grid of its own, so tiles and zoom levels mean nothing without one. Either form works:
+  - `{ origin: [minX, maxY], extentAtZoom0 }`, MapLibre GL JS's grid (`addProjection`). Tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`. Each zoom level splits every tile into four. x grows to the east and y to the south.
+  - An [OGC 2D TileMatrixSet](https://docs.ogc.org/is/17-083r4/17-083r4.html) (2.0, JSON), such as `WorldCRS84Quad` or a national grid with its own scales. `z` is an index of its `tileMatrices`, and `x`/`y` range over each level's `matrixWidth`/`matrixHeight`. `pointOfOrigin` is in the CRS's axis order (from `orderedAxes` when it says Lat/Lon or N/E, else from the PROJJSON), and `cornerOfOrigin: "bottomLeft"` counts rows up. Tiles that are not square render `tileSize` wide. `variableMatrixWidths` are not supported. GL JS's `addProjection` takes only the first form, so `getTile` and `toStyle` are for it.
 
 - `name`: the CRS's name in GL JS, required by `toStyle` only.
 
-Projected renders pick a zoom level from CRS units per CSS px, read on EPSG:3857's scale at the equator (the idea behind OGC scale denominators; for longlat, 360° is one trip around the world). That zoom drives style evaluation and source tile selection. It does not depend on position, so tiles of one grid zoom line up at their edges. At high latitudes the zoom is higher than a Mercator map of the same ground resolution would use. It is not the grid zoom given to `renderView`: the two agree only when `extentAtZoom0` is the width of EPSG:3857's world (about 40,075 km, or 360° for longlat).
+Projected renders pick a zoom level from CRS units per CSS px, read on EPSG:3857's scale at the equator (the idea behind OGC scale denominators; for longlat, 360° is one trip around the world). That zoom drives style evaluation and source tile selection. It does not depend on position, so tiles of one grid zoom line up at their edges. At high latitudes the zoom is higher than a Mercator map of the same ground resolution would use. It is not the grid zoom given to `renderView`: the two agree only when `extentAtZoom0` (or the width of a tile of an OGC set's first level) is the width of EPSG:3857's world (about 40,075 km, or 360° for longlat).
 
 Besides `renderView`, `render` and `renderTile`, it has two methods for MapLibre GL JS:
 

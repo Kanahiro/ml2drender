@@ -85,7 +85,7 @@ await utm.renderView({ lng: 139.767, lat: 35.681, zoom: 6, bearing: 30, width: 8
 `crs` is a `crs` of `@ml2drender/wasm` (its `name` is not read):
 
 - `projjson`: the CRS as a PROJJSON object. For the supported methods, see [Projected coordinate reference systems](https://github.com/Kanahiro/ml2drender#projected-coordinate-reference-systems). `projected` throws a `TypeError` if it is not an object, and renders reject for an unsupported CRS.
-- `tileMatrixSet`: `{ origin: [minX, maxY], extentAtZoom0 }`, MapLibre GL JS's tile grid for the CRS (`addProjection`). Tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`, and each zoom level splits every tile into four. `renderTile` and `renderView` reject without it; `render` does not need it.
+- `tileMatrixSet`: the CRS's tile grid. `renderTile` and `renderView` reject without it; `render` does not need it. Either `{ origin: [minX, maxY], extentAtZoom0 }`, MapLibre GL JS's grid (`addProjection`: tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`, and each zoom level splits every tile into four), or an OGC 2D TileMatrixSet (2.0, JSON), whose `tileMatrices` are the zoom levels (`pointOfOrigin` in the CRS's axis order; `variableMatrixWidths` are not supported). Tiles that are not square render `tileSize` wide.
 
 `renderView` draws the same area as MapLibre GL JS does with that center, `zoom` and `bearing` once the CRS is registered with `addProjection`: at zoom 0, tile 0/0/0 of the grid is 512 CSS pixels wide.
 

@@ -3,13 +3,16 @@
 //! Byte results (needs list, RGBA, PNG, error messages) go to a shared output buffer read via
 //! `out_ptr`/`out_len`; it stays valid until the next call. Inputs are copied in via `alloc`.
 
-use ml2drender::{Projection, Renderer, View, reproject::ProjectedView};
+use ml2drender::{
+    Projection, Renderer, View,
+    reproject::{ProjectedView, TileMatrixSet},
+};
 use std::cell::RefCell;
 
 thread_local! {
     static OUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// The point `projection_forward` computed, read via `xy_ptr`.
-    static XY: RefCell<[f64; 2]> = const { RefCell::new([0.0; 2]) };
+    /// The point `projection_forward` computed, or the numbers of `tile_matrix`, read via `xy_ptr`.
+    static XY: RefCell<[f64; 6]> = const { RefCell::new([0.0; 6]) };
 }
 
 fn set_out(bytes: Vec<u8>) {
@@ -303,7 +306,7 @@ pub extern "C" fn xy_ptr() -> *const f64 {
 }
 
 fn set_xy(p: [f64; 2]) -> u32 {
-    XY.with(|xy| *xy.borrow_mut() = p);
+    XY.with(|xy| xy.borrow_mut()[..2].copy_from_slice(&p));
     (p[0].is_finite() && p[1].is_finite()) as u32
 }
 
@@ -315,6 +318,38 @@ fn set_xy(p: [f64; 2]) -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn projection_forward(p: *const Projection, lng: f64, lat: f64) -> u32 {
     set_xy(unsafe { &*p }.forward(lng, lat))
+}
+
+/// Tile `z/x/y` of the grid `grid` (JSON, see `TileMatrixSet::parse`) of the CRS `projjson` at `xy_ptr`:
+/// its box (min x, min y, max x, max y), its height over its width, and the grid's CRS units per CSS pixel
+/// of a camera at zoom 0. Returns 0 with the error message in the output buffer for a grid it does not
+/// read or a tile not of it.
+///
+/// # Safety
+/// `projjson`/`projjson_len` and `grid`/`grid_len` must describe readable memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tile_matrix(
+    projjson: *const u8,
+    projjson_len: usize,
+    grid: *const u8,
+    grid_len: usize,
+    z: u32,
+    x: u32,
+    y: u32,
+) -> u32 {
+    let text = |ptr, len| String::from_utf8_lossy(unsafe { bytes(ptr, len) }).into_owned();
+    let tile = TileMatrixSet::parse(&text(grid, grid_len), &text(projjson, projjson_len))
+        .and_then(|g| Ok((g.tile(z, x, y)?, g.unit_at_zoom0())));
+    match tile {
+        Ok(((b, aspect), unit)) => {
+            XY.with(|xy| *xy.borrow_mut() = [b[0], b[1], b[2], b[3], aspect, unit]);
+            1
+        }
+        Err(e) => {
+            set_out(e.to_string().into_bytes());
+            0
+        }
+    }
 }
 
 /// # Safety

@@ -53,27 +53,65 @@ export interface Crs {
 }
 
 /**
+ * The tile grid of a CRS, which a CRS does not have by itself: MapLibre GL JS's (`addProjection`), or an OGC 2D
+ * TileMatrixSet.
+ */
+export type TileMatrixSet = QuadTileMatrixSet | OgcTileMatrixSet;
+
+/**
  * MapLibre GL JS's `TileMatrixSet` (`addProjection`): tile 0/0/0 is the square of side `extentAtZoom0` whose
  * top-left corner is `origin`, and each zoom splits every tile in four; x grows east, y south.
  */
-export interface TileMatrixSet {
+export interface QuadTileMatrixSet {
   /** CRS coordinates of the top-left corner of tile 0/0/0: [min x, max y]. */
   origin: [number, number];
   /** Width (= height) of tile 0/0/0 in CRS units. */
   extentAtZoom0: number;
 }
 
+/**
+ * An OGC 2D TileMatrixSet (2.0, JSON): a matrix of tiles for each zoom level, `z` its index in `tileMatrices`. Its
+ * other members (`id`, `crs`, `scaleDenominator`…) may be there and are not read.
+ */
+export interface OgcTileMatrixSet {
+  /**
+   * The CRS's axes in order. When the first is Lat, Lon, N or E (or their long names), it gives the order of each
+   * `pointOfOrigin`; otherwise the PROJJSON's axes do.
+   */
+  orderedAxes?: string[];
+  /** The zoom levels, from the coarsest. */
+  tileMatrices: TileMatrix[];
+}
+
+/** A zoom level of an {@link OgcTileMatrixSet}. `variableMatrixWidths` are not supported. */
+export interface TileMatrix {
+  /** CRS units per pixel. */
+  cellSize: number;
+  /** The corner rows and columns count from, in the CRS's axis order. */
+  pointOfOrigin: [number, number];
+  /** Rows count down from the top-left corner (default) or up from the bottom-left one. */
+  cornerOfOrigin?: 'topLeft' | 'bottomLeft';
+  /** Pixels across a tile. */
+  tileWidth: number;
+  /** Pixels down a tile. */
+  tileHeight: number;
+  /** Tiles across the matrix. */
+  matrixWidth: number;
+  /** Tiles down the matrix. */
+  matrixHeight: number;
+}
+
 /** A tile of a CRS's grid. Every field is required. */
 export interface Tile {
-  /** Zoom level: an integer in 0..=30. */
+  /** Zoom level: an integer in 0..=30 of GL JS's grid, an index of an OGC set's `tileMatrices`. */
   z: number;
-  /** Column, from the grid's west edge: an integer in 0..2^z. */
+  /** Column, from the grid's west edge: an integer below 2^z (GL JS's grid) or the level's `matrixWidth`. */
   x: number;
-  /** Row, from the grid's north edge: an integer in 0..2^z. */
+  /** Row, from the grid's north edge (south for `cornerOfOrigin: "bottomLeft"`): below 2^z or `matrixHeight`. */
   y: number;
-  /** Width and height in CSS pixels. */
+  /** Width in CSS pixels; the height follows the grid's tile shape (square in GL JS's grid). */
   tileSize: number;
-  /** Device pixels per CSS pixel: the image is `round(tileSize * pixelRatio)` pixels square. */
+  /** Device pixels per CSS pixel: the image is `round(tileSize * pixelRatio)` pixels wide. */
   pixelRatio: number;
   /** CSS pixels drawn around the tile and cropped, so that labels near the edge are placed as in a larger map. */
   margin: number;
@@ -105,7 +143,8 @@ export interface ProjectedRenderer {
   renderTile(tile: Tile): Promise<Uint8Array>;
   /**
    * `render` of MapLibre GL JS's camera in the CRS (registered with `addProjection`): `lng` and `lat` in degrees
-   * in the middle, tile 0/0/0 of the grid in 512 CSS pixels at zoom 0, turned around the center by `bearing`.
+   * in the middle, a tile of the grid's first level (tile 0/0/0 of GL JS's) 512 CSS pixels wide at zoom 0, turned
+   * around the center by `bearing`.
    * Rejects without `crs.tileMatrixSet`, and for a center outside the CRS.
    */
   renderView(view: View): Promise<Uint8Array>;
@@ -126,8 +165,9 @@ interface NativeRenderer {
   setView(view: View): void;
   /** Throws for a CRS the renderer does not support. */
   setProjectedView(view: ProjectedBox & { projjson: string }): void;
-  setProjectedTile(projjson: string, grid: TileMatrixSet, tile: Tile): void;
-  setProjectedCamera(projjson: string, grid: TileMatrixSet, view: View): void;
+  /** `grid` is the tile matrix set as JSON text. */
+  setProjectedTile(projjson: string, grid: string, tile: Tile): void;
+  setProjectedCamera(projjson: string, grid: string, view: View): void;
   /** URLs still needed: sources, then tiles, then glyph ranges, each stage found from the last. */
   needs(): Promise<string[]>;
   /** `null` is a missing resource. The bytes are read in place until this resolves. */
@@ -219,9 +259,9 @@ export class Renderer {
   projected(crs: Crs): ProjectedRenderer {
     if (!crs.projjson || typeof crs.projjson !== 'object') throw new TypeError('crs.projjson must be a PROJJSON object');
     const projjson = JSON.stringify(crs.projjson);
-    const grid = (): TileMatrixSet => {
+    const grid = (): string => {
       if (!crs.tileMatrixSet) throw new TypeError('crs.tileMatrixSet is required for tiles and cameras');
-      return crs.tileMatrixSet;
+      return JSON.stringify(crs.tileMatrixSet);
     };
     return {
       render: ({ bbox, size, pixelRatio, margin }) =>

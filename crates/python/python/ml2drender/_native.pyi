@@ -70,8 +70,7 @@ class Renderer:
     def set_projected_tile(
         self,
         projjson: str,
-        origin: tuple[float, float],
-        extent_at_zoom0: float,
+        grid: str,
         z: int,
         x: int,
         y: int,
@@ -79,14 +78,12 @@ class Renderer:
         pixel_ratio: float,
         margin: int,
     ) -> None:
-        """Point the renderer at tile ``z/x/y`` of the grid (``origin``, ``extent_at_zoom0``) of the CRS ``projjson``.
+        """Point the renderer at tile ``z/x/y`` of the grid ``grid`` (JSON) of the CRS ``projjson``.
 
         Raises ``RuntimeError`` for a tile that is not of the grid.
         """
-    def set_projected_camera(
-        self, projjson: str, origin: tuple[float, float], extent_at_zoom0: float, view: View
-    ) -> None:
-        """Point the renderer at MapLibre GL JS's camera ``view`` in the CRS ``projjson`` on its grid.
+    def set_projected_camera(self, projjson: str, grid: str, view: View) -> None:
+        """Point the renderer at MapLibre GL JS's camera ``view`` in the CRS ``projjson`` on its grid ``grid`` (JSON).
 
         Raises ``RuntimeError`` for a center outside the CRS.
         """
