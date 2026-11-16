@@ -1,6 +1,6 @@
 {
   "name": "@ml2drender/node",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MapLibre style 2D renderer in pure Rust, as a native Node.js addon (Node-API)",
   "license": "BSD-3-Clause",
   "repository": {
