@@ -16,9 +16,12 @@ use crate::{Error, View};
 /// A target-CRS view: what [`crate::Renderer::set_projected_view`] renders.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedView {
-    /// The target CRS as PROJJSON, geographic or projected. Supported methods: Transverse Mercator,
-    /// Mercator, Pseudo Mercator, Lambert Conic Conformal, Polar Stereographic, Lambert Azimuthal Equal
-    /// Area, Equal Earth and PROJ's Geostationary Satellite, on any ellipsoid, without datum shifts.
+    /// The target CRS as PROJJSON, geographic or projected. Supported methods: Transverse Mercator, Mercator, Pseudo
+    /// Mercator, Lambert Conic Conformal, Albers Equal Area, Equidistant Conic, Polar and Oblique Stereographic,
+    /// Hotine Oblique Mercator, Krovak (North Orientated), Lambert Azimuthal Equal Area, Lambert Cylindrical Equal
+    /// Area, Equidistant Cylindrical, Cassini-Soldner, American Polyconic, Orthographic, Equal Earth, Mollweide,
+    /// Robinson, Sinusoidal, Natural Earth, Winkel Tripel, Miller Cylindrical and PROJ's Geostationary Satellite, on
+    /// any ellipsoid, without datum shifts.
     /// Coordinates are (easting, northing) / (longitude, latitude) whatever the axis order.
     pub projjson: String,
     /// `[min_x, min_y, max_x, max_y]` in CRS units (degrees for longlat): what is drawn at bearing 0.

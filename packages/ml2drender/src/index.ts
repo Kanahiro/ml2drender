@@ -60,8 +60,10 @@ export interface Crs {
   name?: string;
   /**
    * PROJJSON of a geographic or projected CRS. Supported methods: Transverse Mercator, Mercator, Pseudo Mercator,
-   * Lambert Conic Conformal, Polar Stereographic, Lambert Azimuthal Equal Area, Equal Earth and PROJ's
-   * Geostationary Satellite, without datum shifts.
+   * Lambert Conic Conformal, Albers Equal Area, Equidistant Conic, Polar and Oblique Stereographic, Hotine Oblique
+   * Mercator, Krovak (North Orientated), Lambert Azimuthal Equal Area, Lambert Cylindrical Equal Area, Equidistant
+   * Cylindrical, Cassini-Soldner, American Polyconic, Orthographic, Equal Earth, Mollweide, Robinson, Sinusoidal,
+   * Natural Earth, Winkel Tripel, Miller Cylindrical and PROJ's Geostationary Satellite, without datum shifts.
    */
   projjson: object;
   /**
