@@ -173,7 +173,14 @@ pub fn encode_webp(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Erro
         return Err(Error::ImageEncoding(format!("{} bytes is not {width}x{height} RGBA", rgba.len())));
     }
     let mut bytes = Vec::new();
-    image_webp::WebPEncoder::new(&mut bytes)
+    let mut encoder = image_webp::WebPEncoder::new(&mut bytes);
+    // Without the predictor transform, vector map renders come out 10–30% smaller and encoding is
+    // about 10% faster; hillshade and raster imagery grow by 10–30%, but the total over the render
+    // tests' real-world maps plus raster, pattern and terrain shading is still 6% smaller.
+    let mut params = image_webp::EncoderParams::default();
+    params.use_predictor_transform = false;
+    encoder.set_params(params);
+    encoder
         .encode(rgba, width, height, image_webp::ColorType::Rgba8)
         .map_err(|e| Error::ImageEncoding(e.to_string()))?;
     Ok(bytes)
