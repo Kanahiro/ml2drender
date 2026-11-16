@@ -5,9 +5,13 @@ import type { WorkerRequest, WorkerResponse } from './render-worker';
 type TileImage = Pick<Extract<WorkerResponse, { kind: 'image' }>, 'bitmap' | 'renderMs'>;
 type SourceData = Pick<Extract<WorkerResponse, { kind: 'source' }>, 'data' | 'renderMs'>;
 
-// Each worker's WASM memory stays at its peak (hundreds of MB for a dense style in a projected CRS), so touch
-// devices, whose browsers kill a page sooner, get fewer.
-const MAX_WORKERS = matchMedia('(pointer: coarse)').matches ? 2 : 4;
+// Each worker's WASM memory stays at its peak (hundreds of MB for a dense style in a projected CRS). Touch devices,
+// whose browsers kill a page sooner, get one worker that keeps nothing between tiles: its memory stays at the peak
+// of one tile, not of the tiles it keeps.
+const TOUCH = matchMedia('(pointer: coarse)').matches;
+const MAX_WORKERS = TOUCH ? 1 : 4;
+/** How long the workers keep fetched resources and decoded tiles (`InitOptions.cache.ttlMs`). */
+const TTL_MS = TOUCH ? 0 : Infinity;
 // Leave a core for the main thread and MapLibre's own workers.
 const WORKER_COUNT = Math.min(MAX_WORKERS, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
 
@@ -77,7 +81,7 @@ export class TileWorker {
       slot.load = 0;
       return new Promise<void>((resolve, reject) => {
         slot.initializing = { resolve, reject };
-        slot.worker.postMessage({ kind: 'init', generation, style } satisfies WorkerRequest);
+        slot.worker.postMessage({ kind: 'init', generation, style, ttlMs: TTL_MS } satisfies WorkerRequest);
       });
     }));
   }
