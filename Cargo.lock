@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "ml2drender-python"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ml2drender",
  "pyo3",
