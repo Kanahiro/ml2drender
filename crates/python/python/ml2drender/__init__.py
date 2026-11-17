@@ -76,9 +76,12 @@ class Renderer:
         """Return this renderer drawing in the CRS ``projjson`` (PROJJSON as a dict).
 
         Supported methods: Transverse Mercator, Mercator, Pseudo Mercator, Lambert Conic Conformal,
-        Polar Stereographic, Lambert Azimuthal Equal Area, Equal Earth and PROJ's Geostationary
-        Satellite, without datum shifts. Resources loaded for one CRS serve the others, and Web
-        Mercator views, too. Raises ``TypeError`` if ``projjson`` is not a dict.
+        Albers Equal Area, Polar and Oblique Stereographic, Hotine Oblique Mercator, Krovak (North
+        Orientated), Cassini-Soldner, Lambert Azimuthal Equal Area, Azimuthal Equidistant,
+        Orthographic, Equidistant Cylindrical, Equal Earth, Mollweide, Robinson, Sinusoidal and
+        PROJ's Geostationary Satellite, without datum shifts. Resources loaded for one CRS serve
+        the others, and Web Mercator views, too. Raises ``TypeError`` if ``projjson`` is not a
+        dict.
 
         ``tile_matrix_set`` is the CRS's tile grid, which a CRS does not have by itself. Tiles and
         cameras need it (a camera's zoom is the grid's); boxes do not.

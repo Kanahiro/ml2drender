@@ -38,9 +38,11 @@ export interface View {
 /** A CRS, with a tile grid for it: the `Crs` of `@ml2drender/wasm`, whose `name` is not read here. */
 export interface Crs {
   /**
-   * PROJJSON of a geographic or projected CRS. Supported methods: Transverse Mercator, Mercator, Pseudo Mercator,
-   * Lambert Conic Conformal, Polar Stereographic, Lambert Azimuthal Equal Area, Equal Earth and PROJ's
-   * Geostationary Satellite, without datum shifts.
+   * PROJJSON of a geographic or projected CRS (or of a bound or compound CRS of one). Supported methods: Transverse
+   * Mercator, Mercator, Pseudo Mercator, Lambert Conic Conformal, Albers Equal Area, Polar and Oblique
+   * Stereographic, Hotine Oblique Mercator, Krovak (North Orientated), Cassini-Soldner, Lambert Azimuthal Equal
+   * Area, Azimuthal Equidistant, Orthographic, Equidistant Cylindrical, Equal Earth, Mollweide, Robinson,
+   * Sinusoidal and PROJ's Geostationary Satellite, without datum shifts.
    */
   projjson: object;
   /**

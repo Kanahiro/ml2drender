@@ -2187,6 +2187,44 @@ mod tests {
     }
 
     #[test]
+    fn exports_follow_the_limb_of_a_polar_orthographic_view() {
+        // The north pole seen from above: the world up to Mercator's 85° is the disk of the
+        // northern hemisphere less the cap around the pole, one ring that walks around the limb and
+        // the cap, joined along the antimeridian (a slit in the map, straight up from the pole).
+        let style = r#"{"version":8,"sources":{"world":{"type":"geojson","data":{"type":"Polygon","coordinates":[[[-180,-85],[180,-85],[180,85],[-180,85],[-180,-85]]]}}},"layers":[]}"#;
+        let r = 6_500_000.0;
+        let view = reproject::ProjectedView {
+            projjson: test_crs::projected("Orthographic", test_crs::WGS84, &[("Latitude of natural origin", 90.0)]),
+            bbox: [-r, -r, r, r],
+            bearing: 0.0,
+            width: 512,
+            height: 512,
+            pixel_ratio: 1.0,
+            margin: 0,
+        };
+        let mut renderer = Renderer::new(style, View::tile(0, 0, 0, 512)).unwrap();
+        renderer.set_projected_view(&view).unwrap();
+        renderer.set_export_source(Some("world")).unwrap();
+        assert!(renderer.needs().is_empty());
+        let layers = mvt::decode(&renderer.export_tile(0).unwrap(), |_| true).unwrap();
+        let rings: Vec<_> = layers.into_iter().flat_map(|l| l.features).flat_map(|f| f.geometry).collect();
+        let dist = |p: &[i32; 2]| ((p[0] as f64 - 2048.0).powi(2) + (p[1] as f64 - 2048.0).powi(2)).sqrt();
+        let area = |ring: &[[i32; 2]]| {
+            ring.windows(2).map(|w| w[0][0] as f64 * w[1][1] as f64 - w[1][0] as f64 * w[0][1] as f64).sum::<f64>()
+                / 2.0
+        };
+        assert_eq!(rings.len(), 1, "{rings:?}");
+        // The equator on the limb (the semi-major axis), 85°N, and the slit between them.
+        let limb = 6_378_137.0 / r * 2048.0;
+        let cap = 6_378_137.0 * 85f64.to_radians().cos() / r * 2048.0;
+        let on =
+            |p: &[i32; 2]| (dist(p) - limb).abs() < 3.0 || (dist(p) - cap).abs() < 3.0 || p[0] == 2048 && p[1] < 2048;
+        assert!(rings[0].iter().all(on), "{:?}", rings[0]);
+        let disk = std::f64::consts::PI * (limb * limb - cap * cap);
+        assert!((area(&rings[0]) / disk - 1.0).abs() < 0.01, "{} vs {disk}", area(&rings[0]));
+    }
+
+    #[test]
     fn projected_bearing_matches_the_mercator_camera() {
         // EPSG:3857 as a projected view draws what the Mercator camera of the same bearing does:
         // fills, their patterns, lines, circles and icons that rotate with the map.
