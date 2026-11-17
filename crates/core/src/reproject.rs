@@ -19,11 +19,11 @@ pub struct ProjectedView {
     /// The target CRS as PROJJSON, geographic or projected (or bound or compound: its datum shift
     /// and vertical part are ignored). Supported methods: Transverse Mercator, Mercator, Pseudo
     /// Mercator, Lambert Conic Conformal, Albers Equal Area, Polar and Oblique Stereographic,
-    /// Hotine Oblique Mercator, Lambert Azimuthal Equal Area, Azimuthal Equidistant, Orthographic,
-    /// Equidistant Cylindrical, Equal Earth, Mollweide, Robinson, Sinusoidal and PROJ's
-    /// Geostationary Satellite, on any ellipsoid, without datum shifts, in any linear unit and from
-    /// any prime meridian. Coordinates are (easting, northing) / (longitude, latitude) whatever the
-    /// axis order.
+    /// Hotine Oblique Mercator, Krovak (North Orientated), Cassini-Soldner, Lambert Azimuthal Equal
+    /// Area, Azimuthal Equidistant, Orthographic, Equidistant Cylindrical, Equal Earth, Mollweide,
+    /// Robinson, Sinusoidal and PROJ's Geostationary Satellite, on any ellipsoid, without datum
+    /// shifts, in any linear unit and from any prime meridian. Coordinates are (easting, northing)
+    /// / (longitude, latitude) whatever the axis order.
     pub projjson: String,
     /// `[min_x, min_y, max_x, max_y]` in CRS units (degrees for longlat): what is drawn at bearing 0.
     pub bbox: [f64; 4],

@@ -40,9 +40,9 @@ export interface Crs {
   /**
    * PROJJSON of a geographic or projected CRS (or of a bound or compound CRS of one). Supported methods: Transverse
    * Mercator, Mercator, Pseudo Mercator, Lambert Conic Conformal, Albers Equal Area, Polar and Oblique
-   * Stereographic, Hotine Oblique Mercator, Lambert Azimuthal Equal Area, Azimuthal Equidistant, Orthographic,
-   * Equidistant Cylindrical, Equal Earth, Mollweide, Robinson, Sinusoidal and PROJ's Geostationary Satellite,
-   * without datum shifts.
+   * Stereographic, Hotine Oblique Mercator, Krovak (North Orientated), Cassini-Soldner, Lambert Azimuthal Equal
+   * Area, Azimuthal Equidistant, Orthographic, Equidistant Cylindrical, Equal Earth, Mollweide, Robinson,
+   * Sinusoidal and PROJ's Geostationary Satellite, without datum shifts.
    */
   projjson: object;
   /**

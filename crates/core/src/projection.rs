@@ -44,6 +44,8 @@ enum Method {
     Moll(Moll),
     Robin(Robin),
     Sinu(Sinu),
+    Krovak(Krovak),
+    Cass(Cass),
 }
 
 impl Projection {
@@ -145,6 +147,14 @@ impl Projection {
             "moll" => Method::Moll(Moll { a }),
             "robin" => Method::Robin(Robin { a }),
             "sinu" => Method::Sinu(Sinu { el, m: Meridian::new(el) }),
+            "krovak" => Method::Krovak(Krovak::new(
+                el,
+                lat_0,
+                num("alpha")?.ok_or_else(|| unsupported("krovak without +alpha"))?,
+                num("lat_ts")?.unwrap_or(78.5),
+                k_0,
+            )),
+            "cass" => Method::Cass(Cass::new(el, lat_0)),
             p => return Err(unsupported(format!("projection {p:?}"))),
         };
         Ok(Projection { method, p })
@@ -187,6 +197,8 @@ impl Projection {
             Method::Moll(m) => m.forward(lam, phi),
             Method::Robin(m) => m.forward(lam, phi),
             Method::Sinu(m) => m.forward(lam, phi),
+            Method::Krovak(m) => m.forward(lam, phi),
+            Method::Cass(m) => m.forward(lam, phi),
         })
     }
 
@@ -240,6 +252,8 @@ impl Projection {
             Method::Moll(m) => m.inverse(xy),
             Method::Robin(m) => m.inverse(xy),
             Method::Sinu(m) => m.inverse(xy),
+            Method::Krovak(m) => m.inverse(xy),
+            Method::Cass(m) => m.inverse(xy),
         };
         let lon_0 = self.p.lon_0;
         let r = [(lon_0 + lam.to_degrees() + 540.0).rem_euclid(360.0) - 180.0, phi.to_degrees()];
@@ -1251,6 +1265,133 @@ impl Sinu {
     }
 }
 
+/// Krovak, north orientated (EPSG's 1041, PROJ's krovak): a Lambert conic on the Gauss conformal
+/// sphere in an oblique aspect. The false origin applies after the axes are turned to east and
+/// north, as in PROJ (both are 0 in S-JTSK).
+#[derive(Debug)]
+pub struct Krovak {
+    e: f64,
+    b: f64,
+    t0: f64,
+    /// sin and cos of the co-latitude of the cone axis.
+    sin_a: f64,
+    cos_a: f64,
+    /// sin of the pseudo standard parallel, `tan^n(π/4 + φP/2)`, and r₀.
+    n: f64,
+    tan_p: f64,
+    r0: f64,
+}
+
+impl Krovak {
+    fn new(el: Ellipsoid, lat_0: f64, alpha: f64, lat_ts: f64, k_0: f64) -> Krovak {
+        let (phi_c, phi_p) = (lat_0.to_radians(), lat_ts.to_radians());
+        let (e, es) = (el.e, el.e * el.e);
+        let sc = phi_c.sin();
+        let a = el.a * (1.0 - es).sqrt() / (1.0 - es * sc * sc);
+        let b = (1.0 + es * phi_c.cos().powi(4) / (1.0 - es)).sqrt();
+        let g0 = (sc / b).asin();
+        let t0 = (FRAC_PI_4 + g0 / 2.0).tan() * ((1.0 + e * sc) / (1.0 - e * sc)).powf(e * b / 2.0)
+            / (FRAC_PI_4 + phi_c / 2.0).tan().powf(b);
+        let n = phi_p.sin();
+        let (sin_a, cos_a) = alpha.to_radians().sin_cos();
+        let tan_p = (FRAC_PI_4 + phi_p / 2.0).tan().powf(n);
+        Krovak { e, b, t0, sin_a, cos_a, n, tan_p, r0: k_0 * a / phi_p.tan() }
+    }
+    fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
+        let es = self.e * phi.sin();
+        let u = 2.0
+            * ((self.t0 * (phi / 2.0 + FRAC_PI_4).tan().powf(self.b)
+                / ((1.0 + es) / (1.0 - es)).powf(self.e * self.b / 2.0))
+            .atan()
+                - FRAC_PI_4);
+        let v = -self.b * lam;
+        let t = (self.cos_a * u.sin() + self.sin_a * u.cos() * v.cos()).asin();
+        let d = (u.cos() * v.sin() / t.cos()).asin();
+        let theta = self.n * d;
+        let r = self.r0 * self.tan_p / (t / 2.0 + FRAC_PI_4).tan().powf(self.n);
+        // Southing and westing, turned to easting and northing.
+        [-r * theta.sin(), -r * theta.cos()]
+    }
+    fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
+        let (xp, yp) = (-y, -x);
+        let r = hypot(xp, yp);
+        let d = yp.atan2(xp) / self.n;
+        let t = 2.0 * (((self.r0 / r).powf(1.0 / self.n) * self.tan_p.powf(1.0 / self.n)).atan() - FRAC_PI_4);
+        let u = (self.cos_a * t.sin() - self.sin_a * t.cos() * d.cos()).asin();
+        let v = (t.cos() * d.sin() / u.cos()).asin();
+        let k = self.t0.powf(-1.0 / self.b) * (u / 2.0 + FRAC_PI_4).tan().powf(1.0 / self.b);
+        let mut phi = u;
+        for _ in 0..30 {
+            let es = self.e * phi.sin();
+            let next = 2.0 * ((k * ((1.0 + es) / (1.0 - es)).powf(self.e / 2.0)).atan() - FRAC_PI_4);
+            let done = (next - phi).abs() < 1e-14;
+            phi = next;
+            if done {
+                break;
+            }
+        }
+        [-v / self.b, phi]
+    }
+}
+
+/// Cassini-Soldner (EPSG's series on the ellipsoid, exact on the sphere), as PROJ's cass. A local
+/// projection: the series diverge far from the central meridian.
+#[derive(Debug)]
+pub struct Cass {
+    el: Ellipsoid,
+    m: Meridian,
+    phi0: f64,
+    /// Meridian arc to the origin's latitude.
+    m0: f64,
+}
+
+impl Cass {
+    fn new(el: Ellipsoid, lat_0: f64) -> Cass {
+        let (m, phi0) = (Meridian::new(el), lat_0.to_radians());
+        Cass { el, m, phi0, m0: m.arc(phi0) }
+    }
+    fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
+        let a = self.el.a;
+        if self.el.e == 0.0 {
+            let x = (phi.cos() * lam.sin()).asin();
+            return [a * x, a * (phi.tan().atan2(lam.cos()) - self.phi0)];
+        }
+        let es = self.el.e * self.el.e;
+        let (s, c) = phi.sin_cos();
+        let nu = a / (1.0 - es * s * s).sqrt();
+        let tn = phi.tan();
+        let t = tn * tn;
+        let aa = lam * c;
+        let cc = es * c * c / (1.0 - es);
+        let a2 = aa * aa;
+        [
+            nu * aa * (1.0 - a2 * t * (1.0 / 6.0 + (8.0 - t + 8.0 * cc) * a2 / 120.0)),
+            self.m.arc(phi) - self.m0 + nu * tn * a2 * (0.5 + (5.0 - t + 6.0 * cc) * a2 / 24.0),
+        ]
+    }
+    fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
+        let a = self.el.a;
+        if self.el.e == 0.0 {
+            let (x, d) = (x / a, y / a + self.phi0);
+            return [x.tan().atan2(d.cos()), (d.sin() * x.cos()).asin()];
+        }
+        let es = self.el.e * self.el.e;
+        let phi1 = self.m.phi(self.m0 + y);
+        let tn = phi1.tan();
+        let t = tn * tn;
+        let s = phi1.sin();
+        let w = 1.0 - es * s * s;
+        let nu = a / w.sqrt();
+        let rho = a * (1.0 - es) / (w * w.sqrt());
+        let d = x / nu;
+        let d2 = d * d;
+        [
+            d * (1.0 + t * d2 * (-1.0 / 3.0 + (1.0 + 3.0 * t) * d2 / 15.0)) / phi1.cos(),
+            phi1 - nu * tn / rho * d2 * (0.5 - (1.0 + 3.0 * t) * d2 / 24.0),
+        ]
+    }
+}
+
 /// An EPSG conversion method: code, name, PROJ name, parameters as (code, PROJ key).
 type MethodDef = (u64, &'static str, &'static str, &'static [(u64, &'static str)]);
 
@@ -1349,6 +1490,21 @@ const METHODS: &[MethodDef] = &[
     ),
     (1125, "Azimuthal Equidistant", "aeqd", &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     (9840, "Orthographic", "ortho", &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
+    (
+        1041,
+        "Krovak (North Orientated)",
+        "krovak",
+        &[
+            (8811, "lat_0"),
+            (8833, "lon_0"),
+            (1036, "alpha"),
+            (8818, "lat_ts"),
+            (8819, "k_0"),
+            (8806, "x_0"),
+            (8807, "y_0"),
+        ],
+    ),
+    (9806, "Cassini-Soldner", "cass", &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     // PROJ's own methods and parameters, without EPSG codes (0: matched by name).
     (0, "Mollweide", "moll", &[(8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     (0, "Robinson", "robin", &[(8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
@@ -1383,6 +1539,9 @@ const PARAMETER_NAMES: &[(u64, &str)] = &[
     (8815, "Scale factor on initial line"),
     (8816, "Easting at projection centre"),
     (8817, "Northing at projection centre"),
+    (8818, "Latitude of pseudo standard parallel"),
+    (8819, "Scale factor on pseudo standard parallel"),
+    (1036, "Co-latitude of cone axis"),
     (8821, "Latitude of false origin"),
     (8822, "Longitude of false origin"),
     (8823, "Latitude of 1st standard parallel"),
@@ -1432,8 +1591,8 @@ fn proj_string(mut crs: &J) -> Result<String, Error> {
         l => in_unit(l["value"].as_f64().unwrap_or(f64::NAN), &l["unit"])?,
     };
     let el = &datum["ellipsoid"];
-    // ponytail: ellipsoid lengths are taken as metres.
-    let len = |v: &J| v.as_f64().or(v["value"].as_f64());
+    // Lengths in metres, or with their unit.
+    let len = |v: &J| v.as_f64().or_else(|| in_unit(v["value"].as_f64()?, &v["unit"]).ok());
     let ellipsoid = match (
         len(&el["radius"]),
         len(&el["semi_major_axis"]),
@@ -1659,7 +1818,8 @@ mod tests {
         // Himawari's far side of the Earth.
         let geos = Projection::from_proj_string("+proj=geos +h=35785863 +lon_0=140.7 +a=6378137 +b=6356752.3").unwrap();
         assert!(geos.forward(-40.0, 0.0)[0].is_nan() && geos.inverse([6.0e6, 0.0]).is_none());
-        assert!(Projection::parse(&projected("Krovak (North Orientated)", WGS84, &[])).is_err());
+        // Krovak with southing and westing axes.
+        assert!(Projection::parse(&projected("Krovak", WGS84, &[])).is_err());
         // Past the Equal Earth outline.
         assert!(
             Projection::from_proj_string("+proj=eqearth +a=6378137 +rf=298.257223563")
@@ -1849,6 +2009,36 @@ mod tests {
                 [-3296892.539782466, -8885139.87193687],
             ),
             ("+proj=sinu +lon_0=-60 +R=6371007.181", [10.0, 20.0], [7314241.8867256, 2223901.039533046]),
+            (
+                "+proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k_0=0.9999 +x_0=0 +y_0=0 +a=6377397.155 +rf=299.1528128",
+                [14.42, 50.09],
+                [-742949.430991364, -1042796.9661625588],
+            ),
+            (
+                "+proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k_0=0.9999 +x_0=0 +y_0=0 +a=6377397.155 +rf=299.1528128",
+                [21.26, 48.72],
+                [-262783.2672881957, -1239668.5147915953],
+            ),
+            (
+                "+proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k_0=0.9999 +x_0=0 +y_0=0 +a=6377397.155 +rf=299.1528128",
+                [12.1, 50.2],
+                [-904966.7597106425, -1005557.7978329073],
+            ),
+            (
+                "+proj=cass +lat_0=2.04258333333333 +lon_0=103.562758333333 +x_0=-14810.562 +y_0=8758.32 +a=6378137 +rf=298.257222101",
+                [103.76, 1.48],
+                [7139.00410969019, -53448.5439719868],
+            ),
+            (
+                "+proj=cass +lat_0=2.04258333333333 +lon_0=103.562758333333 +x_0=-14810.562 +y_0=8758.32 +a=6378137 +rf=298.257222101",
+                [103.2, 2.5],
+                [-55154.4565815896, 59343.20801807112],
+            ),
+            (
+                "+proj=cass +lat_0=10.4416666666667 +lon_0=-61.3333333333333 +x_0=86501.46392052 +y_0=65379.0134283 +R=6371000",
+                [-61.5, 10.65],
+                [68288.20937297426, 88549.51877392016],
+            ),
             ("+proj=robin +lon_0=0 +a=6378137 +rf=298.257223563", [37.3, -90.0], [1875465.5798042065, -8625154.6651]),
             ("+proj=robin +lon_0=0 +a=6378137 +rf=298.257223563", [37.3, 90.0], [1875465.5798042065, 8625154.6651]),
             (
@@ -2158,7 +2348,7 @@ mod tests {
     #[test]
     fn projjson_of_proj_matches_proj() {
         // PROJJSON from PROJ 9.8.1 (US survey feet, the Paris meridian in grads, a bound CRS, a
-        // compound CRS, the methods without PROJ strings above), and its `Proj` of each.
+        // compound CRS, Clarke's links, the methods without PROJ strings above), and its `Proj` of each.
         let cases: Vec<(J, [f64; 2], [f64; 2])> = serde_json::from_str(include_str!("projjson_cases.json")).unwrap();
         for (crs, lnglat, xy) in cases {
             let p = Projection::parse(&crs.to_string()).unwrap();
