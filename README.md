@@ -197,6 +197,13 @@ GL JS evaluates the style at its own zoom on the projected grid, and hillshade s
 CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`). PROJ strings and WKT are not accepted. You can get PROJJSON from `projinfo -o PROJJSON -q EPSG:32654`, for example.
 
 - **Supported methods:** longlat, Transverse Mercator (UTM, national grids), Mercator (including Web Mercator), Lambert Conformal Conic, Albers Equal Area, Equidistant Conic, Polar Stereographic, Oblique Stereographic, Hotine Oblique Mercator (variants A and B), Krovak (North Orientated), Lambert Azimuthal Equal Area, Lambert Cylindrical Equal Area, Equidistant Cylindrical, Cassini-Soldner, American Polyconic, Orthographic, Equal Earth, Mollweide, Robinson, Sinusoidal, Natural Earth, Winkel Tripel, Miller Cylindrical and Geostationary Satellite (geos), including EPSG's spherical variants. Any ellipsoid works. Units must be meters and the prime meridian Greenwich. Results match PROJ 9.8 within a micrometre, except Cassini-Soldner, which follows EPSG's series (within 0.2 mm 1° from the central meridian).
+- **TODO, not supported yet:**
+  - Azimuthal Equidistant (EPSG 1125, 9832) and Gnomonic: on an ellipsoid PROJ computes them with geodesics, which need a geodesic solver.
+  - South-orientated axes: Transverse Mercator (South Orientated) (EPSG 9808) and Krovak (EPSG 9819, southing/westing). Krovak (North Orientated) works.
+  - Interrupted projections such as Interrupted Goode Homolosine.
+  - Other PROJ methods not listed above, such as Bonne, Van der Grinten, Eckert, Hammer and Aitoff.
+  - Prime meridians other than Greenwich (e.g. Ferro, Paris) and axis units other than meters.
+  - Exact Cassini-Soldner (as PROJ 9) in place of EPSG's series.
 - **No datum transformations.** Style coordinates (WGS84) are projected as if they were lng/lat on the CRS's ellipsoid.
 - **Axis order:** always easting first, then northing (longitude, latitude), whatever the CRS's declared axis order.
 - **How layers are drawn:** background, fill, line, circle, heatmap and symbol layers are drawn from projected vertices directly into the output. Pixel lengths such as line widths, circle radii and text sizes stay constant on screen. raster, hillshade and color-relief layers are drawn in Web Mercator and warped onto a mesh. Areas outside the projection's domain are transparent.
