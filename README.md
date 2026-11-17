@@ -6,7 +6,7 @@
 
 - **No GPU, no native dependencies.** It is a software rasterizer in pure Rust. It runs on `wasm32-unknown-unknown` and links no C libraries.
 - **Faithful to MapLibre.** Bucket building, shader math and quantization are ported from MapLibre GL JS. It passes 98.0% of the applicable upstream render tests at GL JS's own tolerances ([conformance](#conformance)).
-- **Any projected CRS.** It draws maps directly in a CRS given as PROJJSON: UTM, national grids, LAEA, polar stereographic, Equal Earth, geostationary views and more.
+- **Any projected CRS.** It draws maps directly in a CRS given as PROJJSON: UTM, national grids (including US State Plane in feet), Albers, LAEA, polar and oblique stereographic, Mollweide, Robinson, orthographic and geostationary views and more.
 - **MapLibre GL JS in any CRS.** Every source of a style (vector tiles, GeoJSON, raster, DEM) can be reprojected and served on a CRS's tile grid. MapLibre GL JS can then draw the original style in that CRS, with interaction and feature queries.
 - **Made for serverless.** The core does no network or file I/O; the host fetches everything.
 
@@ -192,9 +192,9 @@ GL JS evaluates the style at its own zoom on the projected grid, and hillshade s
 
 ## Projected coordinate reference systems
 
-CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`). PROJ strings and WKT are not accepted. You can get PROJJSON from `projinfo -o PROJJSON -q EPSG:32654`, for example.
+CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`, or a `BoundCRS` or `CompoundCRS` of one, whose datum shift and vertical part are ignored). PROJ strings and WKT are not accepted. You can get PROJJSON from `projinfo -o PROJJSON -q EPSG:32654`, for example.
 
-- **Supported methods:** longlat, Transverse Mercator (UTM, national grids), Mercator (including Web Mercator), Lambert Conformal Conic, Polar Stereographic, Lambert Azimuthal Equal Area, Equal Earth and Geostationary Satellite (geos). Any ellipsoid works. Units must be meters and the prime meridian Greenwich.
+- **Supported methods:** longlat, Transverse Mercator (UTM, national grids), Mercator (including Web Mercator), Lambert Conformal Conic, Albers Equal Area, Polar and Oblique Stereographic, Hotine Oblique Mercator (variants A and B), Lambert Azimuthal Equal Area, Azimuthal Equidistant, Orthographic, Equidistant Cylindrical, Equal Earth, Mollweide, Robinson, Sinusoidal and Geostationary Satellite (geos). Any ellipsoid, linear unit (e.g. US survey feet) and prime meridian works. A geographic CRS must use degrees from Greenwich. Formulas follow PROJ.
 - **No datum transformations.** Style coordinates (WGS84) are projected as if they were lng/lat on the CRS's ellipsoid.
 - **Axis order:** always easting first, then northing (longitude, latitude), whatever the CRS's declared axis order.
 - **How layers are drawn:** background, fill, line, circle, heatmap and symbol layers are drawn from projected vertices directly into the output. Pixel lengths such as line widths, circle radii and text sizes stay constant on screen. raster, hillshade and color-relief layers are drawn in Web Mercator and warped onto a mesh. Areas outside the projection's domain are transparent.
