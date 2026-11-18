@@ -16,7 +16,6 @@
     "text-field/formatted-arabic",
     "text-field/formatted-images",
     "text-local-glyphs/complex-script",
-    "text-variable-anchor/rotated-offset",
     "text-writing-mode/point_label/cjk-arabic-vertical-mode",
     "visibility/symbol/visible"
   ],

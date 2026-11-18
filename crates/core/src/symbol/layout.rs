@@ -993,8 +993,9 @@ impl Builder<'_> {
             num_vertical_glyph_vertices,
             num_icon_vertices,
             collision_circle_diameter: circle_diameter,
-            text_box_scale: c.text_box_scale,
-            anchor_offsets: c.variable.clone().unwrap_or_default(),
+            // `SymbolInstanceArray.textBoxScale` and `TextAnchorOffsetArray.textOffset` are Float32.
+            text_box_scale: c.text_box_scale as f32 as f64,
+            anchor_offsets: c.variable.iter().flatten().map(|(a, o)| (a.clone(), o.map(|v| v as f32 as f64))).collect(),
         });
     }
 
