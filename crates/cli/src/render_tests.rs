@@ -90,7 +90,7 @@ pub fn run(root: &Path, filter: Option<&str>) {
     let ids = |status: &str| -> Vec<String> {
         results.iter().filter(|r| r["status"] == status).map(|r| r["id"].as_str().unwrap().to_string()).collect()
     };
-    crate::check_known_failures("render", &ids("fail"), &ids("pass"));
+    crate::check_known_failures("render", &ids("fail"), &ids("pass"), &out_dir.join("summary.md"));
 }
 
 /// The outcome, and a hash of the compared RGBA (to check that an optimization keeps the output
@@ -211,11 +211,15 @@ fn render(
     r.render().map_err(|e| e.to_string())
 }
 
-/// `local://x` and the upstream harness server `http://localhost:2900/x` both map to assets/x.
+/// `local://x` and the upstream harness server `http://localhost:2900/x` both map to assets/x;
+/// other `https://host/x` (fetched from the network upstream) to remote/host/x (scripts/fetch-fixtures.sh).
 fn local_path(url: &str, assets: &Path) -> Option<std::path::PathBuf> {
-    let rel = url.strip_prefix("local://").or_else(|| url.strip_prefix("http://localhost:2900/"))?;
+    let (dir, rel) = match url.strip_prefix("local://").or_else(|| url.strip_prefix("http://localhost:2900/")) {
+        Some(rel) => (assets.to_path_buf(), rel),
+        None => (assets.parent()?.join("remote"), url.strip_prefix("https://")?),
+    };
     let rel = rel.split(['?', '#']).next().unwrap();
-    Some(assets.join(percent_decode(rel)))
+    Some(dir.join(percent_decode(rel)))
 }
 
 fn percent_decode(s: &str) -> String {

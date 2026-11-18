@@ -2,11 +2,9 @@
   "_doc": "Tests that fail today (see AGENTS.md, known unsupported). The runners exit with 1 on any failure not listed here; remove an entry once it passes.",
   "render": [
     "combinations/symbol-translucent--fill-translucent",
-    "geometry-type/all-geometries",
     "is-supported-script/filter",
     "is-supported-script/layout",
     "regressions/mapbox-gl-native#11729",
-    "symbol-placement/line-overlap",
     "symbol-placement/point-polygon-high-zoom",
     "text-arabic/letter-spacing",
     "text-arabic/line-break",
@@ -18,7 +16,6 @@
     "text-field/formatted-arabic",
     "text-field/formatted-images",
     "text-local-glyphs/complex-script",
-    "text-variable-anchor/rotated-offset",
     "text-writing-mode/point_label/cjk-arabic-vertical-mode",
     "visibility/symbol/visible"
   ],

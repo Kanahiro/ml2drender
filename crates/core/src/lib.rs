@@ -1648,10 +1648,10 @@ mod tests {
         };
         let a = layers("a", child);
         assert!(Rc::ptr_eq(&a, &layers("a", child)));
-        assert_eq!(a[0].features[0].geometry, vec![vec![[2048, 2048]]]);
+        assert_eq!(a[0].features[0].geometry, vec![vec![[4096, 4096]]]);
         let b = layers("b", child);
         assert!(!Rc::ptr_eq(&a, &b));
-        assert_eq!(b[0].features[0].geometry, vec![vec![[1024, 2048]]]);
+        assert_eq!(b[0].features[0].geometry, vec![vec![[2048, 4096]]]);
 
         // A sibling uses the same parent but needs its own clipping and coordinates.
         let sibling = layers("a", TileId { z: 2, x: 0, y: 1 });

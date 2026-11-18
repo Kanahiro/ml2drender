@@ -291,15 +291,18 @@ fn inflate_gzip(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// MapLibre's overzoom slicing (`sliceVectorTileLayer`): a child tile below the source's
-/// maxzoom is cut out of the parent tile, rescaled to the same extent, clipped with a buffer
-/// and round-tripped through MVT encoding (whose deltas are truncated to integers).
+/// maxzoom is cut out of the parent tile, rescaled to the same extent and clipped with a buffer.
+/// The buckets read these float coordinates (not the re-encoded MVT, which only feeds queries),
+/// so they are rounded as `loadGeometry` does, at EXTENT to keep the precision of that rounding.
 pub fn slice_layer(layer: &Layer, parent: crate::tile::TileId, target: crate::tile::TileId) -> Layer {
+    const EXTENT: f64 = 8192.0;
     let extent = layer.extent as f64;
     let scale = (1u64 << (target.z - parent.z)) as f64;
     let ox = (target.x as f64 - parent.x as f64 * scale) * extent;
     let oy = (target.y as f64 - parent.y as f64 * scale) * extent;
     let buffer = 128f64.max((128.0 * extent / 4096.0).round());
     let (lo, hi) = (-buffer, extent + buffer);
+    let to_extent = EXTENT / extent;
     let mut features = Vec::new();
     for f in &layer.features {
         let geom: Vec<Vec<[f64; 2]>> = f
@@ -311,46 +314,15 @@ pub fn slice_layer(layer: &Layer, parent: crate::tile::TileId, target: crate::ti
         if clipped.is_empty() {
             continue;
         }
+        let round = |v: f64| crate::expression::value::js_round(v * to_extent) as i32;
         features.push(Feature {
             id: f.id.clone(),
             ty: f.ty,
             properties: f.properties.clone(),
-            geometry: reencode(&clipped, f.ty),
+            geometry: clipped.iter().map(|r| r.iter().map(|p| [round(p[0]), round(p[1])]).collect()).collect(),
         });
     }
-    Layer { name: layer.name.clone(), extent: layer.extent, features }
-}
-
-/// vt-pbf `writeGeometry` + decode: each delta is truncated (`zigzag` uses int32 ops)
-/// while the encoder's cursor tracks the exact float position.
-fn reencode(geom: &[Vec<[f64; 2]>], ty: GeomType) -> Vec<Vec<[i32; 2]>> {
-    let (mut fx, mut fy) = (0.0f64, 0.0f64);
-    let (mut ix, mut iy) = (0i64, 0i64);
-    let mut out = Vec::new();
-    for ring in geom {
-        let closed = ty == GeomType::Polygon && ring.len() > 1 && ring[0] == ring[ring.len() - 1];
-        let n = if closed { ring.len() - 1 } else { ring.len() };
-        let mut r = Vec::with_capacity(ring.len());
-        for p in &ring[..n] {
-            let (dx, dy) = (p[0] - fx, p[1] - fy);
-            ix += dx as i32 as i64;
-            iy += dy as i32 as i64;
-            fx += dx;
-            fy += dy;
-            r.push([ix as i32, iy as i32]);
-        }
-        if ty == GeomType::Polygon
-            && let Some(&first) = r.first()
-        {
-            r.push(first);
-        }
-        if ty == GeomType::Point {
-            out.extend(r.into_iter().map(|p| vec![p]));
-        } else {
-            out.push(r);
-        }
-    }
-    out
+    Layer { name: layer.name.clone(), extent: EXTENT as u32, features }
 }
 
 /// `clipGeometryOnAxis` (symbol/clip_line.ts).

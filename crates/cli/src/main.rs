@@ -55,16 +55,26 @@ fn read_json(path: &Path) -> serde_json::Value {
 
 /// Exits with 1 if a test outside `tests/known-failures.json` failed, so CI catches regressions
 /// while the known failures stay as they are.
-fn check_known_failures(suite: &str, failed: &[String], passed: &[String]) {
+/// Compares with tests/known-failures.json, appends the differences to `summary` (summary.md) and
+/// exits with 1 on a failure that is not listed.
+fn check_known_failures(suite: &str, failed: &[String], passed: &[String], summary: &Path) {
     let known = read_json(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/known-failures.json"));
     let known: Vec<&str> = known[suite].as_array().into_iter().flatten().filter_map(|v| v.as_str()).collect();
     let fixed: Vec<&str> = passed.iter().map(String::as_str).filter(|id| known.contains(id)).collect();
-    if !fixed.is_empty() {
-        eprintln!("now passing, remove from tests/known-failures.json:\n  {}", fixed.join("\n  "));
-    }
     let new: Vec<&str> = failed.iter().map(String::as_str).filter(|id| !known.contains(id)).collect();
+    let mut md = String::new();
     if !new.is_empty() {
-        eprintln!("{} new {suite} test failure(s):\n  {}", new.len(), new.join("\n  "));
+        md += &format!("\n### {} new failure(s) (not in tests/known-failures.json)\n\n", new.len());
+        md += &new.iter().map(|id| format!("- `{id}`\n")).collect::<String>();
+    }
+    if !fixed.is_empty() {
+        md += &format!("\n### {} now passing (remove from tests/known-failures.json)\n\n", fixed.len());
+        md += &fixed.iter().map(|id| format!("- `{id}`\n")).collect::<String>();
+    }
+    eprint!("{md}");
+    let mut file = std::fs::OpenOptions::new().append(true).open(summary).unwrap();
+    std::io::Write::write_all(&mut file, md.as_bytes()).unwrap();
+    if !new.is_empty() {
         std::process::exit(1);
     }
 }
