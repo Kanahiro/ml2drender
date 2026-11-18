@@ -96,6 +96,17 @@ export interface ProjectedBox {
 /**
  * The tile grid of a CRS, which a CRS does not have by itself: MapLibre GL JS's (`addProjection`), or an OGC 2D
  * TileMatrixSet.
+ *
+ * Which to use:
+ * - {@link QuadTileMatrixSet} when the tiles are shown by MapLibre GL JS: pass the `tileMatrixSet` given to its
+ *   `addProjection` (GL JS takes only this form, so it is the one for `getTile` tiles GL JS reads). Its zoom levels
+ *   have no limit.
+ * - {@link OgcTileMatrixSet} for a published grid (a TileMatrixSet registry, an OGC API - Tiles server, a national
+ *   grid) and for grids GL JS's form cannot describe: levels whose scales are not halved each time, tiles that are
+ *   not square or not 2^z × 2^z, a fixed list of levels.
+ *
+ * Any GL JS grid is also the OGC set whose level z has 512 × 512 px tiles, `cellSize` = `extentAtZoom0 / 512 / 2^z`
+ * and 2^z × 2^z tiles from `origin`; the two render the same tiles.
  */
 export type TileMatrixSet = QuadTileMatrixSet | OgcTileMatrixSet;
 

@@ -28,6 +28,13 @@ class TileMatrixSet(NamedTuple):
 
     Tile 0/0/0 is the square of side ``extent_at_zoom0`` whose top-left corner is ``origin``
     (min x, max y), in CRS units. Each zoom splits every tile in four; x grows east, y south.
+
+    Use it when the tiles are shown by MapLibre GL JS, with the grid given to its
+    ``addProjection``. For a published grid (a TileMatrixSet registry, an OGC API - Tiles
+    server, a national grid), or one this form cannot describe (scales not halved at each
+    level, tiles not square or not 2^z x 2^z, a fixed list of levels), pass an OGC 2D
+    TileMatrixSet as a dict instead. A ``TileMatrixSet`` is the OGC set whose level z has
+    512 x 512 px tiles, ``cellSize`` = ``extent_at_zoom0 / 512 / 2**z`` and 2^z x 2^z tiles.
     """
 
     origin: tuple[float, float]
