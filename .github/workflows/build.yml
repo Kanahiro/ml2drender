@@ -42,8 +42,19 @@ jobs:
       - run: test -d fixtures/render || sh scripts/fetch-fixtures.sh
       - run: cargo test --release --locked
       # Upstream fixtures: fails on any failure outside crates/cli/tests/known-failures.json.
-      - run: cargo run --release --locked -p ml2drender-cli -- expression-tests
-      - run: cargo run --release --locked -p ml2drender-cli -- render-tests
+      - id: expression
+        run: cargo run --release --locked -p ml2drender-cli -- expression-tests
+      - id: render
+        if: ${{ !cancelled() && steps.expression.conclusion != 'skipped' }}
+        run: cargo run --release --locked -p ml2drender-cli -- render-tests
+      # The summaries become the job summary, and ci.yml posts them on the pull request.
+      - if: ${{ !cancelled() && steps.expression.conclusion != 'skipped' }}
+        run: cat target/test-report/*/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - if: ${{ !cancelled() && steps.expression.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-summary
+          path: target/test-report/*/summary.md
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

@@ -90,7 +90,7 @@ pub fn run(root: &Path, filter: Option<&str>) {
     let ids = |status: &str| -> Vec<String> {
         results.iter().filter(|r| r["status"] == status).map(|r| r["id"].as_str().unwrap().to_string()).collect()
     };
-    crate::check_known_failures("render", &ids("fail"), &ids("pass"));
+    crate::check_known_failures("render", &ids("fail"), &ids("pass"), &out_dir.join("summary.md"));
 }
 
 /// The outcome, and a hash of the compared RGBA (to check that an optimization keeps the output

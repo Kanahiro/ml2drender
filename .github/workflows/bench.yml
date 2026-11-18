@@ -57,7 +57,7 @@ jobs:
         run: |
           test -s bench.md || echo "ベンチマークが完了しませんでした。ジョブのログを確認してください。" > bench.md
           cat bench.md >> "$GITHUB_STEP_SUMMARY"
-          if [ "$COMMENT" = true ]; then gh pr comment ${{ github.event.pull_request.number }} --edit-last --create-if-none --body-file bench.md; fi
+          if [ "$COMMENT" = true ]; then sh scripts/pr-comment.sh ${{ github.event.pull_request.number }} bench bench.md; fi
       - name: Fail on regression
         if: steps.bench.outcome == 'failure'
         run: |

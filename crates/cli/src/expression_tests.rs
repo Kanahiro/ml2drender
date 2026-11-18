@@ -53,7 +53,7 @@ pub fn run(root: &Path, filter: Option<&str>) {
     fs::write(out_dir.join("failures.json"), serde_json::to_string_pretty(&results).unwrap()).unwrap();
     eprintln!("report: {}", out_dir.display());
     let failed: Vec<String> = results.iter().map(|r| r["id"].as_str().unwrap().to_string()).collect();
-    crate::check_known_failures("expression", &failed, &passed);
+    crate::check_known_failures("expression", &failed, &passed, &out_dir.join("summary.md"));
 }
 
 fn evaluate_fixture(fixture: &Value) -> Value {
