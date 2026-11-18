@@ -492,6 +492,9 @@ impl Renderer {
         let zoom = v.zoom.clamp(tile::MIN_ZOOM, max_zoom);
         self.transform = Transform::new(v.center, zoom, v.bearing, v.width as f64, v.height as f64, v.pixel_ratio);
         self.transform.set_margin(v.margin);
+        if let Some((_, warp)) = &self.projected {
+            self.transform.pixel_ratio = warp.picture_ratio;
+        }
     }
 
     /// Moves the camera. Fetched resources and the layer buckets built from them are kept (up
@@ -539,6 +542,8 @@ impl Renderer {
         if let Some(mercator) = mercator {
             self.set_view(mercator);
         }
+        // The Mercator picture's resolution; vertices are drawn at the output's (`reprojected`).
+        self.transform.pixel_ratio = warp.picture_ratio;
         self.projected = Some((view.clone(), Rc::new(warp)));
         Ok(())
     }
@@ -783,6 +788,12 @@ impl Renderer {
             _ => return vec![],
         };
         let raster = matches!(src.ty.as_str(), "raster" | "raster-dem");
+        // Rasters and DEMs at the resolution of a projected view's Mercator picture, which may be
+        // coarser than the output (`Warp::picture_ratio`).
+        let tile_size = match &self.projected {
+            Some((_, w)) if raster && w.picture_ratio != w.pixel_ratio => tile_size * w.pixel_ratio / w.picture_ratio,
+            _ => tile_size,
+        };
         let z = self.transform.covering_zoom(tile_size, raster);
         if z < minzoom as i32 {
             return vec![];
@@ -2621,6 +2632,38 @@ mod tests {
         for x in 6..58 {
             assert_eq!(rgba[(16 * 64 + x) * 4 + 3], 255, "x {x}");
         }
+    }
+
+    #[test]
+    fn coarse_projected_pictures_still_cover_the_view() {
+        // Near the pole the Mercator picture would be far larger than the output: it is drawn at a
+        // lower pixel ratio, still covering the view up to 85°N.
+        let style = r##"{"version":8,"sources":{"i":{"type":"image","url":"/i.png","coordinates":[[-180,85],[180,85],[180,60],[-180,60]]}},
+            "layers":[{"id":"r","type":"raster","source":"i","paint":{"raster-fade-duration":0}}]}"##;
+        let png = encode_png(&[255, 0, 0, 255].repeat(16), 4, 4).unwrap();
+        let view = reproject::ProjectedView {
+            projjson: test_crs::projected(
+                "Polar Stereographic (variant B)",
+                test_crs::WGS84,
+                &[("Latitude of standard parallel", 70.0), ("Longitude of origin", -45.0)],
+            ),
+            bbox: [0.0, -500e3, 500e3, 0.0],
+            bearing: 0.0,
+            width: 256,
+            height: 256,
+            pixel_ratio: 2.0,
+            margin: 0,
+        };
+        let mut r = Renderer::new(style, View::tile(0, 0, 0, 512)).unwrap();
+        r.set_projected_view(&view).unwrap();
+        assert!(r.transform.pixel_ratio < 2.0);
+        for need in r.needs() {
+            r.provide(&need.url, Some(&png));
+        }
+        let rgba = r.render().unwrap();
+        // The pole (top-left corner) is off the Mercator map, about 700 km from it (83.6°N) is not.
+        assert_eq!(rgba[3], 0);
+        assert_eq!(rgba[(510 * 512 + 510) * 4..][..4], [255, 0, 0, 255]);
     }
 
     #[test]

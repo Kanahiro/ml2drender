@@ -102,7 +102,8 @@ impl Transform {
     /// from vertices (background, fill, line, circle, heatmap, symbol).
     pub fn reprojected(&self, warp: std::rc::Rc<crate::reproject::Warp>) -> Transform {
         let [width, height] = warp.css_size;
-        Transform { width, height, viewport_size: [width, height], warp: Some(warp), ..self.clone() }
+        let pixel_ratio = warp.pixel_ratio;
+        Transform { width, height, viewport_size: [width, height], pixel_ratio, warp: Some(warp), ..self.clone() }
     }
 
     /// Whether world positions map to a projected output (`reprojected`), where straight

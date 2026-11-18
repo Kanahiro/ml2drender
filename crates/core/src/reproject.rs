@@ -237,6 +237,9 @@ const MAX_SIZE: usize = 16384;
 /// interpolated bilinearly between exactly inverse-projected nodes.
 const GRID: usize = 8;
 
+/// Bound of the Mercator picture's area, in output areas.
+const MAX_PICTURE_AREA: f64 = 16.0;
+
 /// A projected view's mapping to and from the Web Mercator render.
 #[derive(Debug)]
 pub struct Warp {
@@ -261,6 +264,11 @@ pub struct Warp {
     central_x: Option<f64>,
     /// `pixel_world`, computed once.
     pixels: std::cell::OnceCell<Vec<[f64; 2]>>,
+    /// Device pixels per CSS pixel of the output.
+    pub pixel_ratio: f64,
+    /// Device pixels per CSS pixel of the Mercator picture (rasters and DEMs): the output's, or
+    /// less where the picture would otherwise exceed `MAX_PICTURE_AREA` times the output.
+    pub picture_ratio: f64,
 }
 
 impl Warp {
@@ -310,6 +318,8 @@ impl Warp {
             reference_lng: 0.0,
             central_x: None,
             pixels: Default::default(),
+            pixel_ratio: view.pixel_ratio,
+            picture_ratio: view.pixel_ratio,
         };
         let in_domain = |x: f64, y: f64| warp.lnglat(x, y);
         // Nodes by distance from the center, sorted only if the center is not in the domain.
@@ -333,33 +343,31 @@ impl Warp {
         // The zoom styles are evaluated and tiles are chosen at: CRS units per pixel read as Web
         // Mercator at the equator (OGC scale denominators), so all tiles of a grid level share it
         // wherever they are. A local scale would change across the view and seam neighboring tiles.
-        let mut zoom = (warp.proj.units_per_turn() / (512.0 * (ux * uy).sqrt() * view.pixel_ratio)).log2();
+        let zoom = (warp.proj.units_per_turn() / (512.0 * (ux * uy).sqrt() * view.pixel_ratio)).log2();
+        let zoom = zoom.max(tile::MIN_ZOOM);
         // The nodes' box along the axes of the Mercator view, which has the view's bearing.
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
         for n in nodes.iter().filter(|n| n[0].is_finite()) {
             let r = [n[0] * cos - n[1] * sin, n[0] * sin + n[1] * cos];
             (x0, y0, x1, y1) = (x0.min(r[0]), y0.min(r[1]), x1.max(r[0]), y1.max(r[1]));
         }
-        // ponytail: one zoom for the whole view; far from the center (e.g. continental views) the
-        // picture is resampled up or down. Bound the Mercator render to 16× the output area.
-        let css = |zoom: f64| [(x1 - x0) * 512.0 * 2f64.powf(zoom), (y1 - y0) * 512.0 * 2f64.powf(zoom)];
-        let [w, h] = css(zoom);
-        let max_area = 16.0 * css_size[0] * css_size[1];
-        if w * h > max_area {
-            zoom -= 0.5 * (w * h / max_area).log2();
-        }
-        // Sized for the zoom the view is clamped to, or the picture would not cover the view.
-        let zoom = zoom.max(tile::MIN_ZOOM);
-        let [w, h] = css(zoom);
+        let (w, h) = ((x1 - x0) * 512.0 * 2f64.powf(zoom), (y1 - y0) * 512.0 * 2f64.powf(zoom));
+        // ponytail: one picture resolution for the whole view; far from the center (e.g. continental
+        // or polar views) it is resampled up or down. Coarser instead of a lower zoom where it is
+        // large, so the zoom (and the vector tiles) stay the grid level's.
+        let max_area = MAX_PICTURE_AREA * css_size[0] * css_size[1];
+        let scale = if w * h > max_area { (max_area / (w * h)).sqrt() } else { 1.0 };
+        warp.picture_ratio = view.pixel_ratio * scale;
+        // A pixel of padding on each side for bilinear sampling (at least one of the picture's).
+        let pad = 2 * (1.0 / scale).ceil() as u32;
         let (rx, ry) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
         let (mx, my) = (rx * cos + ry * sin, ry * cos - rx * sin);
         let mercator = View {
             center: [mx * 360.0 - 180.0, tile::mercator_lat(my)],
             zoom,
             bearing: view.bearing,
-            // A pixel of padding on each side for bilinear sampling.
-            width: w.ceil() as u32 + 2,
-            height: h.ceil() as u32 + 2,
+            width: w.ceil() as u32 + pad,
+            height: h.ceil() as u32 + pad,
             pixel_ratio: view.pixel_ratio,
             margin: 0,
         };
@@ -1075,23 +1083,28 @@ mod tests {
 
     #[test]
     fn tiles_of_a_grid_level_share_their_zoom() {
-        // Polar stereographic tiles at 70°N and 71°N: their local Mercator scales differ.
-        let zoom = |y: f64| {
+        // Polar stereographic tiles at 70°N and 71°N: their local Mercator scales differ. Near the
+        // pole the Mercator picture is coarser instead (its area is bounded), not the zoom.
+        let warp = |x: f64, y: f64, side: f64| {
             let view = ProjectedView {
                 projjson: test_crs::projected(
                     "Polar Stereographic (variant B)",
                     test_crs::WGS84,
                     &[("Latitude of standard parallel", 70.0), ("Longitude of origin", -45.0)],
                 ),
-                bbox: [500e3, y, 550e3, y + 50e3],
+                bbox: [x, y, x + side, y + side],
                 bearing: 0.0,
                 width: 256,
                 height: 256,
                 pixel_ratio: 2.0,
                 margin: 64,
             };
-            Warp::new(&view).unwrap().1.unwrap().zoom
+            let (warp, mercator) = Warp::new(&view).unwrap();
+            (mercator.unwrap().zoom, warp.picture_ratio)
         };
-        assert_eq!(zoom(-2.2e6), zoom(-2.1e6));
+        assert_eq!(warp(500e3, -2.2e6, 50e3).0, warp(500e3, -2.1e6, 50e3).0);
+        let (far, near_pole) = (warp(500e3, -2.2e6, 500e3), warp(0.0, -500e3, 500e3));
+        assert_eq!(far, (near_pole.0, 2.0));
+        assert!(near_pole.1 < 2.0);
     }
 }
