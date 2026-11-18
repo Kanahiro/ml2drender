@@ -7,6 +7,11 @@ name: Build
 
 on:
   workflow_call:
+    inputs:
+      all-platforms:
+        description: Also build macOS and Windows (publish.yml). CI builds Linux only to save runner cost.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -112,12 +117,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest, platform: linux, arch: x64 }
-          - { os: ubuntu-24.04-arm, platform: linux, arch: arm64 }
-          - { os: macos-15-intel, platform: darwin, arch: x64 }
-          - { os: macos-latest, platform: darwin, arch: arm64 }
-          - { os: windows-latest, platform: win32, arch: x64 }
+        # macOS / Windows only with all-platforms (publish.yml): their runners cost the most.
+        include: >-
+          ${{ fromJSON(inputs.all-platforms && '[
+          { "os": "ubuntu-latest", "platform": "linux", "arch": "x64" },
+          { "os": "ubuntu-24.04-arm", "platform": "linux", "arch": "arm64" },
+          { "os": "macos-15-intel", "platform": "darwin", "arch": "x64" },
+          { "os": "macos-latest", "platform": "darwin", "arch": "arm64" },
+          { "os": "windows-latest", "platform": "win32", "arch": "x64" }
+          ]' || '[
+          { "os": "ubuntu-latest", "platform": "linux", "arch": "x64" },
+          { "os": "ubuntu-24.04-arm", "platform": "linux", "arch": "arm64" }
+          ]') }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:

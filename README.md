@@ -285,7 +285,7 @@ packages/ml2drender-node/  Node-API addon package
 examples/browser/          demo (Vite + MapLibre GL JS)
 ```
 
-You need Node.js (version in `.node-version`), pnpm (version in `packageManager`), Rust via rustup (version in `rust-toolchain.toml`), and uv for Python. CI (`.github/workflows/build.yml`) builds and tests every package on Linux, macOS and Windows; `publish.yml` publishes to npm and PyPI.
+You need Node.js (version in `.node-version`), pnpm (version in `packageManager`), Rust via rustup (version in `rust-toolchain.toml`), and uv for Python. CI (`.github/workflows/build.yml`) builds and tests every package on Linux (and on macOS and Windows when publishing); `publish.yml` publishes to npm and PyPI.
 
 Design constraints and conventions are described in [AGENTS.md](https://github.com/Kanahiro/ml2drender/blob/main/AGENTS.md) (in Japanese). Issues and pull requests are welcome. A change to rendering should keep `pnpm test:render` results unchanged, or explain why they change.
 
