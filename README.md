@@ -198,8 +198,10 @@ CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`, or a `BoundCRS` o
 
 - **Supported methods:** longlat, Transverse Mercator (UTM, national grids), Mercator (including Web Mercator), Lambert Conformal Conic, Albers Equal Area, Equidistant Conic, Polar and Oblique Stereographic, Hotine Oblique Mercator (variants A and B), Krovak (North Orientated), Lambert Azimuthal Equal Area, Azimuthal Equidistant, Lambert Cylindrical Equal Area, Equidistant Cylindrical, Cassini-Soldner, American Polyconic, Orthographic, Equal Earth, Mollweide, Robinson, Sinusoidal, Natural Earth, Winkel Tripel, Miller Cylindrical and Geostationary Satellite (geos), including EPSG's spherical variants. Any ellipsoid, linear unit (e.g. US survey feet) and prime meridian works. A geographic CRS must use degrees from Greenwich. Results match PROJ 9.8 within a micrometre, except Cassini-Soldner, which follows EPSG's series (within 0.2 mm 1° from the central meridian).
 - **TODO, not supported yet:**
-  - Gnomonic.
-  - South-orientated axes: Transverse Mercator (South Orientated) (EPSG 9808) and Krovak (EPSG 9819, southing/westing). Krovak (North Orientated) works.
+  - Gnomonic and Modified Azimuthal Equidistant (EPSG 9832).
+  - South- and west-orientated axes: Transverse Mercator (South Orientated) (EPSG 9808), Lambert Conic Conformal (West Orientated) (EPSG 9826) and Krovak (EPSG 9819, southing/westing). Krovak (North Orientated) works.
+  - Other EPSG variants: Mercator (variant C) (EPSG 1044), Polar Stereographic (variant C) (EPSG 9830), Lambert Conic Conformal (2SP Belgium) (EPSG 9803), (2SP Michigan) (EPSG 1051) and Near-Conformal (EPSG 9817), Krovak Modified (EPSG 1042, 1043), Hyperbolic Cassini-Soldner (EPSG 9833), Transverse Mercator Zoned Grid System (EPSG 9824).
+  - National and local methods: New Zealand Map Grid (EPSG 9811), Laborde Oblique Mercator (EPSG 9813), Guam Projection (EPSG 9831) and Vertical Perspective (EPSG 9838).
   - Interrupted projections such as Interrupted Goode Homolosine.
   - Other PROJ methods not listed above, such as Bonne, Van der Grinten, Eckert, Hammer and Aitoff.
   - Geographic CRSs with a prime meridian other than Greenwich or angles in units other than degrees.
