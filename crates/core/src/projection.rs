@@ -100,7 +100,8 @@ impl Projection {
         } else {
             el
         };
-        let lat_0 = num("lat_0")?.unwrap_or(0.0);
+        // A pole given in another angular unit may land an ulp or two past 90°.
+        let lat_0 = num("lat_0")?.unwrap_or(0.0).clamp(-90.0, 90.0);
         // Longitudes of the CRS are from its prime meridian, those given to `forward` from Greenwich.
         let pm = num("pm")?.unwrap_or(0.0);
         let lon_0 = num("lon_0")?.unwrap_or(0.0) + pm;
@@ -2667,6 +2668,14 @@ mod tests {
         let sphere = r#""semi_major_axis":6371000,"inverse_flattening":0"#;
         let p = Projection::parse(&projected("Transverse Mercator", sphere, &[])).unwrap();
         assert!(p.forward(1.0, 1.0).iter().all(|v| v.is_finite()));
+        // ESRI:102016's pole, in ESRI's degree (90 × 0.0174532925199433 rad is a little past 90°).
+        let degree = r#"{"type":"AngularUnit","name":"Degree","conversion_factor":0.0174532925199433}"#;
+        let polar_aeqd = projected("Azimuthal Equidistant", test_crs::WGS84, &[]).replace(
+            r#""parameters":[]"#,
+            &format!(r#""parameters":[{{"name":"Latitude of natural origin","value":90,"unit":{degree}}}]"#),
+        );
+        let p = Projection::parse(&polar_aeqd).unwrap();
+        assert!(p.forward(0.0, 45.0).iter().all(|v| v.is_finite()));
         // A pole a few ulps off 90° (degrees from radians) is still polar.
         let lat = (90f64.to_radians() * 1.0000000000000002).to_degrees();
         assert!(
