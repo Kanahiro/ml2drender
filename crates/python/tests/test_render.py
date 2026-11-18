@@ -100,9 +100,9 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         rgba = await crs.render(ml2drender.ProjectedBox(east, 64, pixel_ratio=2))
         self.assertEqual((at(rgba, 44, 32), at(rgba, 64, 32)), (red, white))
         # An unsupported CRS raises, and Mercator views still draw afterwards.
-        robinson = {"type": "ProjectedCRS", "conversion": {"method": {"name": "Robinson"}}}
+        bonne = {"type": "ProjectedCRS", "conversion": {"method": {"name": "Bonne"}}}
         with self.assertRaises(RuntimeError):
-            await renderer.projected(robinson).render(ml2drender.ProjectedBox((0, 0, 1, 1), 64))
+            await renderer.projected(bonne).render(ml2drender.ProjectedBox((0, 0, 1, 1), 64))
         with self.assertRaises(TypeError):  # PROJJSON is a dict, not a PROJ string
             renderer.projected("+proj=longlat")
         with self.assertRaises(TypeError):  # tiles and cameras need a grid
@@ -121,6 +121,10 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((at(rgba, 64, 52), at(rgba, 64, 32), at(rgba, 44, 32)), (red, white, white))
         with self.assertRaises(RuntimeError):
             await grid.render_tile(2, 4, 1)
+        # The same tile as an OGC TileMatrixSet's level, latitude first.
+        level = {"cellSize": 20 / 64, "pointOfOrigin": [62, 90], "tileWidth": 64, "tileHeight": 64}
+        ogc = {"orderedAxes": ["Lat", "Lon"], "tileMatrices": [{**level, "matrixWidth": 4, "matrixHeight": 4}]}
+        self.assertEqual(await renderer.projected(longlat, ogc).render_tile(0, 2, 1, tile_size=64), tile)
         mercator = await renderer.render_view(ml2drender.View((140.0, 37.0), 4.0, 64, 32))
         self.assertEqual(mercator[(16 * 64 + 32) * 4 :][:4], bytes(red))
 

@@ -6,7 +6,7 @@
 
 - **No GPU, no native dependencies.** It is a software rasterizer in pure Rust. It runs on `wasm32-unknown-unknown` and links no C libraries.
 - **Faithful to MapLibre.** Bucket building, shader math and quantization are ported from MapLibre GL JS. It passes 98.0% of the applicable upstream render tests at GL JS's own tolerances ([conformance](#conformance)).
-- **Any projected CRS.** It draws maps directly in a CRS given as PROJJSON: UTM, national grids (including US State Plane in feet), Albers, LAEA, polar and oblique stereographic, Mollweide, Robinson, orthographic and geostationary views and more.
+- **Any projected CRS.** It draws maps directly in a CRS given as PROJJSON: UTM, national grids (including US State Plane in feet), Albers, LAEA, polar and oblique stereographic, world maps (Equal Earth, Robinson, Mollweide, Winkel Tripel…), orthographic and geostationary views and more.
 - **MapLibre GL JS in any CRS.** Every source of a style (vector tiles, GeoJSON, raster, DEM) can be reprojected and served on a CRS's tile grid. MapLibre GL JS can then draw the original style in that CRS, with interaction and feature queries.
 - **Made for serverless.** The core does no network or file I/O; the host fetches everything.
 
@@ -155,11 +155,15 @@ A `RenderedImage` has:
 Returns a `ProjectedRenderer` that draws in `crs`. The original renderer is unchanged. `crs` has the same shape as a CRS registered with MapLibre GL JS's `addProjection`:
 
 - `projjson`: the CRS as PROJJSON. `render` of a box needs nothing else.
-- `tileMatrixSet`: `{ origin: [minX, maxY], extentAtZoom0 }`, required by `renderTile`, `getTile` and `renderView`. A CRS has no tile grid of its own, so tiles and zoom levels mean nothing without one. Tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`. Each zoom level splits every tile into four. x grows to the east and y to the south.
+- `tileMatrixSet`: required by `renderTile`, `getTile` and `renderView`. A CRS has no tile grid of its own, so tiles and zoom levels mean nothing without one. Either form works:
+  - `{ origin: [minX, maxY], extentAtZoom0 }`, MapLibre GL JS's grid (`addProjection`). Tile 0/0/0 is a square of side `extentAtZoom0` whose top-left corner is `origin`. Each zoom level splits every tile into four. x grows to the east and y to the south.
+  - An [OGC 2D TileMatrixSet](https://docs.ogc.org/is/17-083r4/17-083r4.html) (2.0, JSON), such as `WorldCRS84Quad` or a national grid with its own scales. `z` is an index of its `tileMatrices`, and `x`/`y` range over each level's `matrixWidth`/`matrixHeight`. `pointOfOrigin` is in the CRS's axis order (from `orderedAxes` when it says Lat/Lon or N/E, else from the PROJJSON), and `cornerOfOrigin: "bottomLeft"` counts rows up. Tiles that are not square render `tileSize` wide. `variableMatrixWidths` are not supported. GL JS's `addProjection` takes only the first form, so tiles from `getTile` that GL JS reads with `toStyle`'s style must be cut on that grid (`getTile` itself works with either form).
+
+  Which to use: the first when the tiles are shown by MapLibre GL JS (pass the `tileMatrixSet` given to `addProjection`), with no limit on zoom levels. An OGC set for a published grid (a TileMatrixSet registry, an OGC API - Tiles server, a national grid), or for one the first cannot describe: scales not halved at each level, tiles not square or not 2^z × 2^z, a fixed list of levels. A GL JS grid is also the OGC set whose level z has 512 × 512 px tiles, `cellSize` = `extentAtZoom0 / 512 / 2^z` and 2^z × 2^z tiles from `origin`.
 
 - `name`: the CRS's name in GL JS, required by `toStyle` only.
 
-Projected renders pick a zoom level from CRS units per CSS px, read on EPSG:3857's scale at the equator (the idea behind OGC scale denominators; for longlat, 360° is one trip around the world). That zoom drives style evaluation and source tile selection. It does not depend on position, so tiles of one grid zoom line up at their edges. At high latitudes the zoom is higher than a Mercator map of the same ground resolution would use. It is not the grid zoom given to `renderView`: the two agree only when `extentAtZoom0` is the width of EPSG:3857's world (about 40,075 km, or 360° for longlat).
+Projected renders pick a zoom level from CRS units per CSS px, read on EPSG:3857's scale at the equator (the idea behind OGC scale denominators; for longlat, 360° is one trip around the world). That zoom drives style evaluation and source tile selection. It does not depend on position, so tiles of one grid zoom line up at their edges. At high latitudes the zoom is higher than a Mercator map of the same ground resolution would use. It is not the grid zoom given to `renderView`: the two agree only when `extentAtZoom0` (or the width of a tile of an OGC set's first level) is the width of EPSG:3857's world (about 40,075 km, or 360° for longlat).
 
 Besides `renderView`, `render` and `renderTile`, it has two methods for MapLibre GL JS:
 
@@ -194,7 +198,16 @@ GL JS evaluates the style at its own zoom on the projected grid, and hillshade s
 
 CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`, or a `BoundCRS` or `CompoundCRS` of one, whose datum shift and vertical part are ignored). PROJ strings and WKT are not accepted. You can get PROJJSON from `projinfo -o PROJJSON -q EPSG:32654`, for example.
 
-- **Supported methods:** longlat, Transverse Mercator (UTM, national grids), Mercator (including Web Mercator), Lambert Conformal Conic, Albers Equal Area, Polar and Oblique Stereographic, Hotine Oblique Mercator (variants A and B), Krovak (North Orientated), Cassini-Soldner, Lambert Azimuthal Equal Area, Azimuthal Equidistant, Orthographic, Equidistant Cylindrical, Equal Earth, Mollweide, Robinson, Sinusoidal and Geostationary Satellite (geos). Any ellipsoid, linear unit (e.g. US survey feet) and prime meridian works. A geographic CRS must use degrees from Greenwich. Formulas follow PROJ.
+- **Supported methods:** longlat, Transverse Mercator (UTM, national grids), Mercator (including Web Mercator), Lambert Conformal Conic, Albers Equal Area, Equidistant Conic, Polar and Oblique Stereographic, Hotine Oblique Mercator (variants A and B), Krovak (North Orientated), Lambert Azimuthal Equal Area, Azimuthal Equidistant, Lambert Cylindrical Equal Area, Equidistant Cylindrical, Cassini-Soldner, American Polyconic, Orthographic, Equal Earth, Mollweide, Robinson, Sinusoidal, Natural Earth, Winkel Tripel, Miller Cylindrical and Geostationary Satellite (geos), including EPSG's spherical variants. Any ellipsoid, linear unit (e.g. US survey feet) and prime meridian works. A geographic CRS must use degrees from Greenwich. Results match PROJ 9.8 within a micrometre, except Cassini-Soldner, which follows EPSG's series (within 0.2 mm 1° from the central meridian).
+- **TODO, not supported yet:**
+  - Gnomonic and Modified Azimuthal Equidistant (EPSG 9832).
+  - South- and west-orientated axes: Transverse Mercator (South Orientated) (EPSG 9808), Lambert Conic Conformal (West Orientated) (EPSG 9826) and Krovak (EPSG 9819, southing/westing). Krovak (North Orientated) works.
+  - Other EPSG variants: Mercator (variant C) (EPSG 1044), Polar Stereographic (variant C) (EPSG 9830), Lambert Conic Conformal (2SP Belgium) (EPSG 9803), (2SP Michigan) (EPSG 1051) and Near-Conformal (EPSG 9817), Krovak Modified (EPSG 1042, 1043), Hyperbolic Cassini-Soldner (EPSG 9833), Transverse Mercator Zoned Grid System (EPSG 9824).
+  - National and local methods: New Zealand Map Grid (EPSG 9811), Laborde Oblique Mercator (EPSG 9813), Guam Projection (EPSG 9831) and Vertical Perspective (EPSG 9838).
+  - Interrupted projections such as Interrupted Goode Homolosine.
+  - Other PROJ methods not listed above, such as Bonne, Van der Grinten, Eckert, Hammer and Aitoff.
+  - Geographic CRSs with a prime meridian other than Greenwich or angles in units other than degrees.
+  - Exact Cassini-Soldner (as PROJ 9) in place of EPSG's series.
 - **No datum transformations.** Style coordinates (WGS84) are projected as if they were lng/lat on the CRS's ellipsoid.
 - **Axis order:** always easting first, then northing (longitude, latitude), whatever the CRS's declared axis order.
 - **How layers are drawn:** background, fill, line, circle, heatmap and symbol layers are drawn from projected vertices directly into the output. Pixel lengths such as line widths, circle radii and text sizes stay constant on screen. raster, hillshade and color-relief layers are drawn in Web Mercator and warped onto a mesh. Areas outside the projection's domain are transparent.

@@ -12,18 +12,19 @@ use crate::projection::Projection;
 use crate::render::raster::{Rgba, Target};
 use crate::tile::{self, Transform};
 use crate::{Error, View};
+use serde_json::Value as J;
 
 /// A target-CRS view: what [`crate::Renderer::set_projected_view`] renders.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedView {
-    /// The target CRS as PROJJSON, geographic or projected (or bound or compound: its datum shift
-    /// and vertical part are ignored). Supported methods: Transverse Mercator, Mercator, Pseudo
-    /// Mercator, Lambert Conic Conformal, Albers Equal Area, Polar and Oblique Stereographic,
-    /// Hotine Oblique Mercator, Krovak (North Orientated), Cassini-Soldner, Lambert Azimuthal Equal
-    /// Area, Azimuthal Equidistant, Orthographic, Equidistant Cylindrical, Equal Earth, Mollweide,
-    /// Robinson, Sinusoidal and PROJ's Geostationary Satellite, on any ellipsoid, without datum
-    /// shifts, in any linear unit and from any prime meridian. Coordinates are (easting, northing)
-    /// / (longitude, latitude) whatever the axis order.
+    /// The target CRS as PROJJSON, geographic or projected (or bound or compound: its datum shift and vertical part are
+    /// ignored). Supported methods: Transverse Mercator, Mercator, Pseudo Mercator, Lambert Conic Conformal, Albers
+    /// Equal Area, Equidistant Conic, Polar and Oblique Stereographic, Hotine Oblique Mercator, Krovak (North
+    /// Orientated), Cassini-Soldner, American Polyconic, Lambert Azimuthal Equal Area, Azimuthal Equidistant, Lambert
+    /// Cylindrical Equal Area, Equidistant Cylindrical, Orthographic, Equal Earth, Mollweide, Robinson, Sinusoidal,
+    /// Natural Earth, Winkel Tripel, Miller Cylindrical and PROJ's Geostationary Satellite, on any ellipsoid, without
+    /// datum shifts, in any linear unit and from any prime meridian. Coordinates are (easting, northing) / (longitude,
+    /// latitude) whatever the axis order.
     pub projjson: String,
     /// `[min_x, min_y, max_x, max_y]` in CRS units (degrees for longlat): what is drawn at bearing 0.
     pub bbox: [f64; 4],
@@ -38,13 +39,135 @@ pub struct ProjectedView {
     pub margin: u32,
 }
 
-/// MapLibre GL JS's `TileMatrixSet` of a CRS (`addProjection`): tile 0/0/0 is the square of side
-/// `extent_at_zoom0` whose top-left corner is `origin` (min x, max y), and each zoom splits every
-/// tile in four; x grows east, y south.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TileMatrixSet {
+/// The tile grid of a CRS, which a CRS does not have by itself: tiles z/x/y (x east, y south) for
+/// [`ProjectedView::tile`], and the scale of [`ProjectedView::camera`]'s zoom.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TileMatrixSet {
+    /// MapLibre GL JS's (`addProjection`): tile 0/0/0 is the square of side `extent_at_zoom0` whose
+    /// top-left corner is `origin` (min x, max y), and each zoom splits every tile in four.
+    Quad { origin: [f64; 2], extent_at_zoom0: f64 },
+    /// OGC's 2D TileMatrixSet: a matrix of tiles for each zoom level, `z` its index.
+    Matrices(Vec<TileMatrix>),
+}
+
+/// A zoom level of an OGC 2D TileMatrixSet, in (easting, northing) whatever the CRS's axis order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileMatrix {
+    /// The corner of the matrix that rows and columns count from.
     pub origin: [f64; 2],
-    pub extent_at_zoom0: f64,
+    /// Rows count up from the bottom-left corner (OGC's `cornerOfOrigin: "bottomLeft"`) instead of
+    /// down from the top-left one.
+    pub bottom_left: bool,
+    /// CRS units per pixel.
+    pub cell_size: f64,
+    pub tile_width: u32,
+    pub tile_height: u32,
+    pub matrix_width: u32,
+    pub matrix_height: u32,
+}
+
+impl TileMatrixSet {
+    /// JSON of either form: `{"origin": [x, y], "extentAtZoom0": e}` (GL JS), or an OGC 2D
+    /// TileMatrixSet (its `tileMatrices`; `cellSize`, `pointOfOrigin`, `tileWidth`, `tileHeight`,
+    /// `matrixWidth`, `matrixHeight` and `cornerOfOrigin` are read). OGC points of origin are in
+    /// the CRS's axis order: `orderedAxes` when it names them (Lat/Lon, N/E), else `projjson`'s.
+    pub fn parse(json: &str, projjson: &str) -> Result<TileMatrixSet, Error> {
+        let bad = |m: &str| Error::Unsupported(format!("tile matrix set: {m}"));
+        let j: J = serde_json::from_str(json).map_err(|e| bad(&e.to_string()))?;
+        let num = |v: &J, name: &str| {
+            v[name].as_f64().filter(|v| v.is_finite()).ok_or_else(|| bad(&format!("{name} must be a finite number")))
+        };
+        let point =
+            |v: &J, name: &str| match v[name].as_array().map(|a| a.iter().map(J::as_f64).collect::<Option<Vec<_>>>()) {
+                Some(Some(p)) if p.len() == 2 && p.iter().all(|v| v.is_finite()) => Ok([p[0], p[1]]),
+                _ => Err(bad(&format!("{name} must be two finite numbers"))),
+            };
+        let Some(matrices) = j.get("tileMatrices") else {
+            let extent_at_zoom0 = num(&j, "extentAtZoom0")?;
+            if extent_at_zoom0 <= 0.0 {
+                return Err(bad("extentAtZoom0 must be positive"));
+            }
+            return Ok(TileMatrixSet::Quad { origin: point(&j, "origin")?, extent_at_zoom0 });
+        };
+        let northing_first = match j["orderedAxes"][0].as_str().map(str::to_ascii_lowercase).as_deref() {
+            Some("lat" | "latitude" | "n" | "northing") => true,
+            Some("lon" | "long" | "longitude" | "e" | "easting") => false,
+            _ => {
+                let crs: J = serde_json::from_str(projjson).unwrap_or_default();
+                matches!(crs["coordinate_system"]["axis"][0]["direction"].as_str(), Some("north" | "south"))
+            }
+        };
+        let size = |m: &J, name: &str| {
+            m[name]
+                .as_u64()
+                .filter(|&v| v >= 1 && v <= u32::MAX as u64)
+                .map(|v| v as u32)
+                .ok_or_else(|| bad(&format!("{name} must be a positive integer")))
+        };
+        let matrices = matrices
+            .as_array()
+            .filter(|m| !m.is_empty())
+            .ok_or_else(|| bad("tileMatrices must be a non-empty array"))?;
+        let matrices = matrices
+            .iter()
+            .map(|m| {
+                if m.get("variableMatrixWidths").is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty())) {
+                    return Err(bad("variableMatrixWidths are not supported"));
+                }
+                let cell_size = num(m, "cellSize")?;
+                if cell_size <= 0.0 {
+                    return Err(bad("cellSize must be positive"));
+                }
+                let [a, b] = point(m, "pointOfOrigin")?;
+                Ok(TileMatrix {
+                    origin: if northing_first { [b, a] } else { [a, b] },
+                    bottom_left: match m["cornerOfOrigin"].as_str() {
+                        None | Some("topLeft") => false,
+                        Some("bottomLeft") => true,
+                        Some(c) => return Err(bad(&format!("cornerOfOrigin {c:?}"))),
+                    },
+                    cell_size,
+                    tile_width: size(m, "tileWidth")?,
+                    tile_height: size(m, "tileHeight")?,
+                    matrix_width: size(m, "matrixWidth")?,
+                    matrix_height: size(m, "matrixHeight")?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(TileMatrixSet::Matrices(matrices))
+    }
+
+    /// The box of tile `z/x/y` in CRS units, and its height over its width.
+    pub fn tile(&self, z: u32, x: u32, y: u32) -> Result<([f64; 4], f64), Error> {
+        let outside = || Error::Unsupported(format!("tile {z}/{x}/{y} is not of the grid"));
+        match self {
+            TileMatrixSet::Quad { origin, extent_at_zoom0 } => {
+                if z > 30 || x >> z != 0 || y >> z != 0 {
+                    return Err(outside());
+                }
+                let s = extent_at_zoom0 / (1u64 << z) as f64;
+                let (min_x, max_y) = (origin[0] + x as f64 * s, origin[1] - y as f64 * s);
+                Ok(([min_x, max_y - s, min_x + s, max_y], 1.0))
+            }
+            TileMatrixSet::Matrices(levels) => {
+                let m =
+                    levels.get(z as usize).filter(|m| x < m.matrix_width && y < m.matrix_height).ok_or_else(outside)?;
+                let (w, h) = (m.cell_size * m.tile_width as f64, m.cell_size * m.tile_height as f64);
+                let min_x = m.origin[0] + x as f64 * w;
+                let min_y = if m.bottom_left { m.origin[1] + y as f64 * h } else { m.origin[1] - (y + 1) as f64 * h };
+                Ok(([min_x, min_y, min_x + w, min_y + h], h / w))
+            }
+        }
+    }
+
+    /// CRS units of a CSS pixel of [`ProjectedView::camera`] at zoom 0, where a tile of the first
+    /// level is 512 CSS pixels wide (tile 0/0/0 of GL JS's grid).
+    pub fn unit_at_zoom0(&self) -> f64 {
+        match self {
+            TileMatrixSet::Quad { extent_at_zoom0, .. } => extent_at_zoom0 / 512.0,
+            TileMatrixSet::Matrices(levels) => levels[0].cell_size * levels[0].tile_width as f64 / 512.0,
+        }
+    }
 }
 
 impl ProjectedView {
@@ -65,35 +188,31 @@ impl ProjectedView {
         }
     }
 
-    /// Tile `z/x/y` of `grid` as a `tile_size`-pixel square image (cf. [`View::tile`]).
-    pub fn tile(projjson: &str, grid: &TileMatrixSet, z: u8, x: u32, y: u32, tile_size: u32) -> Result<Self, Error> {
-        if z > 30 || x >> z != 0 || y >> z != 0 {
-            return Err(Error::Unsupported(format!(
-                "tile {z}/{x}/{y} is not of a grid (z in 0..=30, x and y in 0..2^z)"
-            )));
-        }
-        let s = grid.extent_at_zoom0 / (1u64 << z) as f64;
-        let (min_x, max_y) = (grid.origin[0] + x as f64 * s, grid.origin[1] - y as f64 * s);
+    /// Tile `z/x/y` of `grid`, `tile_size` CSS pixels wide (and as high as the tile's aspect ratio
+    /// makes it; square in GL JS's grid) (cf. [`View::tile`]).
+    pub fn tile(projjson: &str, grid: &TileMatrixSet, z: u32, x: u32, y: u32, tile_size: u32) -> Result<Self, Error> {
+        let (bbox, aspect) = grid.tile(z, x, y)?;
         Ok(ProjectedView {
             projjson: projjson.to_owned(),
-            bbox: [min_x, max_y - s, min_x + s, max_y],
+            bbox,
             bearing: 0.0,
             width: tile_size,
-            height: tile_size,
+            height: ((tile_size as f64 * aspect).round() as u32).max(1),
             pixel_ratio: 1.0,
             margin: 0,
         })
     }
 
-    /// MapLibre GL JS's camera in the CRS on `grid`: `view.center` (lng/lat) in the middle, tile
-    /// 0/0/0 of the grid in 512 CSS pixels at zoom 0, turned around the center by `view.bearing`.
+    /// MapLibre GL JS's camera in the CRS on `grid`: `view.center` (lng/lat) in the middle, a tile of
+    /// the grid's first level (tile 0/0/0 of GL JS's) 512 CSS pixels wide at zoom 0, turned around the
+    /// center by `view.bearing`.
     pub fn camera(projjson: &str, grid: &TileMatrixSet, view: &View) -> Result<Self, Error> {
         let [x, y] = Projection::parse(projjson)?.forward(view.center[0], view.center[1]);
         if !(x.is_finite() && y.is_finite()) {
             return Err(Error::Unsupported(format!("center {:?} is outside the CRS", view.center)));
         }
         // CRS units per CSS pixel.
-        let unit = grid.extent_at_zoom0 / (512.0 * 2f64.powf(view.zoom));
+        let unit = grid.unit_at_zoom0() / 2f64.powf(view.zoom);
         let (w, h) = (view.width as f64 / 2.0 * unit, view.height as f64 / 2.0 * unit);
         Ok(ProjectedView {
             projjson: projjson.to_owned(),
@@ -711,7 +830,8 @@ mod tests {
     #[test]
     fn tiles_and_cameras_of_a_grid() {
         // Longitude/latitude: 8° tiles at zoom 0, north-west corner at 130°E 42°N.
-        let (crs, grid) = (test_crs::geographic(), TileMatrixSet { origin: [130.0, 42.0], extent_at_zoom0: 8.0 });
+        let (crs, grid) =
+            (test_crs::geographic(), TileMatrixSet::parse(r#"{"origin":[130,42],"extentAtZoom0":8}"#, "").unwrap());
         let tile = ProjectedView::tile(&crs, &grid, 2, 1, 3, 256).unwrap();
         assert_eq!((tile.bbox, tile.width, tile.height), ([132.0, 34.0, 134.0, 36.0], 256, 256));
         assert!(ProjectedView::tile(&crs, &grid, 2, 4, 0, 256).is_err());
@@ -737,6 +857,47 @@ mod tests {
         assert_eq!(fit([130.0, 32.0, 150.0, 42.0], 64), (64, 32));
         assert_eq!(fit([0.0, 0.0, 1.0, 3.0], 100), (33, 100));
         assert_eq!(fit([0.0, 0.0, 1000.0, 1.0], 10), (10, 1));
+    }
+
+    #[test]
+    fn ogc_tile_matrix_sets() {
+        // OGC's WorldCRS84Quad (two tiles at zoom 0), longitude first.
+        let level = |z: u32| {
+            let n = 1u64 << z;
+            format!(
+                r#"{{"id":"{z}","cellSize":{},"pointOfOrigin":[-180,90],"tileWidth":256,"tileHeight":256,"matrixWidth":{},"matrixHeight":{n}}}"#,
+                0.703125 / n as f64,
+                2 * n
+            )
+        };
+        let crs84 = format!(r#"{{"orderedAxes":["Lon","Lat"],"tileMatrices":[{},{}]}}"#, level(0), level(1));
+        let geographic = test_crs::geographic();
+        let grid = TileMatrixSet::parse(&crs84, &geographic).unwrap();
+        assert_eq!(grid.tile(0, 1, 0).unwrap(), ([0.0, -90.0, 180.0, 90.0], 1.0));
+        assert_eq!(grid.tile(1, 3, 1).unwrap().0, [90.0, -90.0, 180.0, 0.0]);
+        assert!(grid.tile(0, 2, 0).is_err() && grid.tile(0, 0, 1).is_err() && grid.tile(2, 0, 0).is_err());
+        // A tile of the first level is 512 CSS pixels wide at zoom 0.
+        assert_eq!(grid.unit_at_zoom0(), 180.0 / 512.0);
+        // Northing first (EPSG:4326's latitude, longitude; from PROJJSON without `orderedAxes`), counted
+        // from the bottom, with tiles twice as high as wide.
+        let lat_lon =
+            r#"{"type":"GeographicCRS","coordinate_system":{"axis":[{"direction":"north"},{"direction":"east"}]}}"#;
+        let m = r#"{"tileMatrices":[{"cellSize":1,"pointOfOrigin":[-90,-180],"cornerOfOrigin":"bottomLeft","tileWidth":10,"tileHeight":20,"matrixWidth":36,"matrixHeight":9}]}"#;
+        let grid = TileMatrixSet::parse(m, lat_lon).unwrap();
+        assert_eq!(grid.tile(0, 2, 1).unwrap(), ([-160.0, -70.0, -150.0, -50.0], 2.0));
+        let tile = ProjectedView::tile(&geographic, &grid, 0, 2, 1, 256).unwrap();
+        assert_eq!((tile.width, tile.height), (256, 512));
+        // What is not read is refused, not ignored.
+        let refused = [
+            r#"{"tileMatrices":[]}"#,
+            r#"{"tileMatrices":[{"cellSize":0,"pointOfOrigin":[0,0],"tileWidth":1,"tileHeight":1,"matrixWidth":1,"matrixHeight":1}]}"#,
+            r#"{"tileMatrices":[{"cellSize":1,"pointOfOrigin":[0,0],"tileWidth":1,"tileHeight":1,"matrixWidth":2,"matrixHeight":1,"variableMatrixWidths":[{"coalesce":2,"minTileRow":0,"maxTileRow":0}]}]}"#,
+            r#"{"origin":[0,0],"extentAtZoom0":-1}"#,
+            r#"{"origin":[0],"extentAtZoom0":1}"#,
+        ];
+        for json in refused {
+            assert!(TileMatrixSet::parse(json, &geographic).is_err(), "{json}");
+        }
     }
 
     #[test]

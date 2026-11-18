@@ -58,7 +58,7 @@ const at = (rgba: Uint8Array, x: number, y: number) => [...rgba.subarray((y * 12
 const moved20 = await crs.render(offCenter);
 assert.deepEqual([at(moved20, 44, 32), at(moved20, 64, 32)], [[255, 0, 0, 255], [255, 255, 255, 255]]);
 // An unsupported CRS rejects, a first render in a CRS works, and Mercator views still draw afterwards.
-await assert.rejects(renderer.projected({ projjson: { type: 'ProjectedCRS', conversion: { method: { name: 'Robinson' } } } }).render(box), /unsupported/);
+await assert.rejects(renderer.projected({ projjson: { type: 'ProjectedCRS', conversion: { method: { name: 'Bonne' } } } }).render(box), /unsupported/);
 assert.throws(() => renderer.projected({ projjson: '+proj=longlat' as any }), TypeError);
 await assert.rejects(crs.render({ ...box, bbox: [130, 32, Infinity, 42] }), /unsupported/);
 assert.deepEqual(await new Renderer(style, { loadResource: async () => points }).projected({ projjson: longlat }).render(box), projected);
@@ -67,6 +67,12 @@ assert.deepEqual(await new Renderer(style, { loadResource: async () => points })
 const grid = renderer.projected({ projjson: longlat, tileMatrixSet: { origin: [90, 62], extentAtZoom0: 80 } });
 assert.deepEqual(await grid.renderTile({ z: 2, x: 2, y: 1, tileSize: 64, pixelRatio: 1, margin: 0 }), await crs.render({ ...box, bbox: [130, 22, 150, 42], pixelRatio: 1 }));
 assert.deepEqual(await grid.renderView({ ...view, zoom: -1, pixelRatio: 2 }), projected);
+// The same tiles as an OGC TileMatrixSet's level (latitude first), and tiles half as high as wide.
+const level = { cellSize: 20 / 64, pointOfOrigin: [62, 90], tileWidth: 64, tileHeight: 64, matrixWidth: 4, matrixHeight: 4 };
+const ogc = (m: object) => renderer.projected({ projjson: longlat, tileMatrixSet: { orderedAxes: ['Lat', 'Lon'], tileMatrices: [{ ...level, ...m }] } as any });
+assert.deepEqual(await ogc({}).renderTile({ z: 0, x: 2, y: 1, tileSize: 64, pixelRatio: 1, margin: 0 }), await grid.renderTile({ z: 2, x: 2, y: 1, tileSize: 64, pixelRatio: 1, margin: 0 }));
+assert.deepEqual(await ogc({ tileHeight: 32 }).renderTile({ z: 0, x: 2, y: 1, tileSize: 64, pixelRatio: 1, margin: 0 }), await crs.render({ ...box, bbox: [130, 42, 150, 52], pixelRatio: 1 }));
+await assert.rejects(ogc({}).renderTile({ z: 1, x: 0, y: 0, tileSize: 64, pixelRatio: 1, margin: 0 }), /unsupported/);
 assert.deepEqual(await grid.renderView({ ...view, lng: 143.125, zoom: -1, pixelRatio: 2 }), moved20);
 // Turned 90° around the center of that box, east is up, so the circle is below the middle.
 const turned = await grid.renderView({ ...view, lng: 143.125, zoom: -1, bearing: 90, pixelRatio: 2 });

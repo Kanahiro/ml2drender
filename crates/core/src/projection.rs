@@ -46,6 +46,12 @@ enum Method {
     Sinu(Sinu),
     Krovak(Krovak),
     Cass(Cass),
+    Eqdc(Eqdc),
+    Poly(Poly),
+    Cea(Cea),
+    NatEarth(NatEarth),
+    Wintri(Wintri),
+    Mill(Mill),
 }
 
 impl Projection {
@@ -86,7 +92,16 @@ impl Projection {
             _ => return Err(unsupported("no ellipsoid")),
         };
         let el = Ellipsoid { a, e: (f * (2.0 - f)).sqrt() };
-        let lat_0 = num("lat_0")?.unwrap_or(0.0);
+        // PROJ's spherical forms of EPSG methods: the sphere of the ellipsoid's area.
+        // PROJ's series for its radius (exact to ~1e-11).
+        let el = if get("R_A").is_some() {
+            let es = el.e * el.e;
+            Ellipsoid { a: a * (1.0 - es * (1.0 / 6.0 + es * (17.0 / 360.0 + es * 67.0 / 3024.0))), e: 0.0 }
+        } else {
+            el
+        };
+        // A pole given in another angular unit may land an ulp or two past 90°.
+        let lat_0 = num("lat_0")?.unwrap_or(0.0).clamp(-90.0, 90.0);
         // Longitudes of the CRS are from its prime meridian, those given to `forward` from Greenwich.
         let pm = num("pm")?.unwrap_or(0.0);
         let lon_0 = num("lon_0")?.unwrap_or(0.0) + pm;
@@ -155,6 +170,18 @@ impl Projection {
                 k_0,
             )),
             "cass" => Method::Cass(Cass::new(el, lat_0)),
+            "eqdc" => {
+                let lat_1 = num("lat_1")?.unwrap_or(lat_0);
+                Method::Eqdc(Eqdc::new(el, lat_0, lat_1, num("lat_2")?.unwrap_or(lat_1)))
+            }
+            "poly" => Method::Poly(Poly::new(el, lat_0)),
+            "cea" => Method::Cea(Cea::new(el, num("lat_ts")?.unwrap_or(0.0))),
+            "natearth" => Method::NatEarth(NatEarth { a: el.a }),
+            "wintri" => {
+                let lat_1 = num("lat_1")?.map_or((2.0 / PI).acos(), f64::to_radians);
+                Method::Wintri(Wintri { a: el.a, cos_phi1: lat_1.cos() })
+            }
+            "mill" => Method::Mill(Mill { a: el.a }),
             p => return Err(unsupported(format!("projection {p:?}"))),
         };
         Ok(Projection { method, p })
@@ -199,6 +226,12 @@ impl Projection {
             Method::Sinu(m) => m.forward(lam, phi),
             Method::Krovak(m) => m.forward(lam, phi),
             Method::Cass(m) => m.forward(lam, phi),
+            Method::Eqdc(m) => m.forward(lam, phi),
+            Method::Poly(m) => m.forward(lam, phi),
+            Method::Cea(m) => m.forward(lam, phi),
+            Method::NatEarth(m) => m.forward(lam, phi),
+            Method::Wintri(m) => m.forward(lam, phi),
+            Method::Mill(m) => m.forward(lam, phi),
         })
     }
 
@@ -254,6 +287,12 @@ impl Projection {
             Method::Sinu(m) => m.inverse(xy),
             Method::Krovak(m) => m.inverse(xy),
             Method::Cass(m) => m.inverse(xy),
+            Method::Eqdc(m) => m.inverse(xy),
+            Method::Poly(m) => m.inverse(xy),
+            Method::Cea(m) => m.inverse(xy),
+            Method::NatEarth(m) => m.inverse(xy),
+            Method::Wintri(m) => m.inverse(xy),
+            Method::Mill(m) => m.inverse(xy),
         };
         let lon_0 = self.p.lon_0;
         let r = [(lon_0 + lam.to_degrees() + 540.0).rem_euclid(360.0) - 180.0, phi.to_degrees()];
@@ -1392,8 +1431,252 @@ impl Cass {
     }
 }
 
+/// `(lam, phi)` whose `forward` is `xy`, by Newton's method from `guess` with a central-difference
+/// Jacobian; NaN if it does not converge (e.g. outside the projection's outline). For methods
+/// whose exact inverse is iterative anyway.
+fn newton(forward: impl Fn(f64, f64) -> [f64; 2], xy: [f64; 2], tol: f64, mut g: [f64; 2]) -> [f64; 2] {
+    const H: f64 = 1e-7;
+    for _ in 0..40 {
+        let f = forward(g[0], g[1]);
+        let r = [f[0] - xy[0], f[1] - xy[1]];
+        if !(r[0].is_finite() && r[1].is_finite()) {
+            break;
+        }
+        if r[0].abs().max(r[1].abs()) <= tol {
+            return g;
+        }
+        let d = |a: [f64; 2], b: [f64; 2]| [(a[0] - b[0]) / (2.0 * H), (a[1] - b[1]) / (2.0 * H)];
+        let jl = d(forward(g[0] + H, g[1]), forward(g[0] - H, g[1]));
+        let jp = d(forward(g[0], g[1] + H), forward(g[0], g[1] - H));
+        let det = jl[0] * jp[1] - jp[0] * jl[1];
+        if det == 0.0 || !det.is_finite() {
+            break;
+        }
+        g[0] -= (r[0] * jp[1] - r[1] * jp[0]) / det;
+        g[1] -= (jl[0] * r[1] - jl[1] * r[0]) / det;
+        g[1] = g[1].clamp(-FRAC_PI_2, FRAC_PI_2);
+    }
+    [f64::NAN; 2]
+}
+
+/// NaN outside `[-π, π]` longitudes: the outline of a world map.
+fn within_outline([lam, phi]: [f64; 2]) -> [f64; 2] {
+    if lam.abs() <= PI + 1e-9 && phi.abs() <= FRAC_PI_2 + 1e-9 { [lam, phi] } else { [f64::NAN; 2] }
+}
+
+/// Equidistant conic, Snyder ch. 16.
+#[derive(Debug)]
+pub struct Eqdc {
+    m: Meridian,
+    n: f64,
+    /// a·G of Snyder, and ρ₀.
+    ag: f64,
+    rho0: f64,
+}
+
+impl Eqdc {
+    fn new(el: Ellipsoid, lat_0: f64, lat_1: f64, lat_2: f64) -> Eqdc {
+        let [phi0, phi1, phi2] = [lat_0, lat_1, lat_2].map(f64::to_radians);
+        let m = Meridian::new(el);
+        let m1 = el.m(phi1);
+        let n = if (phi1 - phi2).abs() > 1e-10 {
+            el.a * (m1 - el.m(phi2)) / (m.arc(phi2) - m.arc(phi1))
+        } else {
+            phi1.sin()
+        };
+        let ag = el.a * m1 / n + m.arc(phi1);
+        Eqdc { m, n, ag, rho0: ag - m.arc(phi0) }
+    }
+    fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
+        let rho = self.ag - self.m.arc(phi);
+        let theta = self.n * lam;
+        [rho * theta.sin(), self.rho0 - rho * theta.cos()]
+    }
+    fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
+        let dy = self.rho0 - y;
+        let s = self.n.signum();
+        let rho = s * hypot(x, dy);
+        let theta = (s * x).atan2(s * dy);
+        let phi = self.m.phi(self.ag - rho);
+        if (theta / self.n).abs() > PI || phi.abs() > FRAC_PI_2 {
+            return [f64::NAN; 2];
+        }
+        [theta / self.n, phi]
+    }
+}
+
+/// American polyconic, Snyder ch. 18 (as PROJ).
+#[derive(Debug)]
+pub struct Poly {
+    el: Ellipsoid,
+    m: Meridian,
+    m0: f64,
+}
+
+impl Poly {
+    fn new(el: Ellipsoid, lat_0: f64) -> Poly {
+        let m = Meridian::new(el);
+        Poly { el, m, m0: m.arc(lat_0.to_radians()) }
+    }
+    fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
+        if phi.abs() <= 1e-10 {
+            return [self.el.a * lam, -self.m0];
+        }
+        let s = phi.sin();
+        // ν·cot φ: the radius of the parallel's cone, over a.
+        let ms = self.el.m(phi) / s;
+        let e = lam * s;
+        [self.el.a * ms * e.sin(), self.m.arc(phi) - self.m0 + self.el.a * ms * (1.0 - e.cos())]
+    }
+    fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
+        // Snyder 18-17 (in units of a), Newton's method on φ.
+        let es = self.el.e * self.el.e;
+        let (x, y) = (x / self.el.a, (y + self.m0) / self.el.a);
+        if y.abs() <= 1e-10 {
+            return [x, 0.0];
+        }
+        let r = x * x + y * y;
+        let mut phi = y;
+        for _ in 0..20 {
+            let (s, c) = phi.sin_cos();
+            let w = (1.0 - es * s * s).sqrt();
+            let cc = s * w / c;
+            let ml = self.m.arc(phi) / self.el.a;
+            let mlb = ml * ml + r;
+            let mlp = (1.0 - es) / w.powi(3);
+            let d = (2.0 * ml + cc * mlb - 2.0 * y * (cc * ml + 1.0))
+                / (es * s * c * (mlb - 2.0 * y * ml) / cc + 2.0 * (y - ml) * (cc * mlp - 1.0 / (s * c)) - 2.0 * mlp);
+            phi += d;
+            if !d.is_finite() {
+                return [f64::NAN; 2];
+            }
+            if d.abs() <= 1e-12 {
+                let s = phi.sin();
+                return [(x * phi.tan() * (1.0 - es * s * s).sqrt()).asin() / s, phi];
+            }
+        }
+        [f64::NAN; 2]
+    }
+}
+
+/// Lambert cylindrical equal-area (Snyder ch. 10).
+#[derive(Debug)]
+pub struct Cea {
+    el: Ellipsoid,
+    k0: f64,
+    qp: f64,
+}
+
+impl Cea {
+    fn new(el: Ellipsoid, lat_ts: f64) -> Cea {
+        Cea { el, k0: el.m(lat_ts.to_radians()), qp: el.q(FRAC_PI_2) }
+    }
+    fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
+        [self.el.a * self.k0 * lam, self.el.a * self.el.q(phi) / (2.0 * self.k0)]
+    }
+    fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
+        let q = 2.0 * self.k0 * y / self.el.a;
+        if q.abs() > self.qp + 1e-12 {
+            return [f64::NAN; 2];
+        }
+        [x / (self.el.a * self.k0), self.el.phi_from_q(q.clamp(-self.qp, self.qp))]
+    }
+}
+
+/// Natural Earth, spherical (PROJ's natearth).
+#[derive(Debug)]
+pub struct NatEarth {
+    a: f64,
+}
+
+const NE_A: [f64; 5] = [0.8707, -0.131979, -0.013791, 0.003971, -0.001529];
+const NE_B: [f64; 5] = [1.007226, 0.015085, -0.044475, 0.028874, -0.005916];
+
+impl NatEarth {
+    fn x_scale(phi: f64) -> f64 {
+        let [a0, a1, a2, a3, a4] = NE_A;
+        let p2 = phi * phi;
+        a0 + p2 * (a1 + p2 * (a2 + p2 * p2 * p2 * (a3 + p2 * a4)))
+    }
+    /// y and dy/dφ.
+    fn y(phi: f64) -> (f64, f64) {
+        let [b0, b1, b2, b3, b4] = NE_B;
+        let (p2, p4) = (phi * phi, phi.powi(4));
+        (
+            phi * (b0 + p2 * (b1 + p4 * (b2 + b3 * p2 + b4 * p4))),
+            b0 + p2 * (3.0 * b1 + p4 * (7.0 * b2 + 9.0 * b3 * p2 + 11.0 * b4 * p4)),
+        )
+    }
+    fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
+        [self.a * lam * Self::x_scale(phi), self.a * Self::y(phi).0]
+    }
+    fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
+        let y = y / self.a;
+        if y.abs() > Self::y(FRAC_PI_2).0 + 1e-12 {
+            return [f64::NAN; 2];
+        }
+        let mut phi = y;
+        for _ in 0..30 {
+            let (f, d) = Self::y(phi);
+            let step = (f - y) / d;
+            phi -= step;
+            if step.abs() < 1e-14 {
+                break;
+            }
+        }
+        within_outline([x / (self.a * Self::x_scale(phi)), phi])
+    }
+}
+
+/// Winkel tripel, spherical (PROJ's wintri).
+#[derive(Debug)]
+pub struct Wintri {
+    a: f64,
+    cos_phi1: f64,
+}
+
+impl Wintri {
+    fn unit(&self, lam: f64, phi: f64) -> [f64; 2] {
+        let c = 0.5 * lam;
+        let d = (phi.cos() * c.cos()).clamp(-1.0, 1.0).acos();
+        let [x, y] = if d != 0.0 {
+            let k = d / d.sin();
+            [2.0 * k * phi.cos() * c.sin(), k * phi.sin()]
+        } else {
+            [0.0, 0.0]
+        };
+        [0.5 * (x + lam * self.cos_phi1), 0.5 * (y + phi)]
+    }
+    fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
+        self.unit(lam, phi).map(|v| v * self.a)
+    }
+    fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
+        let xy = [x / self.a, y / self.a];
+        let guess = [xy[0] / (0.5 * (1.0 + self.cos_phi1)), xy[1].clamp(-FRAC_PI_2, FRAC_PI_2)];
+        within_outline(newton(|l, p| self.unit(l, p), xy, 1e-14, guess))
+    }
+}
+
+/// Miller cylindrical, spherical.
+#[derive(Debug)]
+pub struct Mill {
+    a: f64,
+}
+
+impl Mill {
+    fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
+        [self.a * lam, self.a * 1.25 * (FRAC_PI_4 + 0.4 * phi).tan().ln()]
+    }
+    fn inverse(&self, [x, y]: [f64; 2]) -> [f64; 2] {
+        let phi = 2.5 * ((0.8 * y / self.a).exp().atan() - FRAC_PI_4);
+        [x / self.a, if phi.abs() <= FRAC_PI_2 { phi } else { f64::NAN }]
+    }
+}
+
 /// An EPSG conversion method: code, name, PROJ name, parameters as (code, PROJ key).
 type MethodDef = (u64, &'static str, &'static str, &'static [(u64, &'static str)]);
+
+const CYLINDRICAL: &[(u64, &str)] = &[(8801, "lat_0"), (8823, "lat_ts"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")];
 
 const METHODS: &[MethodDef] = &[
     (
@@ -1481,13 +1764,8 @@ const METHODS: &[MethodDef] = &[
             (8817, "y_0"),
         ],
     ),
-    (1028, "Equidistant Cylindrical", "eqc", &[(8823, "lat_ts"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
-    (
-        1029,
-        "Equidistant Cylindrical (Spherical)",
-        "eqc",
-        &[(8823, "lat_ts"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")],
-    ),
+    (1028, "Equidistant Cylindrical", "eqc", CYLINDRICAL),
+    (1029, "Equidistant Cylindrical (Spherical)", "eqc +R_A", CYLINDRICAL),
     (1125, "Azimuthal Equidistant", "aeqd", &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     (9840, "Orthographic", "ortho", &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     (
@@ -1505,10 +1783,29 @@ const METHODS: &[MethodDef] = &[
         ],
     ),
     (9806, "Cassini-Soldner", "cass", &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
+    (
+        1027,
+        "Lambert Azimuthal Equal Area (Spherical)",
+        "laea +R_A",
+        &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")],
+    ),
+    (
+        1119,
+        "Equidistant Conic",
+        "eqdc",
+        &[(8821, "lat_0"), (8822, "lon_0"), (8823, "lat_1"), (8824, "lat_2"), (8826, "x_0"), (8827, "y_0")],
+    ),
+    (9818, "American Polyconic", "poly", &[(8801, "lat_0"), (8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
+    (9835, "Lambert Cylindrical Equal Area", "cea", CYLINDRICAL),
+    (9834, "Lambert Cylindrical Equal Area (Spherical)", "cea +R_A", CYLINDRICAL),
+    (9823, "Equidistant Cylindrical (Spherical)", "eqc", CYLINDRICAL),
     // PROJ's own methods and parameters, without EPSG codes (0: matched by name).
     (0, "Mollweide", "moll", &[(8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     (0, "Robinson", "robin", &[(8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
     (0, "Sinusoidal", "sinu", &[(8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
+    (0, "Natural Earth", "natearth", &[(8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
+    (0, "Miller Cylindrical", "mill +R_A", &[(8802, "lon_0"), (8806, "x_0"), (8807, "y_0")]),
+    (0, "Winkel Tripel", "wintri", &[(8802, "lon_0"), (8823, "lat_1"), (8806, "x_0"), (8807, "y_0")]),
     (
         0,
         "Geostationary Satellite (Sweep X)",
@@ -2371,6 +2668,14 @@ mod tests {
         let sphere = r#""semi_major_axis":6371000,"inverse_flattening":0"#;
         let p = Projection::parse(&projected("Transverse Mercator", sphere, &[])).unwrap();
         assert!(p.forward(1.0, 1.0).iter().all(|v| v.is_finite()));
+        // ESRI:102016's pole, in ESRI's degree (90 × 0.0174532925199433 rad is a little past 90°).
+        let degree = r#"{"type":"AngularUnit","name":"Degree","conversion_factor":0.0174532925199433}"#;
+        let polar_aeqd = projected("Azimuthal Equidistant", test_crs::WGS84, &[]).replace(
+            r#""parameters":[]"#,
+            &format!(r#""parameters":[{{"name":"Latitude of natural origin","value":90,"unit":{degree}}}]"#),
+        );
+        let p = Projection::parse(&polar_aeqd).unwrap();
+        assert!(p.forward(0.0, 45.0).iter().all(|v| v.is_finite()));
         // A pole a few ulps off 90° (degrees from radians) is still polar.
         let lat = (90f64.to_radians() * 1.0000000000000002).to_degrees();
         assert!(
@@ -2396,5 +2701,79 @@ mod tests {
         assert_eq!(lcc.inverse([1e6, apex[1] + 5e6]), None);
         let p = lcc.inverse([1e6, 0.0]).unwrap();
         assert!(close(lcc.forward(p[0], p[1]), [1e6, 0.0], 1e-3));
+    }
+
+    #[test]
+    fn more_methods_match_proj() {
+        use test_crs::projected;
+        // Reference values from PROJ 9.8.1 (pyproj 3.8.0): the PROJJSON of EPSG:5070, 28992, 2056, 3375,
+        // 6933, 4087, 5514, 5880, 9311 and ESRI:102031, 54028, 54009, 54030, 54008, 54003, 54077, 54042
+        // (from their geographic CRS, without datum shifts), and an ellipsoidal orthographic.
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &[(&str, f64)], [f64; 2], [f64; 2])] = &[
+            ("Albers Equal Area", r#""semi_major_axis":6378137,"inverse_flattening":298.257222101"#, &[("Latitude of false origin", 23.0), ("Longitude of false origin", -96.0), ("Latitude of 1st standard parallel", 29.5), ("Latitude of 2nd standard parallel", 45.5), ("Easting at false origin", 0.0), ("Northing at false origin", 0.0)], [-96.0, 40.0], [0.0, 1886977.5648988034]),
+            ("Albers Equal Area", r#""semi_major_axis":6378137,"inverse_flattening":298.257222101"#, &[("Latitude of false origin", 23.0), ("Longitude of false origin", -96.0), ("Latitude of 1st standard parallel", 29.5), ("Latitude of 2nd standard parallel", 45.5), ("Easting at false origin", 0.0), ("Northing at false origin", 0.0)], [-120.0, 35.0], [-2149393.5126428995, 1599660.032831896]),
+            ("Oblique Stereographic", r#""semi_major_axis":6377397.155,"inverse_flattening":299.1528128"#, &[("Latitude of natural origin", 52.1561605555556), ("Longitude of natural origin", 5.38763888888889), ("Scale factor at natural origin", 0.9999079), ("False easting", 155000.0), ("False northing", 463000.0)], [5.0, 52.0], [128383.47452664126, 445698.8043061154]),
+            ("Oblique Stereographic", r#""semi_major_axis":6377397.155,"inverse_flattening":299.1528128"#, &[("Latitude of natural origin", 52.1561605555556), ("Longitude of natural origin", 5.38763888888889), ("Scale factor at natural origin", 0.9999079), ("False easting", 155000.0), ("False northing", 463000.0)], [6.5, 53.2], [229323.39417033814, 579711.5975776529]),
+            ("Hotine Oblique Mercator (variant B)", r#""semi_major_axis":6377397.155,"inverse_flattening":299.1528128"#, &[("Latitude of projection centre", 46.9524055555556), ("Longitude of projection centre", 7.43958333333333), ("Azimuth at projection centre", 90.0), ("Angle from Rectified to Skew Grid", 90.0), ("Scale factor at projection centre", 1.0), ("Easting at projection centre", 2600000.0), ("Northing at projection centre", 1200000.0)], [7.4, 46.9], [2596984.202521673, 1194175.5182895144]),
+            ("Hotine Oblique Mercator (variant B)", r#""semi_major_axis":6377397.155,"inverse_flattening":299.1528128"#, &[("Latitude of projection centre", 46.9524055555556), ("Longitude of projection centre", 7.43958333333333), ("Azimuth at projection centre", 90.0), ("Angle from Rectified to Skew Grid", 90.0), ("Scale factor at projection centre", 1.0), ("Easting at projection centre", 2600000.0), ("Northing at projection centre", 1200000.0)], [9.5, 47.5], [2755209.648060532, 1262912.607027531]),
+            ("Hotine Oblique Mercator (variant A)", r#""semi_major_axis":6378137,"inverse_flattening":298.257222101"#, &[("Latitude of projection centre", 4.0), ("Longitude of projection centre", 102.25), ("Azimuth at projection centre", 323.025796466667), ("Angle from Rectified to Skew Grid", 323.130102361111), ("Scale factor at projection centre", 0.99984), ("False easting", 804671.0), ("False northing", 0.0)], [102.0, 4.0], [445072.33326358895, 442508.8986183557]),
+            ("Hotine Oblique Mercator (variant A)", r#""semi_major_axis":6378137,"inverse_flattening":298.257222101"#, &[("Latitude of projection centre", 4.0), ("Longitude of projection centre", 102.25), ("Azimuth at projection centre", 323.025796466667), ("Angle from Rectified to Skew Grid", 323.130102361111), ("Scale factor at projection centre", 0.99984), ("False easting", 804671.0), ("False northing", 0.0)], [103.5, 2.0], [611504.2087569564, 221172.84639757543]),
+            ("Lambert Cylindrical Equal Area", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Latitude of 1st standard parallel", 30.0), ("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [139.76, 35.68], [13484922.527865294, 4269756.253587328]),
+            ("Lambert Cylindrical Equal Area", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Latitude of 1st standard parallel", 30.0), ("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [-60.0, -75.0], [-5789176.81505379, -7089914.145211107]),
+            ("Equidistant Cylindrical", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Latitude of 1st standard parallel", 0.0), ("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [139.76, 35.68], [15558012.033267912, 3950036.7381267366]),
+            ("Equidistant Cylindrical", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Latitude of 1st standard parallel", 0.0), ("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [-60.0, -75.0], [-6679169.447596414, -8326937.587280346]),
+            ("Krovak (North Orientated)", r#""semi_major_axis":6377397.155,"inverse_flattening":299.1528128"#, &[("Latitude of projection centre", 49.5), ("Longitude of origin", 24.8333333333333), ("Co-latitude of cone axis", 30.2881397527778), ("Latitude of pseudo standard parallel", 78.5), ("Scale factor on pseudo standard parallel", 0.9999), ("False easting", 0.0), ("False northing", 0.0)], [14.42, 50.09], [-742949.430991364, -1042796.9661625588]),
+            ("Krovak (North Orientated)", r#""semi_major_axis":6377397.155,"inverse_flattening":299.1528128"#, &[("Latitude of projection centre", 49.5), ("Longitude of origin", 24.8333333333333), ("Co-latitude of cone axis", 30.2881397527778), ("Latitude of pseudo standard parallel", 78.5), ("Scale factor on pseudo standard parallel", 0.9999), ("False easting", 0.0), ("False northing", 0.0)], [18.0, 49.0], [-499258.06054492824, -1192389.1602215304]),
+            ("American Polyconic", r#""semi_major_axis":6378137,"inverse_flattening":298.257222101"#, &[("Latitude of natural origin", 0.0), ("Longitude of natural origin", -54.0), ("False easting", 5000000.0), ("False northing", 10000000.0)], [-47.9, -15.8], [5653463.734227156, 8243016.222029742]),
+            ("American Polyconic", r#""semi_major_axis":6378137,"inverse_flattening":298.257222101"#, &[("Latitude of natural origin", 0.0), ("Longitude of natural origin", -54.0), ("False easting", 5000000.0), ("False northing", 10000000.0)], [-70.0, 5.0], [3225795.874051436, 10574477.228071121]),
+            ("Equidistant Conic", r#""semi_major_axis":6378388,"inverse_flattening":297"#, &[("Latitude of false origin", 30.000000000000004), ("Longitude of false origin", 10.000000000000002), ("Latitude of 1st standard parallel", 43.00000000000001), ("Latitude of 2nd standard parallel", 62.000000000000014), ("Easting at false origin", 0.0), ("Northing at false origin", 0.0)], [10.0, 50.0], [0.0, 2220797.012985132]),
+            ("Equidistant Conic", r#""semi_major_axis":6378388,"inverse_flattening":297"#, &[("Latitude of false origin", 30.000000000000004), ("Longitude of false origin", 10.000000000000002), ("Latitude of 1st standard parallel", 43.00000000000001), ("Latitude of 2nd standard parallel", 62.000000000000014), ("Easting at false origin", 0.0), ("Northing at false origin", 0.0)], [30.0, 40.0], [1701013.203128221, 1345410.9010574487]),
+            ("Cassini-Soldner", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Latitude of natural origin", 0.0), ("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [0.5, 51.5], [34719.988409660495, 5707830.814447506]),
+            ("Cassini-Soldner", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Latitude of natural origin", 0.0), ("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [-0.8, 10.0], [-87711.40531096116, 1105961.1736498005]),
+            ("Lambert Azimuthal Equal Area (Spherical)", r#""semi_major_axis":6378206.4,"semi_minor_axis":6356583.8"#, &[("Latitude of natural origin", 45.0), ("Longitude of natural origin", -100.0), ("False easting", 0.0), ("False northing", 0.0)], [-100.0, 45.0], [0.0, 0.0]),
+            ("Lambert Azimuthal Equal Area (Spherical)", r#""semi_major_axis":6378206.4,"semi_minor_axis":6356583.8"#, &[("Latitude of natural origin", 45.0), ("Longitude of natural origin", -100.0), ("False easting", 0.0), ("False northing", 0.0)], [-80.0, 30.0], [1921494.5283289563, -1439433.3752588553]),
+            ("Mollweide", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [139.76, 35.68], [12312194.290264571, 4301043.98217482]),
+            ("Mollweide", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [-170.0, -80.0], [-5553219.288515829, -8527486.04177697]),
+            ("Robinson", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [139.76, 35.68], [12412711.298027338, 3815965.647171651]),
+            ("Robinson", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [-170.0, -80.0], [-9978739.279836627, -8102470.441278092]),
+            ("Sinusoidal", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [139.76, 35.68], [12651988.357907623, 3950036.7381267366]),
+            ("Sinusoidal", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [-170.0, -80.0], [-3296892.539782466, -8885139.87193687]),
+            ("Miller Cylindrical", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [139.76, 35.68], [15540620.464457994, 4142532.187346332]),
+            ("Miller Cylindrical", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [-170.0, -80.0], [-18903158.83627547, -11674140.641483014]),
+            ("Natural Earth", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [139.76, 35.68], [12718279.489365363, 4015900.931179231]),
+            ("Natural Earth", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("False easting", 0.0), ("False northing", 0.0)], [-170.0, -80.0], [-11143938.433007937, -8527794.77272659]),
+            ("Winkel Tripel", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("Latitude of 1st standard parallel", 50.46700000000001), ("False easting", 0.0), ("False northing", 0.0)], [139.76, 35.68], [11475202.282200357, 4480307.6191124115]),
+            ("Winkel Tripel", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Longitude of natural origin", 0.0), ("Latitude of 1st standard parallel", 50.46700000000001), ("False easting", 0.0), ("False northing", 0.0)], [-170.0, -80.0], [-7739491.771480376, -9339079.344355782]),
+            ("Orthographic", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Latitude of natural origin", 35.0), ("Longitude of natural origin", 135.0), ("False easting", 0.0), ("False northing", 0.0)], [139.76, 35.68], [430410.79303808004, 85702.80492914576]),
+            ("Orthographic", r#""semi_major_axis":6378137,"inverse_flattening":298.257223563"#, &[("Latitude of natural origin", 35.0), ("Longitude of natural origin", 135.0), ("False easting", 0.0), ("False northing", 0.0)], [100.0, -20.0], [-3439070.466019209, -4572711.385913498]),
+        ];
+        for &(method, ellipsoid, params, lnglat, xy) in cases {
+            let p = Projection::parse(&projected(method, ellipsoid, params)).unwrap();
+            let f = p.forward(lnglat[0], lnglat[1]);
+            // Cassini-Soldner is EPSG's series, PROJ's exact: they part as λ⁵ (0.2 mm 1° from the meridian).
+            let tol = if method == "Cassini-Soldner" { 1e-4 } else { 1e-6 };
+            assert!(close(f, xy, tol), "{method}: {lnglat:?} → {f:?}, expected {xy:?}");
+            let i = p.inverse(xy).unwrap();
+            assert!(close(i, lnglat, 1e-9), "{method}: {xy:?} → {i:?}, expected {lnglat:?}");
+        }
+        // Outside the outlines of world maps, the far side of a globe and the gap of a cone: no answer.
+        let world = |m: &str| Projection::parse(&projected(m, WGS84, &[])).unwrap();
+        for m in ["Mollweide", "Robinson", "Sinusoidal", "Natural Earth", "Winkel Tripel"] {
+            assert_eq!(world(m).inverse([2.0e7, 1.0e6]), None, "{m}");
+            assert!(world(m).inverse([1.0e6, 1.0e6]).is_some(), "{m}");
+        }
+        let ortho =
+            Projection::parse(&projected("Orthographic", WGS84, &[("Latitude of natural origin", 35.0)])).unwrap();
+        assert!(ortho.forward(180.0, -35.0)[0].is_nan());
+        assert_eq!(ortho.inverse([7.0e6, 0.0]), None);
+        let aea = Projection::parse(&projected(
+            "Albers Equal Area",
+            WGS84,
+            &[("Latitude of 1st standard parallel", 30.0), ("Latitude of 2nd standard parallel", 60.0)],
+        ))
+        .unwrap();
+        let apex = aea.forward(0.0, 90.0);
+        assert_eq!(aea.inverse([1e6, apex[1] + 5e6]), None);
     }
 }

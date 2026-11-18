@@ -55,4 +55,13 @@ assert.deepEqual((await bare.render({ bbox, size: 256 })).data, box.data);
 await assert.rejects(bare.renderTile({ z: 0, x: 0, y: 0 }), TypeError);
 await assert.rejects(bare.renderView({ center, zoom, width: 256, height: 128 }), TypeError);
 assert.throws(() => bare.toStyle({ tiles: () => '' }), TypeError);
+// GL JS's grid as an OGC TileMatrixSet (256 px tiles): the same tiles and cameras.
+const { origin, extentAtZoom0 } = crs.tileMatrixSet;
+const tileMatrices = [0, 1, 2].map((z) => ({ cellSize: extentAtZoom0 / 256 / 2 ** z, pointOfOrigin: origin, tileWidth: 256, tileHeight: 256, matrixWidth: 2 ** z, matrixHeight: 2 ** z }));
+const ogc = renderer.projected({ projjson, tileMatrixSet: { tileMatrices } });
+const tile = { z: 2, x: 3, y: 1, tileSize: 64 };
+assert.deepEqual((await ogc.renderTile(tile)).data, (await renderer.projected(crs).renderTile(tile)).data);
+assert.deepEqual((await ogc.renderView({ center, zoom, width: 256, height: 128 })).data, image.data);
+await assert.rejects(ogc.renderTile({ ...tile, z: 3 }), RangeError);
+await assert.rejects(renderer.projected({ projjson, tileMatrixSet: { tileMatrices: [] } }).renderTile(tile), RangeError);
 console.log('ok: projected renderView and render');
