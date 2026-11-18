@@ -55,7 +55,7 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 - CI — `.github/workflows/build.yml`(`workflow_call`)が Rust のテスト(`cargo test` と上流 fixture の render / expression テスト。失敗時はレポートを artifact に残す。サマリー(known-failures との差分を含む)はジョブサマリーにし、`ci.yml` の `test-report` ジョブが PR にコメントする。PR コメントは `scripts/pr-comment.sh` でワークフローごとに1つを上書き更新)、WASM 版の Node.js / Deno / Vite での確認と公開形の tarball の動作確認、Node-API アドオンと Python wheel の Linux(x64/arm64)・macOS(x64/arm64)・Windows(x64)でのビルドとテストを行い、公開物を artifact に残す。`ci.yml`(PR・main)と `publish.yml`(`workflow_dispatch`。npm の 3 種と PyPI に、リポジトリ内の共通バージョンで公開。trusted publishing + provenance)が呼ぶ。バージョンは `packages/ml2drender`・`packages/ml2drender-node` の package.json と `crates/python/Cargo.toml` で揃える。
 - `crates/cli/tests/exclusions.json` — 対象外 render テストの除外ルール(理由付き)。pitch/roll/非mercator/operations はランナー内にハードコード。
 - `crates/cli/tests/known-failures.json` — 現時点で通らない render / expression テストの ID。ランナーはここにない失敗があれば exit 1(CI はこれで退行を検知する)。通るようになった ID は警告が出るので一覧から消す。
-- `fixtures/` — 上流テスト(gitignore)。`scripts/fetch-fixtures.sh` が固定コミットから取得し LICENSE を同梱する。
+- `fixtures/` — 上流テスト(gitignore)。`scripts/fetch-fixtures.sh` が固定コミットから取得し LICENSE を同梱する。上流のテストがネットワークから読むリソース(demotiles のグリフ)は `render/remote/<host>/` に置き、ランナーが `https://<host>/...` をそこへ読み替える。
 
 ## コマンド
 

@@ -2,7 +2,6 @@
   "_doc": "Tests that fail today (see AGENTS.md, known unsupported). The runners exit with 1 on any failure not listed here; remove an entry once it passes.",
   "render": [
     "combinations/symbol-translucent--fill-translucent",
-    "geometry-type/all-geometries",
     "is-supported-script/filter",
     "is-supported-script/layout",
     "regressions/mapbox-gl-native#11729",
