@@ -1,5 +1,7 @@
 # ml2drender (Python)
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Kanahiro/ml2drender/blob/main/examples/python/quickstart.ipynb)
+
 Python bindings of [ml2drender](https://github.com/Kanahiro/ml2drender), a 2D map renderer for MapLibre styles written in pure Rust. It needs no GPU and links no C libraries.
 
 ```sh
