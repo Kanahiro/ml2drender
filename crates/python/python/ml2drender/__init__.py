@@ -79,12 +79,12 @@ class Renderer:
 
         Supported methods: Transverse Mercator, Mercator, Pseudo Mercator, Lambert Conic Conformal,
         Albers Equal Area, Equidistant Conic, Polar and Oblique Stereographic, Hotine Oblique
-        Mercator, Krovak (North Orientated), Lambert Azimuthal Equal Area, Lambert Cylindrical
-        Equal Area, Equidistant Cylindrical, Cassini-Soldner, American Polyconic, Orthographic,
-        Equal Earth, Mollweide, Robinson, Sinusoidal, Natural Earth, Winkel Tripel, Miller
-        Cylindrical and PROJ's Geostationary Satellite, without datum shifts. Resources loaded for
-        one CRS serve the others, and Web Mercator views, too. Raises ``TypeError`` if ``projjson``
-        is not a dict.
+        Mercator, Krovak (North Orientated), Cassini-Soldner, American Polyconic, Lambert Azimuthal
+        Equal Area, Azimuthal Equidistant, Lambert Cylindrical Equal Area, Equidistant Cylindrical,
+        Orthographic, Equal Earth, Mollweide, Robinson, Sinusoidal, Natural Earth, Winkel Tripel,
+        Miller Cylindrical and PROJ's Geostationary Satellite, without datum shifts. Resources
+        loaded for one CRS serve the others, and Web Mercator views, too. Raises ``TypeError`` if
+        ``projjson`` is not a dict.
 
         ``tile_matrix_set`` is the CRS's tile grid, which a CRS does not have by itself: a
         :class:`TileMatrixSet`, or an OGC 2D TileMatrixSet (2.0) as a dict, whose ``tileMatrices``

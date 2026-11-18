@@ -17,13 +17,14 @@ use serde_json::Value as J;
 /// A target-CRS view: what [`crate::Renderer::set_projected_view`] renders.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedView {
-    /// The target CRS as PROJJSON, geographic or projected. Supported methods: Transverse Mercator, Mercator, Pseudo
-    /// Mercator, Lambert Conic Conformal, Albers Equal Area, Equidistant Conic, Polar and Oblique Stereographic,
-    /// Hotine Oblique Mercator, Krovak (North Orientated), Lambert Azimuthal Equal Area, Lambert Cylindrical Equal
-    /// Area, Equidistant Cylindrical, Cassini-Soldner, American Polyconic, Orthographic, Equal Earth, Mollweide,
-    /// Robinson, Sinusoidal, Natural Earth, Winkel Tripel, Miller Cylindrical and PROJ's Geostationary Satellite, on
-    /// any ellipsoid, without datum shifts.
-    /// Coordinates are (easting, northing) / (longitude, latitude) whatever the axis order.
+    /// The target CRS as PROJJSON, geographic or projected (or bound or compound: its datum shift and vertical part are
+    /// ignored). Supported methods: Transverse Mercator, Mercator, Pseudo Mercator, Lambert Conic Conformal, Albers
+    /// Equal Area, Equidistant Conic, Polar and Oblique Stereographic, Hotine Oblique Mercator, Krovak (North
+    /// Orientated), Cassini-Soldner, American Polyconic, Lambert Azimuthal Equal Area, Azimuthal Equidistant, Lambert
+    /// Cylindrical Equal Area, Equidistant Cylindrical, Orthographic, Equal Earth, Mollweide, Robinson, Sinusoidal,
+    /// Natural Earth, Winkel Tripel, Miller Cylindrical and PROJ's Geostationary Satellite, on any ellipsoid, without
+    /// datum shifts, in any linear unit and from any prime meridian. Coordinates are (easting, northing) / (longitude,
+    /// latitude) whatever the axis order.
     pub projjson: String,
     /// `[min_x, min_y, max_x, max_y]` in CRS units (degrees for longlat): what is drawn at bearing 0.
     pub bbox: [f64; 4],
@@ -332,9 +333,7 @@ impl Warp {
         // The zoom styles are evaluated and tiles are chosen at: CRS units per pixel read as Web
         // Mercator at the equator (OGC scale denominators), so all tiles of a grid level share it
         // wherever they are. A local scale would change across the view and seam neighboring tiles.
-        let turn =
-            if matches!(warp.proj, Projection::LongLat) { 360.0 } else { 2.0 * std::f64::consts::PI * 6378137.0 };
-        let mut zoom = (turn / (512.0 * (ux * uy).sqrt() * view.pixel_ratio)).log2();
+        let mut zoom = (warp.proj.units_per_turn() / (512.0 * (ux * uy).sqrt() * view.pixel_ratio)).log2();
         // The nodes' box along the axes of the Mercator view, which has the view's bearing.
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
         for n in nodes.iter().filter(|n| n[0].is_finite()) {
@@ -386,11 +385,15 @@ impl Warp {
 
     /// Longitude/latitude at an output pixel position, if Mercator has it.
     fn lnglat(&self, x: f64, y: f64) -> Option<[f64; 2]> {
+        self.projected_lnglat(x, y).filter(|p| p[1].abs() <= tile::MAX_LAT)
+    }
+
+    /// Longitude/latitude at an output pixel position, if the projection has it.
+    fn projected_lnglat(&self, x: f64, y: f64) -> Option<[f64; 2]> {
         let [x, y] = self.unturned([x, y]);
         let b = self.bbox;
         self.proj
             .inverse([b[0] + x / self.size[0] as f64 * (b[2] - b[0]), b[3] - y / self.size[1] as f64 * (b[3] - b[1])])
-            .filter(|p| p[1].abs() <= tile::MAX_LAT)
     }
 
     /// Mercator coordinates (world = 1) at an output pixel position; NaN where there are none.
@@ -454,7 +457,11 @@ impl Warp {
     /// antimeridian, points land beyond the edge of the map.
     pub fn world_to_screen(&self, p: [f64; 2]) -> [f64; 2] {
         let lat = tile::mercator_lat(p[1]);
-        let [x, y] = self.proj.forward_continuous(p[0] * 360.0 - 180.0, lat);
+        self.crs_to_screen(self.proj.forward_continuous(p[0] * 360.0 - 180.0, lat))
+    }
+
+    /// CRS coordinates → output device pixel.
+    fn crs_to_screen(&self, [x, y]: [f64; 2]) -> [f64; 2] {
         let b = self.bbox;
         self.turned([
             (x - b[0]) / (b[2] - b[0]) * self.size[0] as f64,
@@ -624,24 +631,28 @@ impl Warp {
         s
     }
 
-    /// The projection's center (its central meridian on the equator) in output pixels, around which
-    /// its domain is taken to be star-shaped, like GL JS does for `addProjection`.
+    /// The projection's center (`Projection::center`) in output pixels, around which its domain is
+    /// taken to be star-shaped, like GL JS does for `addProjection`.
     fn domain_center(&self) -> Option<[f64; 2]> {
-        let c = self.central_x?;
-        Some(self.world_to_screen([c, 0.5])).filter(|s| s[0].is_finite())
+        self.central_x?;
+        let [lng, lat] = self.proj.center();
+        Some(self.crs_to_screen(self.proj.forward_continuous(lng, lat))).filter(|s| s[0].is_finite())
     }
 
-    /// The domain's edge in direction `angle` (radians, y down) from `center`, in output pixels.
+    /// The domain's edge in direction `angle` (radians, y down) from `center`, in output pixels: the
+    /// projection's, where geometry leaves the map, not Mercator's (whose polar caps would cut off
+    /// e.g. a polar view's center).
     fn edge_at(&self, center: [f64; 2], angle: f64) -> [f64; 2] {
         let d = [angle.cos(), angle.sin()];
         let at = |r: f64| [center[0] + d[0] * r, center[1] + d[1] * r];
+        let on = |r: f64| self.projected_lnglat(at(r)[0], at(r)[1]).is_some();
         let (mut lo, mut hi) = (0.0, 1.0);
-        while self.lnglat(at(hi)[0], at(hi)[1]).is_some() && hi < 1e15 {
+        while on(hi) && hi < 1e15 {
             (lo, hi) = (hi, hi * 2.0);
         }
         for _ in 0..50 {
             let mid = (lo + hi) / 2.0;
-            if self.lnglat(at(mid)[0], at(mid)[1]).is_some() { lo = mid } else { hi = mid }
+            if on(mid) { lo = mid } else { hi = mid }
         }
         at(lo)
     }
@@ -667,7 +678,10 @@ impl Warp {
             (1..steps).map(|k| self.edge_at(center, ta + sweep * k as f64 / steps as f64)).collect()
         };
         if runs.is_empty() {
-            let c = [self.central_x.unwrap_or(0.5), 0.5];
+            let c = [
+                self.central_x.unwrap_or(0.5),
+                tile::mercator_y(self.proj.center()[1].clamp(-tile::MAX_LAT, tile::MAX_LAT)),
+            ];
             if hidden.iter().map(|r| winding(r, c)).sum::<i32>() == 0 {
                 return vec![];
             }

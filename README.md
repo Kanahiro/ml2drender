@@ -6,7 +6,7 @@
 
 - **No GPU, no native dependencies.** It is a software rasterizer in pure Rust. It runs on `wasm32-unknown-unknown` and links no C libraries.
 - **Faithful to MapLibre.** Bucket building, shader math and quantization are ported from MapLibre GL JS. It passes 98.0% of the applicable upstream render tests at GL JS's own tolerances ([conformance](#conformance)).
-- **Any projected CRS.** It draws maps directly in a CRS given as PROJJSON: UTM, national grids, Albers, LAEA, polar and oblique stereographic, world maps (Equal Earth, Robinson, Mollweide, Winkel Tripel…), geostationary views and more.
+- **Any projected CRS.** It draws maps directly in a CRS given as PROJJSON: UTM, national grids (including US State Plane in feet), Albers, LAEA, polar and oblique stereographic, world maps (Equal Earth, Robinson, Mollweide, Winkel Tripel…), orthographic and geostationary views and more.
 - **MapLibre GL JS in any CRS.** Every source of a style (vector tiles, GeoJSON, raster, DEM) can be reprojected and served on a CRS's tile grid. MapLibre GL JS can then draw the original style in that CRS, with interaction and feature queries.
 - **Made for serverless.** The core does no network or file I/O; the host fetches everything.
 
@@ -194,15 +194,15 @@ GL JS evaluates the style at its own zoom on the projected grid, and hillshade s
 
 ## Projected coordinate reference systems
 
-CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`). PROJ strings and WKT are not accepted. You can get PROJJSON from `projinfo -o PROJJSON -q EPSG:32654`, for example.
+CRSs are given as PROJJSON (`GeographicCRS` or `ProjectedCRS`, or a `BoundCRS` or `CompoundCRS` of one, whose datum shift and vertical part are ignored). PROJ strings and WKT are not accepted. You can get PROJJSON from `projinfo -o PROJJSON -q EPSG:32654`, for example.
 
-- **Supported methods:** longlat, Transverse Mercator (UTM, national grids), Mercator (including Web Mercator), Lambert Conformal Conic, Albers Equal Area, Equidistant Conic, Polar Stereographic, Oblique Stereographic, Hotine Oblique Mercator (variants A and B), Krovak (North Orientated), Lambert Azimuthal Equal Area, Lambert Cylindrical Equal Area, Equidistant Cylindrical, Cassini-Soldner, American Polyconic, Orthographic, Equal Earth, Mollweide, Robinson, Sinusoidal, Natural Earth, Winkel Tripel, Miller Cylindrical and Geostationary Satellite (geos), including EPSG's spherical variants. Any ellipsoid works. Units must be meters and the prime meridian Greenwich. Results match PROJ 9.8 within a micrometre, except Cassini-Soldner, which follows EPSG's series (within 0.2 mm 1° from the central meridian).
+- **Supported methods:** longlat, Transverse Mercator (UTM, national grids), Mercator (including Web Mercator), Lambert Conformal Conic, Albers Equal Area, Equidistant Conic, Polar and Oblique Stereographic, Hotine Oblique Mercator (variants A and B), Krovak (North Orientated), Lambert Azimuthal Equal Area, Azimuthal Equidistant, Lambert Cylindrical Equal Area, Equidistant Cylindrical, Cassini-Soldner, American Polyconic, Orthographic, Equal Earth, Mollweide, Robinson, Sinusoidal, Natural Earth, Winkel Tripel, Miller Cylindrical and Geostationary Satellite (geos), including EPSG's spherical variants. Any ellipsoid, linear unit (e.g. US survey feet) and prime meridian works. A geographic CRS must use degrees from Greenwich. Results match PROJ 9.8 within a micrometre, except Cassini-Soldner, which follows EPSG's series (within 0.2 mm 1° from the central meridian).
 - **TODO, not supported yet:**
-  - Azimuthal Equidistant (EPSG 1125, 9832) and Gnomonic: on an ellipsoid PROJ computes them with geodesics, which need a geodesic solver.
+  - Gnomonic.
   - South-orientated axes: Transverse Mercator (South Orientated) (EPSG 9808) and Krovak (EPSG 9819, southing/westing). Krovak (North Orientated) works.
   - Interrupted projections such as Interrupted Goode Homolosine.
   - Other PROJ methods not listed above, such as Bonne, Van der Grinten, Eckert, Hammer and Aitoff.
-  - Prime meridians other than Greenwich (e.g. Ferro, Paris) and axis units other than meters.
+  - Geographic CRSs with a prime meridian other than Greenwich or angles in units other than degrees.
   - Exact Cassini-Soldner (as PROJ 9) in place of EPSG's series.
 - **No datum transformations.** Style coordinates (WGS84) are projected as if they were lng/lat on the CRS's ellipsoid.
 - **Axis order:** always easting first, then northing (longitude, latitude), whatever the CRS's declared axis order.
