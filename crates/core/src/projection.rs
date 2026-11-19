@@ -1002,15 +1002,23 @@ impl Eqc {
 pub struct Aeqd {
     geod: Geodesic,
     lat_0: f64,
+    /// Distances from here (π·b) on are off the map, like d3's `clipAngle(180 − ε)`: the antipode's
+    /// cut locus starts there (for an equatorial origin, the equator within f·180° of the antipode,
+    /// which spreads over the outline), and segments into it would cut across the map.
+    max: f64,
 }
 
 impl Aeqd {
     fn new(el: Ellipsoid, lat_0: f64) -> Aeqd {
-        Aeqd { geod: Geodesic::new(el.a, 1.0 - (1.0 - el.e * el.e).sqrt()), lat_0 }
+        let b = el.a * (1.0 - el.e * el.e).sqrt();
+        Aeqd { geod: Geodesic::new(el.a, 1.0 - b / el.a), lat_0, max: PI * b }
     }
     fn forward(&self, lam: f64, phi: f64) -> [f64; 2] {
         let (s, azi, _, _): (f64, f64, f64, f64) =
             self.geod.inverse(self.lat_0, 0.0, phi.to_degrees(), lam.to_degrees());
+        if s >= self.max {
+            return [f64::NAN; 2];
+        }
         let (sin, cos) = azi.to_radians().sin_cos();
         [s * sin, s * cos]
     }
@@ -1018,6 +1026,9 @@ impl Aeqd {
         let s = hypot(x, y);
         if s < 1e-10 {
             return [0.0, self.lat_0.to_radians()];
+        }
+        if s >= self.max {
+            return [f64::NAN; 2];
         }
         let (lat, lon): (f64, f64) = self.geod.direct(self.lat_0, 0.0, x.atan2(y).to_degrees(), s);
         // Past the antipode (the map's edge) the geodesic is no longer the shortest.
