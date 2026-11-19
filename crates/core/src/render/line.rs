@@ -761,7 +761,9 @@ fn draw_feature(
                     frame = Some((v.pos, f));
                     let d = match points.last() {
                         Some(&(_, prev, d)) if !line_start => {
-                            d + ((f.0[0] - prev[0]).powi(2) + (f.0[1] - prev[1]).powi(2)).sqrt()
+                            // Steps to or from a point off the map (not drawn) add nothing.
+                            let step = ((f.0[0] - prev[0]).powi(2) + (f.0[1] - prev[1]).powi(2)).sqrt();
+                            d + if step.is_finite() { step } else { 0.0 }
                         }
                         _ => {
                             starts.push(points.len());

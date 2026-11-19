@@ -2700,6 +2700,38 @@ mod tests {
     }
 
     #[test]
+    fn projected_lines_to_the_antipode_stop_at_the_edge() {
+        // An ellipsoidal azimuthal equidistant (ESRI:54032) maps the last 0.6° of the equator before
+        // the antipode onto a quarter of its outline: the equator (vertices every degree, like
+        // demotiles') stops at the left and right edges instead of cutting across to the top, and
+        // its dashes, measured along the projected line, are unaffected by its ends off the map.
+        let style = r##"{"version":8,"sources":{"g":{"type":"geojson","tolerance":0,"data":{"type":"LineString","coordinates":[[-180,0],[-179,0],[179,0],[180,0]]}}},
+            "layers":[{"id":"bg","type":"background","paint":{"background-color":"#fff"}},
+            {"id":"l","type":"line","source":"g","paint":{"line-color":"#00f","line-width":4,"line-dasharray":[4,2]}}]}"##;
+        let n = 256usize;
+        let e = 20_020_000.0;
+        let view = reproject::ProjectedView {
+            projjson: test_crs::projected("Azimuthal Equidistant", test_crs::WGS84, &[]),
+            bbox: [-e, -e, e, e],
+            bearing: 0.0,
+            width: n as u32,
+            height: n as u32,
+            pixel_ratio: 1.0,
+            margin: 0,
+        };
+        let mut r = Renderer::new(style, View::tile(0, 0, 0, 512)).unwrap();
+        r.set_projected_view(&view).unwrap();
+        assert!(r.needs().is_empty());
+        let rgba = r.render().unwrap();
+        let blue: Vec<(usize, usize)> = (0..n * n)
+            .map(|i| (i % n, i / n))
+            .filter(|&(x, y)| rgba[(y * n + x) * 4 + 2] > 200 && rgba[(y * n + x) * 4] < 128)
+            .collect();
+        assert!(blue.iter().any(|&(x, _)| x < n / 10) && blue.iter().any(|&(x, _)| x > n * 9 / 10), "{blue:?}");
+        assert!(blue.iter().all(|&(_, y)| y.abs_diff(n / 2) < 8), "line off the equator: {blue:?}");
+    }
+
+    #[test]
     fn projected_views_west_of_an_eastern_central_meridian_draw() {
         // Equal Earth Asia-Pacific (central meridian 150°E): a view of the Americas (west of 0°,
         // more than 180° from 150°E in raw longitude) still draws.
