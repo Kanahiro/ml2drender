@@ -213,8 +213,11 @@ export interface RenderedImage {
   data: Uint8ClampedArray<ArrayBuffer>;
   /** Encode `data` inside WASM as an owned, lossless RGBA8 PNG. */
   toPng(): Uint8Array<ArrayBuffer>;
-  /** Encode `data` inside WASM as an owned, lossless WebP. */
-  toWebp(): Uint8Array<ArrayBuffer>;
+  /**
+   * Encode `data` inside WASM as an owned WebP: lossy at `quality` (0–100; alpha stays lossless),
+   * or lossless without one.
+   */
+  toWebp(quality?: number): Uint8Array<ArrayBuffer>;
   /** Encode `data` inside WASM as an owned JPEG of `quality` (1–100), flattened over black. */
   toJpeg(quality: number): Uint8Array<ArrayBuffer>;
 }
@@ -259,6 +262,7 @@ interface WasmExports {
   renderer_export_tile(handle: number, oldest: number): number;
   encode_png(ptr: number, len: number, width: number, height: number): number;
   encode_webp(ptr: number, len: number, width: number, height: number): number;
+  encode_webp_lossy(ptr: number, len: number, width: number, height: number, quality: number): number;
   encode_jpeg(ptr: number, len: number, width: number, height: number, quality: number): number;
   renderer_free(handle: number): void;
   projection_new(ptr: number, len: number): number;
@@ -635,7 +639,13 @@ export class MapRenderer {
       return this.output();
     };
     return {
-      width, height, data, toPng: encode(w.encode_png), toWebp: encode(w.encode_webp),
+      width, height, data, toPng: encode(w.encode_png),
+      toWebp: (quality) => {
+        if (quality === undefined) return encode(w.encode_webp)();
+        if (!Number.isFinite(quality)) throw new RangeError('quality must be finite');
+        const q = Math.min(100, Math.max(0, Math.round(quality)));
+        return encode((ptr, len, width, height) => w.encode_webp_lossy(ptr, len, width, height, q))();
+      },
       toJpeg: (quality) => {
         if (!Number.isFinite(quality)) throw new RangeError('quality must be finite');
         const q = Math.min(100, Math.max(1, Math.round(quality)));

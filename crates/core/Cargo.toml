@@ -17,6 +17,7 @@ image-webp = "0.2"
 i_overlay = { version = "9", default-features = false }
 jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
 geographiclib-rs = { version = "0.2.7", default-features = false }
+oxideav-webp = { version = "0.3.2", default-features = false }
 
 [lints]
 workspace = true

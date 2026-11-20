@@ -223,7 +223,8 @@ impl Task for Render {
 #[derive(Clone, Copy)]
 enum Format {
     Png,
-    Webp,
+    /// Lossless without a quality.
+    Webp(Option<u8>),
     Jpeg(u8),
 }
 
@@ -244,7 +245,8 @@ impl Task for Encode {
         let format = self.format;
         std::panic::catch_unwind(|| match format {
             Format::Png => ml2drender::encode_png(rgba, w, h),
-            Format::Webp => ml2drender::encode_webp(rgba, w, h),
+            Format::Webp(None) => ml2drender::encode_webp(rgba, w, h),
+            Format::Webp(Some(q)) => ml2drender::encode_webp_lossy(rgba, w, h, q),
             Format::Jpeg(q) => ml2drender::encode_jpeg(rgba, w, h, q),
         })
         .map_err(|_| Error::from_reason("encoder panicked"))?
@@ -266,8 +268,8 @@ pub fn encode_png(rgba: Uint8Array, width: u32, height: u32) -> AsyncTask<Encode
 }
 
 #[napi(ts_return_type = "Promise<Uint8Array>")]
-pub fn encode_webp(rgba: Uint8Array, width: u32, height: u32) -> AsyncTask<Encode> {
-    encode(rgba, width, height, Format::Webp)
+pub fn encode_webp(rgba: Uint8Array, width: u32, height: u32, quality: Option<u32>) -> AsyncTask<Encode> {
+    encode(rgba, width, height, Format::Webp(quality.map(|q| q.min(100) as u8)))
 }
 
 #[napi(ts_return_type = "Promise<Uint8Array>")]

@@ -102,8 +102,8 @@ class Renderer:
 def encode_png(rgba: bytes, width: int, height: int) -> bytes:
     """Lossless PNG of RGBA8 pixels."""
 
-def encode_webp(rgba: bytes, width: int, height: int) -> bytes:
-    """Lossless WebP of RGBA8 pixels."""
+def encode_webp(rgba: bytes, width: int, height: int, quality: int | None = None) -> bytes:
+    """WebP of RGBA8 pixels: lossy at ``quality`` (0–100; alpha stays lossless), or lossless without one."""
 
 def encode_jpeg(rgba: bytes, width: int, height: int, quality: int = 90) -> bytes:
     """JPEG of RGBA8 pixels at ``quality`` (1–100), flattened over black."""

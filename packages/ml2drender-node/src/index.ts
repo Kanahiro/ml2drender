@@ -190,7 +190,7 @@ interface NativeRenderer {
 interface Binding {
   Renderer: new (style: string) => NativeRenderer;
   encodePng(rgba: Uint8Array, width: number, height: number): Promise<Uint8Array>;
-  encodeWebp(rgba: Uint8Array, width: number, height: number): Promise<Uint8Array>;
+  encodeWebp(rgba: Uint8Array, width: number, height: number, quality?: number): Promise<Uint8Array>;
   encodeJpeg(rgba: Uint8Array, width: number, height: number, quality: number): Promise<Uint8Array>;
 }
 
@@ -307,8 +307,11 @@ export class Renderer {
 /** Lossless PNG of RGBA8 pixels. Runs on the thread pool; don't modify `rgba` until it resolves. */
 export const encodePng: (rgba: Uint8Array, width: number, height: number) => Promise<Uint8Array> = binding.encodePng;
 
-/** Lossless WebP of RGBA8 pixels. Runs on the thread pool; don't modify `rgba` until it resolves. */
-export const encodeWebp: (rgba: Uint8Array, width: number, height: number) => Promise<Uint8Array> = binding.encodeWebp;
+/**
+ * WebP of RGBA8 pixels: lossy at `quality` (0–100; alpha stays lossless), or lossless without one.
+ * Runs on the thread pool; don't modify `rgba` until it resolves.
+ */
+export const encodeWebp: (rgba: Uint8Array, width: number, height: number, quality?: number) => Promise<Uint8Array> = binding.encodeWebp;
 
 /**
  * JPEG of RGBA8 pixels at `quality` (1–100), flattened over black. Runs on the thread pool; don't

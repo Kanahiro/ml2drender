@@ -78,7 +78,7 @@ async with httpx.AsyncClient(headers={"Authorization": "Bearer ..."}, follow_red
 | `ProjectedBox(bbox, size, pixel_ratio=1.0, margin=0)` | A box of a CRS. `bbox` is `(min_x, min_y, max_x, max_y)` in CRS units (degrees for longlat), easting first, with the CRS's y axis up. The image has the box's aspect ratio and `size` CSS pixels on its long side. The rest is as in `View`. For a rotated view, use `render_view`. |
 | `ProjectedBox.pixels` | `(width, height)` of the output in pixels. |
 | `encode_png(rgba, width, height)` | Lossless PNG. |
-| `encode_webp(rgba, width, height)` | Lossless WebP. |
+| `encode_webp(rgba, width, height, quality=None)` | WebP: lossy at `quality` (0–100; alpha stays lossless), or lossless without one. |
 | `encode_jpeg(rgba, width, height, quality=90)` | JPEG, flattened over black. |
 
 Layers of types the renderer does not draw (fill-extrusion) are skipped; rewrite them in the style beforehand if you want them drawn.

@@ -32,7 +32,8 @@ assert.deepEqual(pixel(0, 0), [255, 255, 255, 255]);
 assert.deepEqual(pixel(32, 16), [255, 0, 0, 255]);
 
 assert.deepEqual([...(await encodePng(rgba, 64, 32)).subarray(1, 4)], [0x50, 0x4e, 0x47]);
-assert.deepEqual([...(await encodeWebp(rgba, 64, 32)).subarray(8, 12)], [0x57, 0x45, 0x42, 0x50]);
+assert.deepEqual([...(await encodeWebp(rgba, 64, 32)).subarray(8, 16)], [...Buffer.from('WEBPVP8L')]);
+assert.deepEqual([...(await encodeWebp(rgba, 64, 32, 75)).subarray(8, 16)], [...Buffer.from('WEBPVP8 ')]);
 assert.deepEqual([...(await encodeJpeg(rgba, 64, 32, 80)).subarray(0, 2)], [0xff, 0xd8]);
 // A JSON string is not a style.
 assert.throws(() => new Renderer(JSON.stringify(style) as any), TypeError);

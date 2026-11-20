@@ -57,6 +57,8 @@ class RenderTest(unittest.IsolatedAsyncioTestCase):
         png = ml2drender.encode_png(rgba, width, height)
         self.assertEqual(png[:4], b"\x89PNG")
         self.assertEqual(ml2drender.encode_jpeg(rgba, width, height)[:2], b"\xff\xd8")
+        self.assertEqual(ml2drender.encode_webp(rgba, width, height)[8:16], b"WEBPVP8L")
+        self.assertEqual(ml2drender.encode_webp(rgba, width, height, 75)[8:16], b"WEBPVP8 ")
 
     async def test_reuse(self):
         loaded = []

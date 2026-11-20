@@ -20,7 +20,7 @@ async function projectedPngs(renderer: MapRenderer): Promise<Uint8Array<ArrayBuf
   // The same camera as `renderer.renderView`.
   const view: Parameters<MapRenderer['renderView']>[0] = { center: [139.76, 35.68], zoom: 4, width: 512, height: 512 };
   const camera = await utmRenderer.renderView(view);
-  return [box.toPng(), tile.toWebp(), tile.toJpeg(80), camera.toPng()];
+  return [box.toPng(), tile.toWebp(), tile.toWebp(75), tile.toJpeg(80), camera.toPng()];
 }
 
 async function sourceTile(renderer: MapRenderer): Promise<Response> {

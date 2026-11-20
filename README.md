@@ -22,7 +22,7 @@ const style = await (await fetch('https://demotiles.maplibre.org/style.json')).j
 const renderer = await MapRenderer.init(style);
 
 const image = await renderer.renderView({ center: [139.767, 35.681], zoom: 5, width: 512, height: 512 });
-const png = image.toPng(); // or image.toWebp(), image.toJpeg(80); raw RGBA in image.data
+const png = image.toPng(); // or image.toWebp(), image.toWebp(80), image.toJpeg(80); raw RGBA in image.data
 ```
 
 The renderer works out which tiles, TileJSON, sprites and glyphs it needs, and fetches them. In browsers (with Vite or similar), the bundled WASM loads automatically. Elsewhere, pass the compiled module as the `wasm` option: `await WebAssembly.compile(readFileSync(new URL(import.meta.resolve('@ml2drender/wasm/renderer.wasm'))))` in Node.js and Deno, or `import wasm from '@ml2drender/wasm/renderer.wasm'` in Cloudflare Workers (Wrangler).
@@ -148,6 +148,7 @@ A `RenderedImage` has:
 - `width` and `height`.
 - `data`: row-major RGBA pixels in a `Uint8ClampedArray`.
 - `toPng()` and `toWebp()`: a lossless PNG or WebP, encoded inside WASM. WebP is about 30% smaller than PNG.
+- `toWebp(quality)`: a lossy WebP encoded inside WASM. `quality` is 0–100, chroma is subsampled 4:2:0, and alpha stays lossless.
 - `toJpeg(quality)`: a JPEG encoded inside WASM. `quality` is 1–100, chroma is subsampled 4:2:0, and transparent pixels become black.
 
 ### renderer.projected(crs)

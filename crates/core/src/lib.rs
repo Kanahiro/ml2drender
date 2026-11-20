@@ -186,6 +186,17 @@ pub fn encode_webp(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Erro
     Ok(bytes)
 }
 
+/// Lossy WebP (VP8) of row-major RGBA8 pixels at `quality` (0–100), e.g. the output of
+/// [`Renderer::render`]. Alpha, when any pixel is not opaque, is kept losslessly in an `ALPH` chunk.
+pub fn encode_webp_lossy(rgba: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, Error> {
+    if rgba.len() as u64 != width as u64 * height as u64 * 4 {
+        return Err(Error::ImageEncoding(format!("{} bytes is not {width}x{height} RGBA", rgba.len())));
+    }
+    // One thread: `core` runs on the caller's thread, and WASM cannot spawn one.
+    let options = oxideav_webp::EncodeOptions::default().with_quality(quality.min(100) as f32).with_threads(1);
+    oxideav_webp::encode_rgba8(width, height, rgba, &options).map_err(|e| Error::ImageEncoding(e.to_string()))
+}
+
 /// Baseline JPEG of row-major RGBA8 pixels at `quality` (1–100), flattened over black, with 4:2:0
 /// chroma subsampling at every quality (libjpeg's and sharp's default; the encoder's own keeps full
 /// chroma from quality 90, at about twice the encoding time and 1.5 times the size).
@@ -1731,6 +1742,23 @@ mod tests {
         decoder.read_image(&mut decoded).unwrap();
         assert_eq!(decoded, rgba);
         assert!(matches!(encode_webp(&rgba, 4, 3), Err(Error::ImageEncoding(_))));
+    }
+
+    #[test]
+    fn lossy_webp_keeps_size_and_alpha() {
+        // Opaque left half, transparent right half.
+        let rgba: Vec<u8> =
+            (0..32 * 16).flat_map(|i| [(i * 7 % 256) as u8, 90, 160, if i % 32 < 16 { 255 } else { 0 }]).collect();
+        let webp = encode_webp_lossy(&rgba, 32, 16, 75).unwrap();
+        assert_eq!(&webp[12..16], b"VP8X"); // alpha needs the extended format
+        let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(&webp)).unwrap();
+        assert_eq!(decoder.dimensions(), (32, 16));
+        let mut decoded = vec![0; decoder.output_buffer_size().unwrap()];
+        decoder.read_image(&mut decoded).unwrap();
+        assert!(decoded.as_chunks::<4>().0.iter().zip(rgba.as_chunks::<4>().0).all(|(d, s)| d[3] == s[3]));
+        let opaque: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+        assert_eq!(&encode_webp_lossy(&opaque, 32, 16, 75).unwrap()[12..16], b"VP8 ");
+        assert!(matches!(encode_webp_lossy(&rgba, 31, 16, 75), Err(Error::ImageEncoding(_))));
     }
 
     #[test]

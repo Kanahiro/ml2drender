@@ -142,10 +142,21 @@ fn encode_png<'py>(py: Python<'py>, rgba: &[u8], width: u32, height: u32) -> PyR
     Ok(PyBytes::new(py, &ml2drender::encode_png(rgba, width, height).map_err(error)?))
 }
 
-/// Lossless WebP of RGBA8 pixels.
+/// WebP of RGBA8 pixels: lossy at `quality` (0–100), or lossless without one.
 #[pyfunction]
-fn encode_webp<'py>(py: Python<'py>, rgba: &[u8], width: u32, height: u32) -> PyResult<Bound<'py, PyBytes>> {
-    Ok(PyBytes::new(py, &ml2drender::encode_webp(rgba, width, height).map_err(error)?))
+#[pyo3(signature = (rgba, width, height, quality = None))]
+fn encode_webp<'py>(
+    py: Python<'py>,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    quality: Option<u8>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let webp = match quality {
+        Some(q) => ml2drender::encode_webp_lossy(rgba, width, height, q),
+        None => ml2drender::encode_webp(rgba, width, height),
+    };
+    Ok(PyBytes::new(py, &webp.map_err(error)?))
 }
 
 /// JPEG of RGBA8 pixels at `quality` (1–100), flattened over black.

@@ -101,9 +101,9 @@ A tile has `z`, `x`, `y`, `tileSize` (CSS pixels), `pixelRatio` and `margin`, al
 
 The zoom that drives style evaluation and source tile selection comes from CRS units per CSS pixel (it is not the grid zoom of `renderTile` and `renderView`), as in [`@ml2drender/wasm`](https://github.com/Kanahiro/ml2drender#rendererprojectedcrs).
 
-### `encodePng(rgba, width, height)`, `encodeWebp(rgba, width, height)`, `encodeJpeg(rgba, width, height, quality)`
+### `encodePng(rgba, width, height)`, `encodeWebp(rgba, width, height, quality?)`, `encodeJpeg(rgba, width, height, quality)`
 
-Encode RGBA8 pixels on the thread pool. PNG and WebP are lossless; JPEG takes `quality` 1–100 and is flattened over black. Each returns a `Promise<Uint8Array>`.
+Encode RGBA8 pixels on the thread pool. PNG is lossless. WebP is lossy with `quality` 0–100 (alpha stays lossless) and lossless without it. JPEG takes `quality` 1–100 and is flattened over black. Each returns a `Promise<Uint8Array>`.
 
 ## License
 
