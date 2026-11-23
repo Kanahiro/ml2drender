@@ -1,7 +1,10 @@
 //! Symbol bucket construction (`SymbolBucket.populate` + `performSymbolLayout`): text and icon
 //! evaluation, shaping, anchors, quads and collision boxes for one tile of one layer.
 
+use std::borrow::Cow;
+
 use super::anchors::{self, Anchor, P};
+use super::arabic;
 use super::glyphs::{BORDER, Glyphs};
 use super::shaping::{self, IMAGE_PADDING, ONE_EM, PositionedIcon, SHAPING_DEFAULT_OFFSET, Shaping, Tex, WritingMode};
 use super::unicode;
@@ -335,6 +338,9 @@ pub fn feature_text(
             Some("uppercase") => s.text = s.text.to_uppercase(),
             Some("lowercase") => s.text = s.text.to_lowercase(),
             _ => {}
+        }
+        if let Cow::Owned(shaped) = arabic::shape(&s.text) {
+            s.text = shaped;
         }
     }
     FeatureText { text: Some(text), font_stack }

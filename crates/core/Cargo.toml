@@ -9,6 +9,7 @@ license.workspace = true
 serde_json.workspace = true
 indexmap = "2"
 unicode-normalization = "0.1"
+unicode-bidi = "0.3"
 earcut = "0.4"
 miniz_oxide = "0.8"
 png = "0.18"

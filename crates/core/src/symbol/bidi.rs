@@ -1,0 +1,201 @@
+//! Bidirectional reordering of a label's lines (`bidi.ts`). Embedding levels come from the
+//! `unicode-bidi` crate (UAX #9 up to rule I2); line rules L1 and L2 and mirroring are applied here,
+//! one cluster at a time so that a letter and the marks written on it move together (rule L3).
+
+use unicode_bidi::{BidiClass, BidiInfo};
+
+use super::rtl_data::{MIRRORED, RTL_SCRIPTS};
+
+/// `codePointIsInRTLScript`.
+pub fn is_rtl(c: char) -> bool {
+    let cp = c as u32;
+    in_ranges(cp, RTL_SCRIPTS)
+}
+
+/// Whether `cp` is in one of the sorted, disjoint inclusive `ranges`.
+pub fn in_ranges(cp: u32, ranges: &[(u32, u32)]) -> bool {
+    let i = ranges.partition_point(|&(_, b)| b < cp);
+    ranges.get(i).is_some_and(|&(a, _)| a <= cp)
+}
+
+/// `stringContainsRTLText`.
+pub fn contains_rtl(chars: &[char]) -> bool {
+    chars.iter().any(|&c| is_rtl(c))
+}
+
+/// Characters that steer the algorithm without being drawn.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Whether `c` belongs to the cluster of the character before it.
+// ponytail: an approximation of extended grapheme clusters (marks, joiners and CR LF), which is
+// what keeps a right-to-left letter and its marks together.
+fn extends_cluster(prev: char, c: char) -> bool {
+    unicode_normalization::char::is_combining_mark(c)
+        || matches!(c, '\u{200c}' | '\u{200d}')
+        || (prev == '\r' && c == '\n')
+}
+
+fn mirror(c: char) -> char {
+    match MIRRORED.binary_search_by_key(&(c as u32), |e| e.0) {
+        Ok(i) => char::from_u32(MIRRORED[i].1).unwrap_or(c),
+        Err(_) => c,
+    }
+}
+
+struct Cluster {
+    start: usize,
+    end: usize,
+    level: u8,
+}
+
+/// Rule L1: separators, and whitespace and isolates before them or at the end of the line, take
+/// the paragraph level.
+fn reset_trailing_neutrals(clusters: &mut [Cluster], classes: &[BidiClass], paragraph_level: u8) {
+    let mut trailing = true;
+    for cl in clusters.iter_mut().rev() {
+        match classes[cl.start] {
+            BidiClass::S | BidiClass::B => {
+                cl.level = paragraph_level;
+                trailing = true;
+            }
+            BidiClass::WS | BidiClass::FSI | BidiClass::LRI | BidiClass::RLI | BidiClass::PDI if trailing => {
+                cl.level = paragraph_level;
+            }
+            _ => trailing = false,
+        }
+    }
+}
+
+/// Rule L2: from the highest level down to the lowest odd one, reverse every run at that level or above.
+fn reorder(clusters: &mut [Cluster], paragraph_level: u8) {
+    let highest = clusters.iter().map(|c| c.level).max().unwrap_or(0).max(paragraph_level);
+    let Some(lowest_odd) = clusters.iter().map(|c| c.level | 1).min() else { return };
+    let mut level = highest;
+    while level >= lowest_odd {
+        let mut start = 0;
+        while start < clusters.len() {
+            if clusters[start].level < level {
+                start += 1;
+                continue;
+            }
+            let mut end = start;
+            while end + 1 < clusters.len() && clusters[end + 1].level >= level {
+                end += 1;
+            }
+            clusters[start..=end].reverse();
+            start = end + 1;
+        }
+        level -= 1;
+    }
+}
+
+/// `processLines`: breaks `chars` at `breaks` and at every paragraph start, and puts each line in
+/// visual order. Each output character comes with the index of the input character it came from
+/// (the start of its cluster).
+pub fn reorder_lines(chars: &[char], breaks: &[usize]) -> Vec<Vec<(char, usize)>> {
+    let text: String = chars.iter().collect();
+    let info = BidiInfo::new(&text, None);
+    let byte_of: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+    let levels: Vec<u8> = byte_of.iter().map(|&b| info.levels[b].number()).collect();
+    let classes: Vec<BidiClass> = byte_of.iter().map(|&b| info.original_classes[b]).collect();
+    let char_at = |byte: usize| byte_of.partition_point(|&b| b < byte);
+    let paragraphs: Vec<(usize, usize, u8)> =
+        info.paragraphs.iter().map(|p| (char_at(p.range.start), char_at(p.range.end), p.level.number())).collect();
+
+    let n = chars.len();
+    let mut bounds: Vec<usize> =
+        breaks.iter().copied().chain(paragraphs.iter().map(|p| p.0)).filter(|&b| b > 0 && b < n).collect();
+    bounds.push(0);
+    bounds.push(n);
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    bounds
+        .windows(2)
+        .map(|w| {
+            let (start, end) = (w[0], w[1]);
+            let paragraph_level = paragraphs.iter().find(|p| start >= p.0 && start < p.1).map_or(0, |p| p.2);
+            let mut clusters = Vec::new();
+            let mut i = start;
+            while i < end {
+                let mut j = i + 1;
+                while j < end && extends_cluster(chars[j - 1], chars[j]) {
+                    j += 1;
+                }
+                clusters.push(Cluster { start: i, end: j, level: levels[i] });
+                i = j;
+            }
+            reset_trailing_neutrals(&mut clusters, &classes, paragraph_level);
+            reorder(&mut clusters, paragraph_level);
+            let mut line = Vec::with_capacity(end - start);
+            for cl in &clusters {
+                let text = &chars[cl.start..cl.end];
+                if text.iter().any(|&c| is_bidi_control(c)) {
+                    continue;
+                }
+                // Only a cluster of one character has a mirror image (`getMirroredCharacter`).
+                let mirrored = cl.level % 2 == 1 && text.len() == 1;
+                line.extend(text.iter().map(|&c| (if mirrored { mirror(c) } else { c }, cl.start)));
+            }
+            line
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(text: &str, breaks: &[usize]) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+        reorder_lines(&chars, breaks).into_iter().map(|l| l.into_iter().map(|(c, _)| c).collect()).collect()
+    }
+
+    #[test]
+    fn detects_rtl() {
+        assert!(is_rtl('א') && is_rtl('ب') && is_rtl('\u{fefb}'));
+        // Marks are of the Inherited script, so they do not make text right to left on their own.
+        assert!(!is_rtl('a') && !is_rtl('1') && !is_rtl(' ') && !is_rtl('\u{064e}'));
+    }
+
+    // Cases from maplibre-gl-js test/unit/symbol/bidi.test.ts.
+    #[test]
+    fn reverses_rtl_runs() {
+        assert_eq!(lines("שלום", &[]), ["םולש"]);
+        assert_eq!(lines("abc שלום def", &[]), ["abc םולש def"]);
+        // Numbers keep their order inside right-to-left text.
+        assert_eq!(lines("שלום 123", &[]), ["123 םולש"]);
+    }
+
+    #[test]
+    fn mirrors_brackets() {
+        assert_eq!(lines("(שלום)", &[]), ["(םולש)"]);
+    }
+
+    #[test]
+    fn breaks_then_reorders_each_line() {
+        // Broken after the space, each line is reordered on its own; the trailing space takes the
+        // paragraph's direction (L1) and ends up on the left.
+        assert_eq!(lines("אבג דהו", &[4]), [" גבא", "והד"]);
+    }
+
+    #[test]
+    fn paragraphs_take_their_own_direction() {
+        assert_eq!(lines("abc\nשלום", &[]), ["abc\n", "םולש"]);
+    }
+
+    #[test]
+    fn keeps_marks_after_their_letter() {
+        // שָׁ (shin, qamats, shin dot) then lamed: the marks stay after the shin.
+        assert_eq!(lines("\u{05e9}\u{05b8}\u{05c1}\u{05dc}", &[]), ["\u{05dc}\u{05e9}\u{05b8}\u{05c1}"]);
+    }
+
+    #[test]
+    fn drops_controls_and_tracks_sources() {
+        let chars: Vec<char> = "a\u{200f}בג".chars().collect();
+        let line = &reorder_lines(&chars, &[])[0];
+        assert_eq!(line, &[('a', 0), ('ג', 3), ('ב', 2)]);
+    }
+}

@@ -6,17 +6,8 @@
     "is-supported-script/layout",
     "regressions/mapbox-gl-native#11729",
     "symbol-placement/point-polygon-high-zoom",
-    "text-arabic/letter-spacing",
-    "text-arabic/line-break",
-    "text-arabic/line-break-mixed",
-    "text-arabic/mixed-numeric",
-    "text-arabic/multi-paragraph",
-    "text-arabic/persian-and-urdu",
-    "text-arabic/wrapped-mixed-and-numbers",
-    "text-field/formatted-arabic",
     "text-field/formatted-images",
     "text-local-glyphs/complex-script",
-    "text-writing-mode/point_label/cjk-arabic-vertical-mode",
     "visibility/symbol/visible"
   ],
   "expression": [

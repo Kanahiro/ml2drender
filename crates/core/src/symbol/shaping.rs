@@ -2,6 +2,7 @@
 //! anchor alignment from PBF glyph metrics. Grapheme clusters are taken one code point at a time,
 //! which is what MapLibre does for clusters no glyph file covers.
 
+use super::bidi;
 use super::glyphs::{BORDER, Glyph, Glyphs, Metrics};
 use super::unicode;
 use crate::expression::value::Formatted;
@@ -302,16 +303,23 @@ pub fn shape_text(
         // No font provides vertical glyph variants (PBF glyphs), so compatibility forms are used.
         input.chars = unicode::verticalize_punctuation(&input.chars);
     }
-    // ponytail: no bidi reordering; right-to-left text is laid out in logical order.
     let breaks = ctx.line_breaks(&input, spacing, max_width, layout_text_size);
     let mut lines = Vec::new();
-    let mut start = 0;
-    for b in breaks {
-        lines.push(Tagged { chars: input.chars[start..b].to_vec(), section: input.section[start..b].to_vec() });
-        start = b;
-    }
-    if start < input.chars.len() {
-        lines.push(Tagged { chars: input.chars[start..].to_vec(), section: input.section[start..].to_vec() });
+    if bidi::contains_rtl(&input.chars) {
+        // Lines are broken in logical order, then each is put in the order it is drawn.
+        for line in bidi::reorder_lines(&input.chars, &breaks) {
+            let (chars, section) = line.into_iter().map(|(c, from)| (c, input.section[from])).unzip();
+            lines.push(Tagged { chars, section });
+        }
+    } else {
+        let mut start = 0;
+        for b in breaks {
+            lines.push(Tagged { chars: input.chars[start..b].to_vec(), section: input.section[start..b].to_vec() });
+            start = b;
+        }
+        if start < input.chars.len() {
+            lines.push(Tagged { chars: input.chars[start..].to_vec(), section: input.section[start..].to_vec() });
+        }
     }
     let mut shaping = Shaping {
         lines: Vec::new(),

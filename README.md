@@ -5,7 +5,7 @@
 [Live demo](https://kanahiro.github.io/ml2drender/) · [API reference](https://kanahiro.github.io/ml2drender/api/) · [Quick start](#quick-start) · [Projected CRSs](#projected-coordinate-reference-systems) · [Node.js addon](https://github.com/Kanahiro/ml2drender/tree/main/packages/ml2drender-node#readme) · [Python](https://github.com/Kanahiro/ml2drender/tree/main/crates/python#readme) ([Colab notebook](https://colab.research.google.com/github/Kanahiro/ml2drender/blob/main/examples/python/quickstart.ipynb))
 
 - **No GPU, no native dependencies.** It is a software rasterizer in pure Rust. It runs on `wasm32-unknown-unknown` and links no C libraries.
-- **Faithful to MapLibre.** Bucket building, shader math and quantization are ported from MapLibre GL JS. It passes 98.3% of the applicable upstream render tests at GL JS's own tolerances ([conformance](#conformance)).
+- **Faithful to MapLibre.** Bucket building, shader math and quantization are ported from MapLibre GL JS. It passes 99.2% of the applicable upstream render tests at GL JS's own tolerances ([conformance](#conformance)).
 - **Any projected CRS.** It draws maps directly in a CRS given as PROJJSON: UTM, national grids (including US State Plane in feet), Albers, LAEA, polar and oblique stereographic, world maps (Equal Earth, Robinson, Mollweide, Winkel Tripel…), orthographic and geostationary views and more.
 - **MapLibre GL JS in any CRS.** Every source of a style (vector tiles, GeoJSON, raster, DEM) can be reprojected and served on a CRS's tile grid. MapLibre GL JS can then draw the original style in that CRS, with interaction and feature queries.
 - **Made for serverless.** The core does no network or file I/O; the host fetches everything.
@@ -226,12 +226,12 @@ The [MapLibre GL JS render tests](https://github.com/maplibre/maplibre-gl-js/tre
 
 | Suite | Result |
 |---|---|
-| Render tests (1008 applicable) | 991 pass / 17 fail (98.3%) |
+| Render tests (1008 applicable) | 1000 pass / 8 fail (99.2%) |
 | Expression tests (Style Spec, 583) | 581 pass / 2 fail (99.7%) |
 
 The 727 tests out of scope cover 3D, pitch, non-Mercator GL projections and runtime style changes. Main known gaps:
 
-- Bidirectional text and Arabic shaping. Glyphs drawn with browser fonts (TinySDF) are not available either.
+- Glyphs drawn with browser fonts (TinySDF), which GL JS also uses for complex scripts such as Devanagari.
 - History-dependent placement (`prevAnchor`, CrossTileSymbolIndex). Single still images cannot reproduce it.
 - Locale-sensitive collation, and `number-format` in locales other than en-US.
 - Sub-pixel rounding of the GPU the reference images were drawn with (SwiftShader snaps vertices to 1/16 px). It moves a pixel row or texel in a few tests.
