@@ -90,9 +90,9 @@ pub fn unshaped(c: char) -> Option<(char, Option<char>)> {
     char::from_u32(base.into()).map(|b| (b, None))
 }
 
-/// A mark that shaping always replaces by a presentation form, so one met after shaping is a
-/// fallback from [`unshaped`].
-pub fn is_fallback_mark(c: char) -> bool {
+/// A mark that has presentation forms. Shaping leaves one bare only between lam and alef, so one
+/// met after shaping is that or a fallback from [`unshaped`], and is drawn centered on its letter.
+pub fn is_bare_mark(c: char) -> bool {
     joining_type(c) == Joining::T
         && u16::try_from(c as u32).is_ok_and(|cp| PRESENTATION_FORMS.binary_search_by_key(&cp, |e| e.0).is_ok())
 }
@@ -140,8 +140,11 @@ pub fn shape(text: &str) -> Cow<'_, str> {
                 let joined_before = matches!(lam.form, Some(Form::Medial | Form::Final));
                 let cp = LAM_ALEF[l].1[usize::from(joined_before)];
                 out.push(char::from_u32(cp as u32).unwrap_or(lam.c));
+                // The marks of the lam stay bare and are centered on the ligature (`is_bare_mark`).
+                // GL JS gives them the medial form, whose tatweel is left as a dash after the
+                // ligature, which joins nothing on.
                 for mark in &chars[i + 1..next] {
-                    out.push(presentation_form(mark));
+                    out.push(mark.c);
                 }
                 i = next + 1;
                 continue;
@@ -186,8 +189,10 @@ mod tests {
         // لا on its own, then after a beh that joins to it.
         assert_eq!(shape("لا"), "\u{FEFB}");
         assert_eq!(shape("بلا"), "\u{FE91}\u{FEFC}");
-        // A mark between lam and alef follows the ligature, shaped by the lam it was written on.
-        assert_eq!(shape("لَا"), "\u{FEFB}\u{FE77}");
+        // A mark between lam and alef follows the ligature and stays bare (GL JS gives U+FE77, a
+        // fatha on a tatweel).
+        assert_eq!(shape("لَا"), "\u{FEFB}\u{064E}");
+        assert_eq!(shape("سَلَام"), "\u{FEB3}\u{FE77}\u{FEFC}\u{064E}\u{FEE1}");
     }
 
     #[test]
@@ -199,8 +204,8 @@ mod tests {
         assert_eq!(unshaped('\u{FEFC}'), Some(('\u{0644}', Some('\u{0627}'))));
         assert_eq!(unshaped('\u{0628}'), None);
         assert_eq!(unshaped('a'), None);
-        assert!(super::is_fallback_mark('\u{064E}'));
-        assert!(!super::is_fallback_mark('\u{0670}') && !super::is_fallback_mark('\u{0628}'));
+        assert!(super::is_bare_mark('\u{064E}'));
+        assert!(!super::is_bare_mark('\u{0670}') && !super::is_bare_mark('\u{0628}'));
     }
 
     #[test]
