@@ -28,12 +28,19 @@ fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
-/// Whether `c` belongs to the cluster of the character before it.
-// ponytail: an approximation of extended grapheme clusters (marks, joiners and CR LF), which is
-// what keeps a right-to-left letter and its marks together.
-fn extends_cluster(prev: char, c: char) -> bool {
+fn is_regional_indicator(c: char) -> bool {
+    matches!(c, '\u{1f1e6}'..='\u{1f1ff}')
+}
+
+/// Whether `c` belongs to the cluster of the character before it, `prev`. `open_flag` is whether
+/// the cluster so far is a single regional indicator, which pairs with the next one.
+// ponytail: an approximation of extended grapheme clusters (marks, joiners and what a ZWJ joins,
+// emoji modifiers, flags and CR LF), which is what keeps a right-to-left letter and its marks together.
+fn extends_cluster(prev: char, c: char, open_flag: bool) -> bool {
     unicode_normalization::char::is_combining_mark(c)
-        || matches!(c, '\u{200c}' | '\u{200d}')
+        || matches!(c, '\u{200c}' | '\u{200d}' | '\u{1f3fb}'..='\u{1f3ff}')
+        || prev == '\u{200d}'
+        || (open_flag && is_regional_indicator(c))
         || (prev == '\r' && c == '\n')
 }
 
@@ -121,7 +128,9 @@ pub fn reorder_lines(chars: &[char], breaks: &[usize]) -> Vec<Vec<(char, usize)>
             let mut i = start;
             while i < end {
                 let mut j = i + 1;
-                while j < end && extends_cluster(chars[j - 1], chars[j]) {
+                let mut open_flag = is_regional_indicator(chars[i]);
+                while j < end && extends_cluster(chars[j - 1], chars[j], open_flag) {
+                    open_flag = false;
                     j += 1;
                 }
                 clusters.push(Cluster { start: i, end: j, level: levels[i] });
@@ -190,6 +199,26 @@ mod tests {
     fn keeps_marks_after_their_letter() {
         // שָׁ (shin, qamats, shin dot) then lamed: the marks stay after the shin.
         assert_eq!(lines("\u{05e9}\u{05b8}\u{05c1}\u{05dc}", &[]), ["\u{05dc}\u{05e9}\u{05b8}\u{05c1}"]);
+    }
+
+    #[test]
+    fn keeps_emoji_sequences_and_flags_whole() {
+        // A family (ZWJ sequence), a thumbs up with a skin tone and two flags inside right-to-left text.
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let thumbs = "\u{1f44d}\u{1f3fd}";
+        let flags = "\u{1f1ef}\u{1f1f5}\u{1f1eb}\u{1f1f7}";
+        assert_eq!(lines(&format!("א{family}ב"), &[]), [format!("ב{family}א")]);
+        assert_eq!(lines(&format!("א{thumbs}ב"), &[]), [format!("ב{thumbs}א")]);
+        // Regional indicators are left to right, so the flags also keep their order.
+        assert_eq!(lines(&format!("א{flags}ב"), &[]), [format!("ב{flags}א")]);
+    }
+
+    #[test]
+    fn orders_mixed_arabic_numbers_and_latin() {
+        // Numbers and Latin keep their own order inside a right-to-left paragraph.
+        assert_eq!(lines("12 - شارع", &[]), ["عراش - 12"]);
+        assert_eq!(lines("شارع Cafe", &[]), ["Cafe عراش"]);
+        assert_eq!(lines("Cafe شارع", &[]), ["Cafe عراش"]);
     }
 
     #[test]
