@@ -37,7 +37,8 @@ fn is_regional_indicator(c: char) -> bool {
 // ponytail: an approximation of extended grapheme clusters (marks, joiners and what a ZWJ joins,
 // emoji modifiers, flags and CR LF), which is what keeps a right-to-left letter and its marks together.
 fn extends_cluster(prev: char, c: char, open_flag: bool) -> bool {
-    unicode_normalization::char::is_combining_mark(c)
+    // A bidi control is dropped with its cluster, so nothing is attached to it.
+    !is_bidi_control(prev) && unicode_normalization::char::is_combining_mark(c)
         || matches!(c, '\u{200c}' | '\u{200d}' | '\u{1f3fb}'..='\u{1f3ff}')
         || prev == '\u{200d}'
         || (open_flag && is_regional_indicator(c))
@@ -67,7 +68,20 @@ fn reset_trailing_neutrals(clusters: &mut [Cluster], classes: &[BidiClass], para
                 cl.level = paragraph_level;
                 trailing = true;
             }
-            BidiClass::WS | BidiClass::FSI | BidiClass::LRI | BidiClass::RLI | BidiClass::PDI if trailing => {
+            // Embedding controls and boundary neutrals count as well: rule X9 takes them out of the text.
+            BidiClass::WS
+            | BidiClass::FSI
+            | BidiClass::LRI
+            | BidiClass::RLI
+            | BidiClass::PDI
+            | BidiClass::BN
+            | BidiClass::LRE
+            | BidiClass::RLE
+            | BidiClass::LRO
+            | BidiClass::RLO
+            | BidiClass::PDF
+                if trailing =>
+            {
                 cl.level = paragraph_level;
             }
             _ => trailing = false,
@@ -219,6 +233,14 @@ mod tests {
         assert_eq!(lines("12 - شارع", &[]), ["عراش - 12"]);
         assert_eq!(lines("شارع Cafe", &[]), ["Cafe عراش"]);
         assert_eq!(lines("Cafe شارع", &[]), ["Cafe عراش"]);
+    }
+
+    #[test]
+    fn resets_whitespace_before_trailing_controls() {
+        // The space before the closing PDF is trailing whitespace once the control is taken out.
+        assert_eq!(lines("abc \u{202b}אבג \u{202c}", &[]), ["abc גבא "]);
+        // A mark after a control is kept when the control is dropped.
+        assert_eq!(lines("ב\u{200f}\u{05b8}", &[]), ["\u{05b8}ב"]);
     }
 
     #[test]
