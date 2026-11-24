@@ -79,6 +79,24 @@ fn presentation_form(s: &Shaped) -> char {
     if f == 0 { s.c } else { char::from_u32(f as u32).unwrap_or(s.c) }
 }
 
+/// The characters a presentation form stands for: the letter or mark of a contextual form, or lam
+/// and alef for a lam-alef ligature. `None` for any other character.
+pub fn unshaped(c: char) -> Option<(char, Option<char>)> {
+    let cp = u16::try_from(c as u32).ok().filter(|cp| (0xFB50..=0xFEFF).contains(cp))?;
+    if let Some(&(alef, _)) = LAM_ALEF.iter().find(|e| e.1.contains(&cp)) {
+        return Some((LAM, char::from_u32(alef.into())));
+    }
+    let &(base, _) = PRESENTATION_FORMS.iter().find(|e| e.1.contains(&cp))?;
+    char::from_u32(base.into()).map(|b| (b, None))
+}
+
+/// A mark that shaping always replaces by a presentation form, so one met after shaping is a
+/// fallback from [`unshaped`].
+pub fn is_fallback_mark(c: char) -> bool {
+    joining_type(c) == Joining::T
+        && u16::try_from(c as u32).is_ok_and(|cp| PRESENTATION_FORMS.binary_search_by_key(&cp, |e| e.0).is_ok())
+}
+
 /// `applyArabicShaping`: text with no Arabic in it is returned as it is.
 pub fn shape(text: &str) -> Cow<'_, str> {
     if !text.chars().any(unicode::is_arabic) {
@@ -170,6 +188,19 @@ mod tests {
         assert_eq!(shape("بلا"), "\u{FE91}\u{FEFC}");
         // A mark between lam and alef follows the ligature, shaped by the lam it was written on.
         assert_eq!(shape("لَا"), "\u{FEFB}\u{FE77}");
+    }
+
+    #[test]
+    fn unshapes_presentation_forms() {
+        use super::unshaped;
+        assert_eq!(unshaped('\u{FE91}'), Some(('\u{0628}', None)));
+        assert_eq!(unshaped('\u{FE77}'), Some(('\u{064E}', None)));
+        assert_eq!(unshaped('\u{FBFD}'), Some(('\u{06CC}', None)));
+        assert_eq!(unshaped('\u{FEFC}'), Some(('\u{0644}', Some('\u{0627}'))));
+        assert_eq!(unshaped('\u{0628}'), None);
+        assert_eq!(unshaped('a'), None);
+        assert!(super::is_fallback_mark('\u{064E}'));
+        assert!(!super::is_fallback_mark('\u{0670}') && !super::is_fallback_mark('\u{0628}'));
     }
 
     #[test]

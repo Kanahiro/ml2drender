@@ -2,6 +2,7 @@
 //! anchor alignment from PBF glyph metrics. Grapheme clusters are taken one code point at a time,
 //! which is what MapLibre does for clusters no glyph file covers.
 
+use super::arabic;
 use super::bidi;
 use super::glyphs::{BORDER, Glyph, Glyphs, Metrics};
 use super::unicode;
@@ -286,12 +287,19 @@ pub fn shape_text(
                 (SectionKind::Image { name: img.name.clone() }, vec![c])
             }
             Some(_) => continue,
-            None => (
-                SectionKind::Text {
-                    font_stack: s.font_stack.clone().unwrap_or_else(|| default_font_stack.to_string()),
-                },
-                s.text.chars().collect(),
-            ),
+            None => {
+                let font_stack = s.font_stack.clone().unwrap_or_else(|| default_font_stack.to_string());
+                let mut chars = Vec::with_capacity(s.text.len());
+                for c in s.text.chars() {
+                    // A font without this presentation form (Cairo has no mark forms, Lateef none at all)
+                    // gets the unjoined letter, where GL JS draws nothing.
+                    match arabic::unshaped(c).filter(|_| glyphs.get(&font_stack, c).is_none()) {
+                        Some((a, b)) => chars.extend(std::iter::once(a).chain(b)),
+                        None => chars.push(c),
+                    }
+                }
+                (SectionKind::Text { font_stack }, chars)
+            }
         };
         let scale =
             if matches!(kind, SectionKind::Image { .. }) { 1.0 } else { s.scale.filter(|&v| v != 0.0).unwrap_or(1.0) };
@@ -400,6 +408,8 @@ fn shape_lines(
         let content_width = (line_max_scale * ONE_EM).max(max_image(0) * size_factor);
         let line_verticals = (writing_mode == WritingMode::Vertical && !allow_vertical_placement)
             .then(|| line_verticals(&mut line, &ctx.sections));
+        // The last glyph that is not a fallback mark, which the marks after it are centered on.
+        let mut base: Option<usize> = None;
         for i in 0..line.chars.len() {
             let c = line.chars[i];
             let si = line.section[i];
@@ -443,6 +453,23 @@ fn shape_lines(
                 }
             };
             let is_image = matches!(tex, Tex::Image(_));
+            // A mark the font has no presentation form for has no anchor either (no GPOS in PBF
+            // glyphs): centered over its letter with no advance, as HarfBuzz places marks without GPOS.
+            if let Some(b) = base.filter(|_| !vertical && arabic::is_fallback_mark(c)) {
+                let b = &positioned.glyphs[b];
+                let center = b.x + (b.metrics.left + b.metrics.width / 2.0) * b.scale;
+                positioned.glyphs.push(PositionedGlyph {
+                    x: center - (metrics.left + metrics.width / 2.0) * section.scale,
+                    y: y + SHAPING_DEFAULT_OFFSET + baseline_offset,
+                    vertical,
+                    scale: section.scale,
+                    section: si,
+                    metrics,
+                    tex,
+                });
+                continue;
+            }
+            base = Some(positioned.glyphs.len());
             positioned.glyphs.push(PositionedGlyph {
                 x,
                 y: y + SHAPING_DEFAULT_OFFSET + baseline_offset,
