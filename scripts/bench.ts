@@ -92,6 +92,8 @@ const cases: {name: string; style: string; view: View; then?: View[]}[] = [
   {name: 'hillshade + color-relief', style: 'dem', view: {center: terrain, zoom: 13, width: 512, height: 512, pixelRatio: 2}},
   {name: 'hillshade + color-relief, margin 64', style: 'dem', view: {center: terrain, zoom: 13, width: 512, height: 512, pixelRatio: 2, margin: 64}},
   {name: 'bright z14, margin 64', style: 'bright', view: {center: berlin, zoom: 14, width: 512, height: 512, margin: 64}},
+  {name: 'bright tile 14/8802/5374, margin 64', style: 'bright', view: {center: tile(14, 8802.5, 5374.5), zoom: 14, width: 512, height: 512, margin: 64}},
+  {name: 'bright tile 14/8802/5374 bearing 17°, margin 64', style: 'bright', view: {center: tile(14, 8802.5, 5374.5), zoom: 14, bearing: 17, width: 512, height: 512, margin: 64}},
   {name: 'raster', style: 'satellite', view: {center: terrain, zoom: 13.5, bearing: 17, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON lines, 8 layers', style: 'lines', view: {center: berlin, zoom: 14, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON 10k labels', style: 'labels', view: {center: berlin, zoom: 14, width: 512, height: 512}},
