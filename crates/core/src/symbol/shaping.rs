@@ -2,6 +2,7 @@
 //! anchor alignment from PBF glyph metrics. Grapheme clusters are taken one code point at a time,
 //! which is what MapLibre does for clusters no glyph file covers.
 
+use super::arabic;
 use super::glyphs::{BORDER, Glyph, Glyphs, Metrics};
 use super::unicode;
 use crate::expression::value::Formatted;
@@ -285,12 +286,28 @@ pub fn shape_text(
                 (SectionKind::Image { name: img.name.clone() }, vec![c])
             }
             Some(_) => continue,
-            None => (
-                SectionKind::Text {
-                    font_stack: s.font_stack.clone().unwrap_or_else(|| default_font_stack.to_string()),
-                },
-                s.text.chars().collect(),
-            ),
+            None => {
+                let font_stack = s.font_stack.clone().unwrap_or_else(|| default_font_stack.to_string());
+                // A presentation form the font lacks (Cairo has no mark forms, Lateef almost no Forms-B)
+                // is drawn as the letter it stands for, where GL JS draws nothing. The alef of a missing
+                // lam-alef waits until the lam's marks are out.
+                let mut chars = Vec::with_capacity(s.text.len());
+                let mut alef = None;
+                for c in s.text.chars() {
+                    if !arabic::is_bare_mark(c) {
+                        chars.extend(alef.take());
+                    }
+                    match arabic::unshaped(c).filter(|_| glyphs.get(&font_stack, c).is_none()) {
+                        Some((a, b)) => {
+                            chars.push(a);
+                            alef = b;
+                        }
+                        None => chars.push(c),
+                    }
+                }
+                chars.extend(alef);
+                (SectionKind::Text { font_stack }, chars)
+            }
         };
         let scale =
             if matches!(kind, SectionKind::Image { .. }) { 1.0 } else { s.scale.filter(|&v| v != 0.0).unwrap_or(1.0) };
@@ -397,6 +414,8 @@ fn shape_lines(
         let content_width = (line_max_scale * ONE_EM).max(max_image(0) * size_factor);
         let line_verticals = (writing_mode == WritingMode::Vertical && !allow_vertical_placement)
             .then(|| line_verticals(&mut line, &ctx.sections));
+        // The last glyph with an advance, which a bare mark after it is centered on.
+        let mut base: Option<usize> = None;
         for i in 0..line.chars.len() {
             let c = line.chars[i];
             let si = line.section[i];
@@ -439,6 +458,23 @@ fn shape_lines(
                     (Tex::Image(img.clone()), metrics, offset)
                 }
             };
+            // A bare mark (from a missing presentation form, or on the lam of a lam-alef) has no anchor
+            // in PBF glyphs: centered over its letter with no advance, as HarfBuzz places marks without GPOS.
+            if let Some(b) = base.filter(|_| !vertical && arabic::is_bare_mark(c)) {
+                let b = &positioned.glyphs[b];
+                let center = b.x + (b.metrics.left + b.metrics.width / 2.0) * b.scale;
+                positioned.glyphs.push(PositionedGlyph {
+                    x: center - (metrics.left + metrics.width / 2.0) * section.scale,
+                    y: y + SHAPING_DEFAULT_OFFSET + baseline_offset,
+                    vertical,
+                    scale: section.scale,
+                    section: si,
+                    metrics,
+                    tex,
+                });
+                continue;
+            }
+            base = Some(positioned.glyphs.len());
             let is_image = matches!(tex, Tex::Image(_));
             positioned.glyphs.push(PositionedGlyph {
                 x,
@@ -460,7 +496,8 @@ fn shape_lines(
             max_line_length = max_line_length.max(x - spacing);
             // justifyLine
             if justify != 0.0 {
-                let last = positioned.glyphs.last().unwrap();
+                // The line ends at its last glyph with an advance, not at a mark centered on it.
+                let last = &positioned.glyphs[base.unwrap_or(positioned.glyphs.len() - 1)];
                 let indent = (last.x + last.metrics.advance * last.scale) * justify;
                 for g in &mut positioned.glyphs {
                     g.x -= indent;

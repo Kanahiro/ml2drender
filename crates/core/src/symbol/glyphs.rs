@@ -134,6 +134,32 @@ impl Glyphs {
 
     /// URLs of the ranges with code points in `deps` not looked up yet.
     pub fn needs(&self, deps: &Dependencies) -> Vec<(String, RangeNeed)> {
+        // A presentation form its range turned out not to have is drawn as the letters it stands for
+        // (`shape_text`), which are only asked for then.
+        let mut fallback = Dependencies::new();
+        for (stack, cps) in deps {
+            for &cp in cps.range(0xFB50..=0xFEFF) {
+                let missing = self
+                    .ranges
+                    .get(&(stack.clone(), cp / 256))
+                    .is_some_and(|r| r.failed || (r.looked_up.contains(&cp) && !r.glyphs.contains_key(&cp)));
+                if let Some((a, b)) = char::from_u32(cp).filter(|_| missing).and_then(super::arabic::unshaped) {
+                    let to = fallback.entry(stack.clone()).or_default();
+                    to.extend(std::iter::once(a).chain(b).map(|c| c as u32));
+                }
+            }
+        }
+        let merged;
+        let deps = if fallback.is_empty() {
+            deps
+        } else {
+            let mut all = deps.clone();
+            for (stack, cps) in fallback {
+                all.entry(stack).or_default().extend(cps);
+            }
+            merged = all;
+            &merged
+        };
         let mut out: Vec<(String, RangeNeed)> = Vec::new();
         for (stack, cp) in deps.iter().flat_map(|(stack, cps)| cps.iter().map(move |cp| (stack, cp))) {
             let key = (stack.clone(), cp / 256);

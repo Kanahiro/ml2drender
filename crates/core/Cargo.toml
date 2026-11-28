@@ -18,6 +18,7 @@ i_overlay = { version = "9", default-features = false }
 jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
 geographiclib-rs = { version = "0.2.7", default-features = false }
 unicode-segmentation = "1.13.3"
+unicode-bidi = "0.3.18"
 
 [lints]
 workspace = true
