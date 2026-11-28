@@ -965,24 +965,32 @@ impl Renderer {
     /// Resolved tiles of a vector/GeoJSON source with their decoded layers (sliced when
     /// overzoomed).
     /// Each also gets its bucket cache.
-    /// Calls `f` with the source's resolved tiles: their clip masks and `layer`'s features.
+    /// Calls `f` with the source's resolved tiles: their clip masks and `layer`'s features, for a
+    /// `w` x `h` target that keeps the pixels `inside` (its `Target::clip`: all of them, or those
+    /// inside a margin). Fill and line layers are clipped to each tile's mask (MapLibre's stencil),
+    /// so they get no tile whose mask has no pixel inside (e.g. a tile read only for the labels of
+    /// a margin), and build no bucket for it.
     fn with_tiles<R>(
         &self,
         ctx: &render::Ctx,
         src: &Source,
         layer: &style::Layer,
-        w: usize,
-        h: usize,
+        (w, h, inside): (usize, usize, [usize; 4]),
         f: impl FnOnce(&[render::TileFeatures]) -> R,
     ) -> R {
         let empty = mvt::Layer { name: String::new(), extent: 4096, features: vec![] };
         let layers_by_tile = self.tile_layers(src);
         let render_tiles: Vec<RenderTile> = layers_by_tile.iter().map(|r| r.0).collect();
         let masks = ctx.masks(&render_tiles, w, h);
+        // Without a margin every pixel is inside: no tile to skip.
+        let skip_outside = matches!(layer.ty.as_str(), "fill" | "line") && inside != [0, 0, w, h];
+        let tiles_inside = skip_outside.then(|| ctx.tiles_inside(&render_tiles, w, h, inside));
         let tiles: Vec<render::TileFeatures> = layers_by_tile
             .iter()
             .zip(masks.iter())
-            .map(|((rt, tl, buckets), mask)| render::TileFeatures {
+            .enumerate()
+            .filter(|(i, _)| tiles_inside.as_ref().is_none_or(|t| t[*i]))
+            .map(|(_, ((rt, tl, buckets), mask))| render::TileFeatures {
                 tile: *rt,
                 mask,
                 layer: self.source_layer(src, layer, tl.as_deref()).unwrap_or(&empty),
@@ -1247,7 +1255,7 @@ impl Renderer {
                 .filter(|o| *o < 1.0)
                 .map(|_| render::raster::Target { clip, ..render::raster::Target::new(lw, lh) });
             let dest = offscreen.as_mut().unwrap_or(&mut *main);
-            self.with_tiles(lctx, src, layer, lw, lh, |tiles| match layer.ty.as_str() {
+            self.with_tiles(lctx, src, layer, (lw, lh, clip), |tiles| match layer.ty.as_str() {
                 "fill" => {
                     render::draw_fill(
                         dest,
@@ -1415,7 +1423,7 @@ impl Renderer {
                     "background" => render::draw_background(target, layer, ctx, raw, render::Pass::Opaque),
                     "fill" if self.layer_opacity(layer).is_none_or(|o| o >= 1.0) => {
                         let Some(src) = layer.source.as_deref().and_then(|s| self.sources.get(s)) else { continue };
-                        self.with_tiles(ctx, src, layer, target.w, target.h, |tiles| {
+                        self.with_tiles(ctx, src, layer, (target.w, target.h, target.clip), |tiles| {
                             render::draw_fill(target, layer, ctx, tiles, raw, render::Pass::Opaque)
                         })
                     }
@@ -1938,6 +1946,44 @@ mod tests {
         assert!(padded.needs().iter().any(|r| r.url == "/2/2/0"));
         padded.set_max_zoom(20.0);
         assert_eq!(plain.transform.center, padded.transform.center);
+    }
+
+    #[test]
+    fn margin_builds_no_fill_or_line_buckets_for_tiles_with_no_pixel_inside() {
+        // A polygon over the whole world, drawn as fill and line (and circles, which are not clipped
+        // to tiles): the tiles read only for the margin get no fill or line buckets, and the
+        // image is the same as without a margin.
+        let style = r##"{"version":8,"sources":{"g":{"type":"geojson","maxzoom":2,"data":{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-179,-80],[179,-80],[179,80],[-179,80],[-179,-80]]]}}}},"layers":[{"id":"f","type":"fill","source":"g","paint":{"fill-color":"rgba(200,0,0,0.5)","fill-outline-color":"#000"}},{"id":"l","type":"line","source":"g","paint":{"line-width":4}},{"id":"c","type":"circle","source":"g"}]}"##;
+        let view = View::tile(2, 1, 1, 512);
+        let render = |margin| {
+            let mut r = Renderer::new(style, View { margin, ..view }).unwrap();
+            assert!(r.needs().is_empty());
+            let rgba = r.render().unwrap();
+            let buckets: Vec<(TileId, Vec<String>)> = r.sources["g"]
+                .buckets
+                .borrow()
+                .iter()
+                .map(|((_, canonical, _), b)| {
+                    let mut groups: Vec<String> = b.borrow().keys().cloned().collect();
+                    groups.sort();
+                    (*canonical, groups)
+                })
+                .collect();
+            (rgba, buckets)
+        };
+        let (plain, _) = render(0);
+        let (padded, buckets) = render(32);
+        assert_eq!(plain, padded);
+        // The view's own tile; the others have pixels only in the margin.
+        let inside = TileId { z: 2, x: 1, y: 1 };
+        assert!(buckets.len() > 1, "the margin reads the neighboring tiles");
+        for (tile, groups) in buckets {
+            let filled = groups.iter().any(|g| g == "f" || g == "l");
+            assert_eq!(filled, tile == inside, "{tile:?}: {groups:?}");
+            if tile == inside {
+                assert!(groups.iter().any(|g| g == "f") && groups.iter().any(|g| g == "l"));
+            }
+        }
     }
 
     #[test]

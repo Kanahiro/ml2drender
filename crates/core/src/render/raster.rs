@@ -214,20 +214,97 @@ enum Coverage {
         x: [usize; 2],
         y: [usize; 2],
     },
-    Pixels(Vec<bool>),
+    /// Row-major pixels, all of them in the shape they were made from.
+    Pixels(Vec<bool>, Shape),
     /// The pixels whose entry in a row-major map shared by disjoint masks is this one's index.
-    Owner(Rc<Vec<u32>>, u32),
+    Owner(Rc<Owners>, u32),
+}
+
+/// The shape a pixel mask was made from. It holds all the mask's pixels (exactly them until another
+/// mask is subtracted from it), so it tells whether the mask has a pixel inside an area without
+/// reading the pixels (`Mask::has_pixel_inside`).
+#[derive(Clone, Copy)]
+enum Shape {
+    /// The pixels `x[0]..x[1]` of rows `y[0]..y[1]`.
+    Rect { x: [usize; 2], y: [usize; 2] },
+    /// The pixels of a quad (`Mask::from_quad`).
+    Quad([[f64; 2]; 4]),
+}
+
+/// The owner of each pixel, shared by disjoint masks (see `OwnerMap`).
+struct Owners {
+    /// Row-major mask index of each pixel; `u32::MAX` for none.
+    map: Vec<u32>,
+    /// What `OwnerMap::set_inside` recorded; `None` without a margin.
+    inside: Option<Inside>,
+}
+
+/// Which masks of an `OwnerMap` have a pixel inside its image's margin. Inside a margin means within
+/// it, in the part of the image it encloses: the pixels kept when it is cropped (`Target::clip`).
+struct Inside {
+    /// Pixels cropped from each side of the image.
+    margin: usize,
+    /// By mask index, whether the mask owns a pixel inside the margin.
+    owned: Vec<bool>,
+}
+
+/// Disjoint masks of a `w` x `h` image, built by giving each pixel at most one owner. With a
+/// margin, the pixels inside it are given with `set_inside`, which records which masks have one,
+/// so that `Mask::has_pixel_inside` need not read the map.
+pub struct OwnerMap {
+    w: usize,
+    h: usize,
+    count: usize,
+    owners: Owners,
+}
+
+impl OwnerMap {
+    /// No pixel owned yet by any of `count` masks, in an image with `margin` pixels cropped from
+    /// each side.
+    pub fn new(w: usize, h: usize, count: usize, margin: usize) -> OwnerMap {
+        let inside = (margin > 0).then(|| Inside { margin, owned: vec![false; count] });
+        OwnerMap { w, h, count, owners: Owners { map: vec![u32::MAX; w * h], inside } }
+    }
+
+    /// The pixels of row `y` inside the margin; none without a margin.
+    pub fn inside_row(&self, y: usize) -> std::ops::Range<usize> {
+        match &self.owners.inside {
+            Some(Inside { margin: m, .. }) if y >= *m && y + m < self.h => *m..self.w.saturating_sub(*m),
+            _ => 0..0,
+        }
+    }
+
+    /// Gives pixel (`x`, `y`), which has no owner yet and is not inside the margin, to mask `i`
+    /// (below the count).
+    #[inline]
+    pub fn set(&mut self, x: usize, y: usize, i: u32) {
+        debug_assert_eq!(self.owners.map[y * self.w + x], u32::MAX, "pixel ({x}, {y}) already owned");
+        debug_assert!(!self.inside_row(y).contains(&x), "pixel ({x}, {y}) inside the margin");
+        self.owners.map[y * self.w + x] = i;
+    }
+
+    /// `set` of a pixel inside the margin.
+    #[inline]
+    pub fn set_inside(&mut self, x: usize, y: usize, i: u32) {
+        debug_assert_eq!(self.owners.map[y * self.w + x], u32::MAX, "pixel ({x}, {y}) already owned");
+        debug_assert!(self.inside_row(y).contains(&x), "pixel ({x}, {y}) not inside the margin");
+        self.owners.map[y * self.w + x] = i;
+        if let Some(inside) = &mut self.owners.inside {
+            inside.owned[i as usize] = true;
+        }
+    }
+
+    /// The masks, by index.
+    pub fn into_masks(self) -> Vec<Mask> {
+        let (w, h, count) = (self.w, self.h, self.count);
+        let owners = Rc::new(self.owners);
+        (0..count as u32).map(|i| Mask { w, h, coverage: Coverage::Owner(Rc::clone(&owners), i) }).collect()
+    }
 }
 
 impl Mask {
     pub fn empty() -> Mask {
         Mask { w: 0, h: 0, coverage: Coverage::Rectangle { x: [0, 0], y: [0, 0] } }
-    }
-
-    /// Disjoint masks from the index of each pixel's mask (row-major; `u32::MAX` for none).
-    pub fn from_owners(w: usize, h: usize, owners: Vec<u32>, count: usize) -> Vec<Mask> {
-        let owners = Rc::new(owners);
-        (0..count as u32).map(|i| Mask { w, h, coverage: Coverage::Owner(Rc::clone(&owners), i) }).collect()
     }
 
     /// The part of row `y`'s pixels `x0..x1` inside a rectangular mask (`None` for other masks).
@@ -241,12 +318,45 @@ impl Mask {
         }
     }
 
+    /// Whether the mask has a pixel in the area `inside` ([x0, y0, x1, y1)), such as the inside of a
+    /// margin (`Target::clip`, see `Inside`). A pixel mask answers from its shape, not its pixels:
+    /// after a subtraction it may say yes where the pixels were taken away.
+    pub fn has_pixel_inside(&self, inside: [usize; 4]) -> bool {
+        let (x0, x1) = (inside[0], inside[2].min(self.w));
+        let rows = inside[1]..inside[3].min(self.h);
+        if x0 >= x1 || rows.is_empty() {
+            return false;
+        }
+        match &self.coverage {
+            Coverage::Rectangle { x, y } | Coverage::Pixels(_, Shape::Rect { x, y }) => {
+                x[0].max(x0) < x[1].min(x1) && y[0].max(rows.start) < y[1].min(rows.end)
+            }
+            // Covering the quad as `from_quad` does, but only within the area: the same pixels there.
+            Coverage::Pixels(_, Shape::Quad(q)) => quad_triangles(*q).into_iter().any(|tri| {
+                Setup::new([x0, rows.start, x1, rows.end], tri).is_some_and(|s| {
+                    let mut any = false;
+                    s.runs(|_, a, b| any |= a < b);
+                    any
+                })
+            }),
+            Coverage::Owner(owners, i) => match &owners.inside {
+                Some(Inside { margin: m, owned })
+                    if inside == [*m, *m, self.w.saturating_sub(*m), self.h.saturating_sub(*m)] =>
+                {
+                    owned[*i as usize]
+                }
+                // Not the area recorded: read the map.
+                _ => rows.into_iter().any(|r| owners.map[r * self.w + x0..r * self.w + x1].contains(i)),
+            },
+        }
+    }
+
     #[inline]
     pub fn get(&self, x: usize, y: usize) -> bool {
         match &self.coverage {
             Coverage::Rectangle { x: xs, y: ys } => x >= xs[0] && x < xs[1] && y >= ys[0] && y < ys[1],
-            Coverage::Pixels(bits) => bits[y * self.w + x],
-            Coverage::Owner(owners, i) => owners[y * self.w + x] == *i,
+            Coverage::Pixels(bits, _) => bits[y * self.w + x],
+            Coverage::Owner(owners, i) => owners.map[y * self.w + x] == *i,
         }
     }
 
@@ -257,25 +367,29 @@ impl Mask {
                 for row in y[0]..y[1] {
                     bits[row * self.w + x[0]..row * self.w + x[1]].fill(true);
                 }
-                self.coverage = Coverage::Pixels(bits);
+                self.coverage = Coverage::Pixels(bits, Shape::Rect { x: *x, y: *y });
             }
-            Coverage::Owner(owners, i) => self.coverage = Coverage::Pixels(owners.iter().map(|o| o == i).collect()),
-            Coverage::Pixels(_) => {}
+            Coverage::Owner(owners, i) => {
+                // The whole image: the masks of an `OwnerMap` (a projected view) are not subtracted from.
+                let shape = Shape::Rect { x: [0, self.w], y: [0, self.h] };
+                self.coverage = Coverage::Pixels(owners.map.iter().map(|o| o == i).collect(), shape)
+            }
+            Coverage::Pixels(..) => {}
         }
-        let Coverage::Pixels(bits) = &mut self.coverage else { unreachable!() };
+        let Coverage::Pixels(bits, _) = &mut self.coverage else { unreachable!() };
         match &other.coverage {
             Coverage::Rectangle { x, y } => {
                 for row in y[0]..y[1] {
                     bits[row * self.w + x[0]..row * self.w + x[1]].fill(false);
                 }
             }
-            Coverage::Pixels(other) => {
+            Coverage::Pixels(other, _) => {
                 for (b, &o) in bits.iter_mut().zip(other) {
                     *b = *b && !o;
                 }
             }
             Coverage::Owner(owners, i) => {
-                for (b, o) in bits.iter_mut().zip(owners.iter()) {
+                for (b, o) in bits.iter_mut().zip(owners.map.iter()) {
                     *b = *b && o != i;
                 }
             }
@@ -310,11 +424,16 @@ impl Mask {
             return Mask { w, h, coverage: Coverage::Rectangle { x, y } };
         }
         let mut bits = vec![false; w * h];
-        for tri in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
+        for tri in quad_triangles(q) {
             for_each_pixel(w, h, tri, |x, y, _| bits[y * w + x] = true);
         }
-        Mask { w, h, coverage: Coverage::Pixels(bits) }
+        Mask { w, h, coverage: Coverage::Pixels(bits, Shape::Quad(q)) }
     }
+}
+
+/// The two triangles a quad is covered with (`Mask::from_quad`, `Mask::has_pixel_inside`).
+fn quad_triangles(q: [[f64; 2]; 4]) -> [[[f64; 2]; 3]; 2] {
+    [[q[0], q[1], q[2]], [q[0], q[2], q[3]]]
 }
 
 /// Visit pixels whose centers are covered by the triangle (top-left fill rule), with
@@ -593,6 +712,87 @@ pub fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether `mask` has a pixel inside `inside`, read pixel by pixel.
+    fn read_inside(mask: &Mask, inside: [usize; 4]) -> bool {
+        (inside[1]..inside[3].min(mask.h)).any(|y| (inside[0]..inside[2].min(mask.w)).any(|x| mask.get(x, y)))
+    }
+
+    #[test]
+    fn owner_masks_have_pixels_inside_as_their_pixels_do() {
+        // 9 x 6 pixels: mask 0 owns the left part, 1 the right part, 2 one pixel at (6, 4), 3 none;
+        // the top row has no owner.
+        let (w, h): (usize, usize) = (9, 6);
+        let owner = |x: usize, y: usize| match (x, y) {
+            (_, 0) => None,
+            (6, 4) => Some(2),
+            (x, _) => Some((x >= 5) as u32),
+        };
+        // Areas inside margins (recorded when it is the map's own) and others (read from the map).
+        let mut areas = (0..5).map(|m| [m, m, w.saturating_sub(m), h.saturating_sub(m)]).collect::<Vec<_>>();
+        areas.extend([[1, 1, 3, 3], [5, 0, 9, 2], [0, 5, 9, 6], [2, 2, 2, 6], [6, 4, 20, 20], [0, 0, 9, 1]]);
+        for margin in [0, 1, 2, 4] {
+            let mut map = OwnerMap::new(w, h, 4, margin);
+            for y in 0..h {
+                let inside = map.inside_row(y);
+                for x in 0..w {
+                    match owner(x, y) {
+                        Some(i) if inside.contains(&x) => map.set_inside(x, y, i),
+                        Some(i) => map.set(x, y, i),
+                        None => {}
+                    }
+                }
+            }
+            for (i, mask) in map.into_masks().iter().enumerate() {
+                for inside in &areas {
+                    let read = read_inside(mask, *inside);
+                    assert_eq!(mask.has_pixel_inside(*inside), read, "margin {margin}, mask {i}, {inside:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pixel_masks_have_pixels_inside_as_their_pixels_do() {
+        let (w, h) = (40, 30);
+        let areas = [
+            [0, 0, 40, 30],
+            [3, 3, 37, 27],
+            [10, 8, 30, 22],
+            [0, 0, 5, 5],
+            [35, 25, 40, 30],
+            [12, 0, 13, 30],
+            [0, 9, 40, 10],
+            [7, 7, 7, 20],
+            [20, 15, 99, 99],
+        ];
+        // Quads turned, scaled and moved around and across the image, some of them off it.
+        let mut checked = 0;
+        for step in 0..240 {
+            let angle = step as f64 * 0.137;
+            let (c, s) = (angle.cos(), angle.sin());
+            let half = 2.0 + (step % 13) as f64 * 1.7;
+            let center = [-8.0 + (step * 7 % 56) as f64 + 0.25, -6.0 + (step * 11 % 42) as f64 + 0.5];
+            let q = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]
+                .map(|[x, y]| [center[0] + half * (c * x - s * y), center[1] + half * (s * x + c * y)]);
+            let mask = Mask::from_quad(w, h, q);
+            for inside in areas {
+                assert_eq!(mask.has_pixel_inside(inside), read_inside(&mask, inside), "quad {q:?}, {inside:?}");
+                checked += read_inside(&mask, inside) as usize;
+            }
+            // With a quad subtracted, the answer may only err towards yes.
+            let mut cut = mask.clone();
+            cut.subtract(&Mask::from_quad(w, h, q.map(|[x, y]| [x + 3.0, y + 1.5])));
+            for inside in areas {
+                assert!(cut.has_pixel_inside(inside) || !read_inside(&cut, inside), "cut quad {q:?}, {inside:?}");
+            }
+        }
+        assert!(checked > 200, "the quads have pixels inside often enough to test both answers");
+        // A rectangle with a hole: still answered from the rectangle.
+        let mut holed = Mask::from_quad(w, h, [[4.0, 4.0], [20.0, 4.0], [20.0, 20.0], [4.0, 20.0]]);
+        holed.subtract(&Mask::from_quad(w, h, [[8.0, 8.0], [16.0, 8.0], [16.0, 16.0], [8.0, 16.0]]));
+        assert!(holed.has_pixel_inside([5, 5, 7, 7]) && !holed.has_pixel_inside([21, 0, 40, 30]));
+    }
 
     #[test]
     fn round_matches_std() {

@@ -112,6 +112,8 @@ pub struct Ctx<'a> {
     // A context borrows one immutable transform and lives for one render. Keeping the
     // cache here avoids stale masks after a camera clamp or a change in resolved tiles.
     masks: RefCell<HashMap<(usize, usize, Vec<RenderTile>), Rc<Vec<Mask>>>>,
+    /// `tiles_inside` by masks and area.
+    tiles_inside: RefCell<HashMap<(usize, usize, Vec<RenderTile>, [usize; 4]), Rc<Vec<bool>>>>,
     /// Backfilled DEM tiles by source id, aligned with the source's resolved tiles.
     dems: RefCell<HashMap<String, Rc<Vec<Option<dem::DemTile>>>>>,
     /// `rotations` by tile.
@@ -260,6 +262,7 @@ impl<'a> Ctx<'a> {
             global_state,
             images,
             masks: RefCell::new(HashMap::default()),
+            tiles_inside: RefCell::new(HashMap::default()),
             dems: RefCell::new(HashMap::default()),
             rotations: RefCell::default(),
         }
@@ -327,7 +330,8 @@ impl<'a> Ctx<'a> {
             return Rc::clone(cached);
         }
         if let Some(world) = self.transform.pixel_world().filter(|p| p.len() == w * h) {
-            let masks = Rc::new(projected_masks(tiles, w, h, world, self.transform.central_x()));
+            let margin = self.transform.output_margin();
+            let masks = Rc::new(projected_masks(tiles, w, h, margin, world, self.transform.central_x()));
             self.masks.borrow_mut().insert(key, Rc::clone(&masks));
             return masks;
         }
@@ -352,6 +356,19 @@ impl<'a> Ctx<'a> {
         );
         self.masks.borrow_mut().insert(key, Rc::clone(&masks));
         masks
+    }
+
+    /// Whether each tile's mask (`masks`) has a pixel in the area `inside` (`Mask::has_pixel_inside`).
+    /// A tile with none cannot change a pixel there in the layers clipped to the masks (fill, line),
+    /// e.g. a tile read only for the labels of a margin.
+    pub fn tiles_inside(&self, tiles: &[RenderTile], w: usize, h: usize, inside: [usize; 4]) -> Rc<Vec<bool>> {
+        let key = (w, h, tiles.to_vec(), inside);
+        if let Some(cached) = self.tiles_inside.borrow().get(&key) {
+            return Rc::clone(cached);
+        }
+        let found = Rc::new(self.masks(tiles, w, h).iter().map(|m| m.has_pixel_inside(inside)).collect::<Vec<_>>());
+        self.tiles_inside.borrow_mut().insert(key, Rc::clone(&found));
+        found
     }
 
     pub fn canonical(tile: &RenderTile) -> CanonicalTileId {
@@ -834,8 +851,16 @@ pub fn draw_fill(
 
 /// Tile masks of a projected output: each pixel belongs to the highest-zoom tile containing its
 /// Mercator position (tile boundaries curve there, so they are not drawn as quads), unwrapped
-/// to within 0.5 of `central_x` like the drawn geometry.
-fn projected_masks(tiles: &[RenderTile], w: usize, h: usize, world: &[[f64; 2]], central_x: Option<f64>) -> Vec<Mask> {
+/// to within 0.5 of `central_x` like the drawn geometry. The masks also record which of them have
+/// a pixel inside the output's `margin` (see `OwnerMap`).
+fn projected_masks(
+    tiles: &[RenderTile],
+    w: usize,
+    h: usize,
+    margin: usize,
+    world: &[[f64; 2]],
+    central_x: Option<f64>,
+) -> Vec<Mask> {
     let mut zooms: Vec<u8> = tiles.iter().map(|t| t.canonical.z).collect();
     zooms.sort_unstable_by(|a, b| b.cmp(a));
     zooms.dedup();
@@ -847,13 +872,13 @@ fn projected_masks(tiles: &[RenderTile], w: usize, h: usize, world: &[[f64; 2]],
             ((t.canonical.z, t.wrap as i64 * (1i64 << t.canonical.z) + t.canonical.x as i64, t.canonical.y as i64), i)
         })
         .collect();
-    let mut owners = vec![u32::MAX; w * h];
+    let mut owners = raster::OwnerMap::new(w, h, tiles.len(), margin);
     // Neighboring pixels mostly fall in the same tiles: the last lookup per zoom.
     type Lookup = ((i64, i64), Option<usize>);
     let mut last: Vec<Option<Lookup>> = vec![None; zooms.len()];
-    for (p, m) in world.iter().enumerate() {
+    let mut owner = |m: &[f64; 2]| -> Option<u32> {
         if m[0].is_nan() {
-            continue;
+            return None;
         }
         let x = central_x.map_or(m[0], |c| m[0] - (m[0] - c).round());
         let found = zooms.iter().zip(&mut last).find_map(|(&z, last)| {
@@ -868,11 +893,31 @@ fn projected_masks(tiles: &[RenderTile], w: usize, h: usize, world: &[[f64; 2]],
                 }
             }
         });
-        if let Some(i) = found {
-            owners[p] = i as u32;
+        found.map(|i| i as u32)
+    };
+    for (py, row) in world.chunks_exact(w.max(1)).enumerate() {
+        // Pixels inside the margin go through `set_inside`, which records their tiles. Rows with
+        // none (all rows when there is no margin) skip the test.
+        let inside = owners.inside_row(py);
+        if inside.is_empty() {
+            for (px, m) in row.iter().enumerate() {
+                if let Some(i) = owner(m) {
+                    owners.set(px, py, i);
+                }
+            }
+            continue;
+        }
+        for (px, m) in row.iter().enumerate() {
+            if let Some(i) = owner(m) {
+                if inside.contains(&px) {
+                    owners.set_inside(px, py, i);
+                } else {
+                    owners.set(px, py, i);
+                }
+            }
         }
     }
-    Mask::from_owners(w, h, owners, tiles.len())
+    owners.into_masks()
 }
 
 pub(crate) fn dummy_tile() -> RenderTile {
