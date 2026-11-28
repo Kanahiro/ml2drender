@@ -745,21 +745,27 @@ impl Warp {
     /// none of it is on the map.
     pub fn inner_world_box(&self) -> Option<[f64; 4]> {
         *self.inner.get_or_init(|| {
-            // The output is at least a pixel wider and higher than its margins (`new`).
-            let ([w, h], m) = (self.size, self.margin);
-            let world = self.pixel_world();
             let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
-            for p in (m..h - m).flat_map(|y| &world[y * w + m..y * w + w - m]).filter(|p| !p[0].is_nan()) {
+            for (_, p) in self.inner_pixels().filter(|(_, p)| !p[0].is_nan()) {
                 b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])];
             }
             (b[0] <= b[2]).then_some(b)
         })
     }
 
-    /// Draws the Mercator picture `src` (rendered with `t`) over `dst`, then clears `src`.
+    /// `pixel_world` inside the margin (the pixels kept when it is cropped), with their indices.
+    fn inner_pixels(&self) -> impl Iterator<Item = (usize, &[f64; 2])> {
+        // The output is at least a pixel wider and higher than its margins (`new`).
+        let ([w, h], m) = (self.size, self.margin);
+        let world = self.pixel_world();
+        (m..h - m).flat_map(move |y| (y * w + m..y * w + w - m).map(move |i| (i, &world[i])))
+    }
+
+    /// Draws the Mercator picture `src` (rendered with `t`) over `dst` inside the margin, which is
+    /// cropped, then clears `src`.
     pub fn composite(&self, src: &mut Target, t: &Transform, dst: &mut Target) {
         let ws = t.world_size;
-        for (i, m) in self.pixel_world().iter().enumerate() {
+        for (i, m) in self.inner_pixels() {
             if m[0].is_nan() {
                 continue;
             }
