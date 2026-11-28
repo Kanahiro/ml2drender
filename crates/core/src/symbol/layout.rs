@@ -336,6 +336,9 @@ pub fn feature_text(
             Some("lowercase") => s.text = s.text.to_lowercase(),
             _ => {}
         }
+        if let std::borrow::Cow::Owned(shaped) = super::arabic::apply_arabic_shaping(&s.text) {
+            s.text = shaped;
+        }
     }
     FeatureText { text: Some(text), font_stack }
 }

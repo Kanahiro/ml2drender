@@ -302,16 +302,21 @@ pub fn shape_text(
         // No font provides vertical glyph variants (PBF glyphs), so compatibility forms are used.
         input.chars = unicode::verticalize_punctuation(&input.chars);
     }
-    // ponytail: no bidi reordering; right-to-left text is laid out in logical order.
     let breaks = ctx.line_breaks(&input, spacing, max_width, layout_text_size);
     let mut lines = Vec::new();
-    let mut start = 0;
-    for b in breaks {
-        lines.push(Tagged { chars: input.chars[start..b].to_vec(), section: input.section[start..b].to_vec() });
-        start = b;
-    }
-    if start < input.chars.len() {
-        lines.push(Tagged { chars: input.chars[start..].to_vec(), section: input.section[start..].to_vec() });
+    if unicode::contains_rtl_text(&input.chars) {
+        for (chars, section) in super::bidi::process_lines(&input.chars, &input.section, &breaks) {
+            lines.push(Tagged { chars, section });
+        }
+    } else {
+        let mut start = 0;
+        for b in breaks {
+            lines.push(Tagged { chars: input.chars[start..b].to_vec(), section: input.section[start..b].to_vec() });
+            start = b;
+        }
+        if start < input.chars.len() {
+            lines.push(Tagged { chars: input.chars[start..].to_vec(), section: input.section[start..].to_vec() });
+        }
     }
     let mut shaping = Shaping {
         lines: Vec::new(),

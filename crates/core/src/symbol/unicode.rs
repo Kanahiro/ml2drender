@@ -176,6 +176,23 @@ pub fn has_rotated_vertical_orientation(c: char) -> bool {
     !(has_upright_vertical_orientation(c) || has_neutral_vertical_orientation(c))
 }
 
+/// `stringContainsRTLText` (`codePointIsInRTLScript`).
+pub fn contains_rtl_text(chars: &[char]) -> bool {
+    chars.iter().any(|&c| in_sorted_ranges(super::rtl_data::RTL_SCRIPT, c as u32))
+}
+
+/// Whether `cp` is in sorted, disjoint inclusive ranges.
+pub(super) fn in_sorted_ranges(ranges: &[(u32, u32)], cp: u32) -> bool {
+    let i = ranges.partition_point(|&(_, b)| b < cp);
+    ranges.get(i).is_some_and(|&(a, _)| a <= cp)
+}
+
+/// The value of the sorted, disjoint inclusive range holding `cp`.
+pub(super) fn find_range<T: Copy>(ranges: &[(u32, u32, T)], cp: u32) -> Option<T> {
+    let i = ranges.partition_point(|&(_, b, _)| b < cp);
+    ranges.get(i).filter(|&&(a, _, _)| a <= cp).map(|r| r.2)
+}
+
 /// `\p{sc=Arab}` (complex shaping for vertical placement).
 pub fn is_arabic(c: char) -> bool {
     in_ranges(c as u32, &[(0x0600, 0x06FF), (0x0750, 0x077F), (0x0870, 0x08FF), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF)])

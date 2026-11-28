@@ -351,6 +351,7 @@ dependencies = [
  "png",
  "serde_json",
  "unicode-normalization",
+ "unicode-segmentation",
  "zune-jpeg",
 ]
 

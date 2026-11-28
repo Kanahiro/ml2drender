@@ -31,8 +31,8 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
 - `needs()` の段階: style → (TileJSON / GeoJSON / sprite json+png / image) → タイル → (欠落 raster の祖先 / グリフ範囲)。`provide` は現在のビューではなく `needs()` が返した URL の記録と照合する(`needs` と `provide` の間に `set_view` されても取りこぼさない)。`provide(None)` は上流の 404 と同じ意味(vector は空タイル、raster は祖先で代替、グリフ範囲は欠落)。
 - 取得済みバイト列のキャッシュはホストの責務(TS 側は同一 URL の同時取得をまとめるだけ)。
 - 単一スレッド。並列化しない。
-- 採用済みクレート(すべて純 Rust・wasm32 確認済み): `serde_json`, `indexmap`, `unicode-normalization`, `earcut`(earcut.js 3.x の移植。MapLibre と同じ系統), `miniz_oxide`, `png`, `zune-jpeg`, `image-webp`, `jpeg-encoder`(JPEG 書き出し), `i_overlay`(MVT 書き出しのポリゴン結合のみ), `geographiclib-rs`(正距方位図法の測地線のみ。既定の feature は切る)。描画は自前のソフトウェア GL(tiny-skia は不採用: GL の AA・合成規則と一致させるため)。
-- テキストは SDF グリフを自前でしきい値処理して合成(halo / text-opacity もこの層)。MapLibre は HarfBuzz を使わず PBF グリフのメトリクスで自前レイアウトしているので、`shaping` / `placement` のアルゴリズムを再現する。RTL 等は後回し。
+- 採用済みクレート(すべて純 Rust・wasm32 確認済み): `serde_json`, `indexmap`, `unicode-normalization`, `earcut`(earcut.js 3.x の移植。MapLibre と同じ系統), `miniz_oxide`, `png`, `zune-jpeg`, `image-webp`, `jpeg-encoder`(JPEG 書き出し), `i_overlay`(MVT 書き出しのポリゴン結合のみ), `geographiclib-rs`(正距方位図法の測地線のみ。既定の feature は切る), `unicode-segmentation`(bidi の並べ替え単位の書記素クラスタのみ。GL JS の `Intl.Segmenter` の代わり)。描画は自前のソフトウェア GL(tiny-skia は不採用: GL の AA・合成規則と一致させるため)。
+- テキストは SDF グリフを自前でしきい値処理して合成(halo / text-opacity もこの層)。MapLibre は HarfBuzz を使わず PBF グリフのメトリクスで自前レイアウトしているので、`shaping` / `placement` のアルゴリズムを再現する。右横書きは GL JS 組み込みの実装(`arabic_shaping.ts` の Presentation Forms への置き換えと、bidi-js の埋め込みレベル + `bidi.ts` の行ごとの並べ替え)を移植する(bidi-js が UTF-16 コード単位で読む癖も再現)。
 
 ## 構成
 
@@ -41,7 +41,7 @@ MapLibre style (style-spec JSON) を**タイルベースの2D表現に限って*
   - `style/` — レイヤ・プロパティのコンパイル、フィルタ。`spec.json` は v8.json の必要部分(`scripts/trim-spec.ts` で生成)。
   - `mvt.rs`(MVT デコード・エンコード、overzoom 分割)、`geojson.rs`(geojson-vt 移植)、`supercluster.rs`(GeoJSON クラスタ)、`tile.rs`(Transform・タイル被覆・URL)、`projection.rs`(投影式と PROJJSON の解釈。内部では PROJJSON を PROJ 文字列相当のパラメータに落として読む)、`reproject.rs`(raster / DEM の warp。頂点から描くレイヤは `Transform::reprojected` 経由で出力座標へ)、`image.rs`(画像デコード・GL 風テクスチャ)、`sprite.rs`(sprite 読み込み)。
   - `render/` — `raster.rs` がソフトウェア GL(三角形・GL ライン・合成・マスク)、`x4.rs` が WASM SIMD で三角形の行を4画素ずつ処理する経路(円・線(破線・パターン・グラデーションなし)・シンボル・単色の塗り)、`mod.rs` / `line.rs` / `raster_layer.rs` / `pattern.rs` が各レイヤのバケット生成とシェーダ再現。
-  - `symbol/` — `glyphs.rs`(PBF グリフ)、`shaping.rs`、`layout.rs`(バケット・quad・衝突ボックス)、`placement.rs`(衝突判定)、`projection.rs`(line ラベル)、`draw.rs`(SDF/アイコンのシェーダ)。
+  - `symbol/` — `glyphs.rs`(PBF グリフ)、`shaping.rs`、`layout.rs`(バケット・quad・衝突ボックス)、`placement.rs`(衝突判定)、`projection.rs`(line ラベル)、`draw.rs`(SDF/アイコンのシェーダ)、`arabic.rs`(アラビア文字の字形選択)、`bidi.rs`(bidi-js と `bidi.ts`)、`rtl_data.rs`(その Unicode 表。`scripts/gen-rtl-data.ts` が UCD 17.0.0 と bidi-js 1.1.0 から生成)。
   - 方針: MapLibre の **バケット生成とシェーダの計算を移植**し(ジオメトリ・式・量子化)、GL と同じ規則でラスタライズする(tiny-skia は使わない)。GPU パイプラインの構造は真似せず、出力が変わらない範囲で独自に組み替えてよい(深度バッファの代わりに画素ごとの最上位不透明レイヤを記録、varying の平面補間、バケットの描画間再利用など)。pitch 依存の計算は pitch 0 に簡約する。上流の量子化・桁あふれ等の癖も再現する(例: extrude の Int8 桁あふれ、GL の top-left 規則を y-down バッファでは「左辺+下辺」に読み替え、`linesofar` の量子化、overzoom 分割 `zoomLevelsToOverscale`=4(バケットは vt-pbf で再エンコードする前の浮動小数座標を `loadGeometry` と同じく 8192 で丸めて読む)、衝突ボックスの Int16 切り捨て、layout 同一レイヤのバケット共有)。
 - `crates/cli/` — crate `ml2drender-cli`、バイナリ `ml2drender`。テストランナー兼ネイティブ検証用。
 - `crates/wasm/` — crate `ml2drender-wasm`。wasm-bindgen なしの素の C-ABI export(`renderer_new/set_view/set_projected_view/set_ticket/set_keep_buckets/set_export_source/needs/provide/render/export_mvt/free`, `projection_new/forward/free`(投影ビューの center を CRS 座標にするための内部用。結果は `xy_ptr`), `tile_matrix`(格子の JSON のタイル z/x/y の bbox・縦横比・ズーム 0 の CSS px あたりの CRS 単位。結果は `xy_ptr`), `encode_png/encode_webp/encode_jpeg`, `alloc/dealloc`, RGBA / PNG・エラー等の結果は `out_ptr/out_len` の共有バッファ)。
@@ -97,7 +97,6 @@ pnpm lint                          # cargo fmt --check・clippy -D warnings(ネ�
 
 ## 既知の非対応(仕様上・設計上の理由で通らないもの)
 
-- 双方向テキスト(bidi)・アラビア文字の字形整形。
 - 複合文字スクリプトや取得できなかったグリフ範囲のブラウザフォント描画(TinySDF)。フォントを持たないため再現不可。
 - 配置の履歴依存(`prevAnchor`)、CrossTileSymbolIndex、retained tiles。単発の静止画描画では再現しない。
 - ロケール別照合(照合はルート照合のみ)、`number-format` は en-US のみ、`is-supported-script` は常に true、feature-state は常に空。
