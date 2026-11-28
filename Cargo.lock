@@ -350,6 +350,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "png",
  "serde_json",
+ "unicode-bidi",
  "unicode-normalization",
  "zune-jpeg",
 ]
@@ -663,6 +664,12 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-ident"

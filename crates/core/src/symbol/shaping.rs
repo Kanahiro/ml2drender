@@ -2,6 +2,8 @@
 //! anchor alignment from PBF glyph metrics. Grapheme clusters are taken one code point at a time,
 //! which is what MapLibre does for clusters no glyph file covers.
 
+use super::arabic;
+use super::bidi;
 use super::glyphs::{BORDER, Glyph, Glyphs, Metrics};
 use super::unicode;
 use crate::expression::value::Formatted;
@@ -285,12 +287,29 @@ pub fn shape_text(
                 (SectionKind::Image { name: img.name.clone() }, vec![c])
             }
             Some(_) => continue,
-            None => (
-                SectionKind::Text {
-                    font_stack: s.font_stack.clone().unwrap_or_else(|| default_font_stack.to_string()),
-                },
-                s.text.chars().collect(),
-            ),
+            None => {
+                let font_stack = s.font_stack.clone().unwrap_or_else(|| default_font_stack.to_string());
+                let mut chars = Vec::with_capacity(s.text.len());
+                // The alef of a lam-alef ligature the font lacks, held back until the marks of the lam
+                // (the bare ones after the ligature) are out.
+                let mut alef = None;
+                for c in s.text.chars() {
+                    if !arabic::is_bare_mark(c) {
+                        chars.extend(alef.take());
+                    }
+                    // A font without this presentation form (Cairo has no mark forms, Lateef none at all)
+                    // gets the unjoined letter, where GL JS draws nothing.
+                    match arabic::unshaped(c).filter(|_| glyphs.get(&font_stack, c).is_none()) {
+                        Some((a, b)) => {
+                            chars.push(a);
+                            alef = b;
+                        }
+                        None => chars.push(c),
+                    }
+                }
+                chars.extend(alef);
+                (SectionKind::Text { font_stack }, chars)
+            }
         };
         let scale =
             if matches!(kind, SectionKind::Image { .. }) { 1.0 } else { s.scale.filter(|&v| v != 0.0).unwrap_or(1.0) };
@@ -302,16 +321,23 @@ pub fn shape_text(
         // No font provides vertical glyph variants (PBF glyphs), so compatibility forms are used.
         input.chars = unicode::verticalize_punctuation(&input.chars);
     }
-    // ponytail: no bidi reordering; right-to-left text is laid out in logical order.
     let breaks = ctx.line_breaks(&input, spacing, max_width, layout_text_size);
     let mut lines = Vec::new();
-    let mut start = 0;
-    for b in breaks {
-        lines.push(Tagged { chars: input.chars[start..b].to_vec(), section: input.section[start..b].to_vec() });
-        start = b;
-    }
-    if start < input.chars.len() {
-        lines.push(Tagged { chars: input.chars[start..].to_vec(), section: input.section[start..].to_vec() });
+    if bidi::contains_rtl(&input.chars) {
+        // Lines are broken in logical order, then each is put in the order it is drawn.
+        for line in bidi::reorder_lines(&input.chars, &breaks) {
+            let (chars, section) = line.into_iter().map(|(c, from)| (c, input.section[from])).unzip();
+            lines.push(Tagged { chars, section });
+        }
+    } else {
+        let mut start = 0;
+        for b in breaks {
+            lines.push(Tagged { chars: input.chars[start..b].to_vec(), section: input.section[start..b].to_vec() });
+            start = b;
+        }
+        if start < input.chars.len() {
+            lines.push(Tagged { chars: input.chars[start..].to_vec(), section: input.section[start..].to_vec() });
+        }
     }
     let mut shaping = Shaping {
         lines: Vec::new(),
@@ -392,6 +418,8 @@ fn shape_lines(
         let content_width = (line_max_scale * ONE_EM).max(max_image(0) * size_factor);
         let line_verticals = (writing_mode == WritingMode::Vertical && !allow_vertical_placement)
             .then(|| line_verticals(&mut line, &ctx.sections));
+        // The last glyph that is not a bare mark, which the marks after it are centered on.
+        let mut base: Option<usize> = None;
         for i in 0..line.chars.len() {
             let c = line.chars[i];
             let si = line.section[i];
@@ -435,6 +463,24 @@ fn shape_lines(
                 }
             };
             let is_image = matches!(tex, Tex::Image(_));
+            // A bare mark (one the font has no presentation form for, or one written on the lam of a
+            // lam-alef ligature) has no anchor, as PBF glyphs carry no GPOS: centered over its letter
+            // with no advance, as HarfBuzz places marks without GPOS.
+            if let Some(b) = base.filter(|_| !vertical && arabic::is_bare_mark(c)) {
+                let b = &positioned.glyphs[b];
+                let center = b.x + (b.metrics.left + b.metrics.width / 2.0) * b.scale;
+                positioned.glyphs.push(PositionedGlyph {
+                    x: center - (metrics.left + metrics.width / 2.0) * section.scale,
+                    y: y + SHAPING_DEFAULT_OFFSET + baseline_offset,
+                    vertical,
+                    scale: section.scale,
+                    section: si,
+                    metrics,
+                    tex,
+                });
+                continue;
+            }
+            base = Some(positioned.glyphs.len());
             positioned.glyphs.push(PositionedGlyph {
                 x,
                 y: y + SHAPING_DEFAULT_OFFSET + baseline_offset,
@@ -455,7 +501,8 @@ fn shape_lines(
             max_line_length = max_line_length.max(x - spacing);
             // justifyLine
             if justify != 0.0 {
-                let last = positioned.glyphs.last().unwrap();
+                // The line ends at its last glyph with an advance, not at a mark centered on it.
+                let last = &positioned.glyphs[base.unwrap_or(positioned.glyphs.len() - 1)];
                 let indent = (last.x + last.metrics.advance * last.scale) * justify;
                 for g in &mut positioned.glyphs {
                     g.x -= indent;
@@ -615,4 +662,88 @@ pub fn fit_icon_to_text(
         (t, t + size[1])
     };
     PositionedIcon { image, top, right, bottom, left, collision_padding }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A font with bare Arabic letters and marks but none of their presentation forms.
+    fn glyphs() -> Glyphs {
+        let mut glyphs = Glyphs::new(None);
+        for (c, width, advance) in [('\u{0645}', 18.0, 20.0), ('\u{062f}', 10.0, 12.0), ('\u{064e}', 6.0, 0.0)] {
+            glyphs.insert("f", c, Metrics { width, height: 10.0, left: 1.0, top: 0.0, advance });
+        }
+        glyphs
+    }
+
+    fn shape(text: &str, anchor: &str, justify: &str) -> Shaping {
+        let text = Formatted::from_string(arabic::shape(text).into_owned());
+        let size = 24.0;
+        shape_text(
+            &text,
+            &glyphs(),
+            &HashMap::default(),
+            "f",
+            f64::INFINITY,
+            ONE_EM * 1.2,
+            anchor,
+            justify,
+            0.0,
+            [0.0, 0.0],
+            WritingMode::Horizontal,
+            false,
+            size,
+            size,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn lam_alef_fallback_keeps_marks_on_the_lam() {
+        let mut glyphs = glyphs();
+        for c in ['\u{0644}', '\u{0627}'] {
+            glyphs.insert("f", c, Metrics { width: 4.0, height: 10.0, left: 1.0, top: 0.0, advance: 6.0 });
+        }
+        // لَا without the ligature: alef, lam, then the fatha centered on the lam.
+        let text = Formatted::from_string(arabic::shape("\u{0644}\u{064e}\u{0627}").into_owned());
+        let shaping = shape_text(
+            &text,
+            &glyphs,
+            &HashMap::default(),
+            "f",
+            f64::INFINITY,
+            ONE_EM * 1.2,
+            "left",
+            "left",
+            0.0,
+            [0.0, 0.0],
+            WritingMode::Horizontal,
+            false,
+            24.0,
+            24.0,
+        )
+        .unwrap();
+        let line = &shaping.lines[0].glyphs;
+        let center = |g: &PositionedGlyph| g.x + g.metrics.left + g.metrics.width / 2.0;
+        assert_eq!(line.len(), 3);
+        assert_eq!((line[0].x, line[1].x), (0.0, 6.0));
+        assert_eq!(center(&line[2]), center(&line[1]));
+    }
+
+    #[test]
+    fn fallback_mark_does_not_move_the_line() {
+        // مَد: the fatha falls back to a bare mark and follows the meem, which is drawn last.
+        for (anchor, justify) in [("right", "right"), ("center", "center"), ("left", "left")] {
+            let marked = shape("\u{0645}\u{064e}\u{062f}", anchor, justify);
+            let plain = shape("\u{0645}\u{062f}", anchor, justify);
+            let (marked, plain) = (&marked.lines[0].glyphs, &plain.lines[0].glyphs);
+            assert_eq!(marked.len(), 3);
+            // Dal and meem stand where they do without the mark.
+            assert_eq!((marked[0].x, marked[1].x), (plain[0].x, plain[1].x), "{anchor}");
+            // The mark is centered on the meem.
+            let center = |g: &PositionedGlyph| g.x + g.metrics.left + g.metrics.width / 2.0;
+            assert_eq!(center(&marked[2]), center(&marked[1]), "{anchor}");
+        }
+    }
 }

@@ -173,6 +173,14 @@ impl Glyphs {
         let cp = c as u32;
         self.ranges.get(&(stack.to_string(), cp / 256))?.glyphs.get(&cp)
     }
+
+    /// A blank glyph with `metrics`, for tests of text layout.
+    #[cfg(test)]
+    pub fn insert(&mut self, stack: &str, c: char, metrics: Metrics) {
+        let cp = c as u32;
+        let glyph = Glyph { bitmap: Vec::new(), bw: 0, bh: 0, metrics };
+        self.ranges.entry((stack.to_string(), cp / 256)).or_default().glyphs.insert(cp, Rc::new(glyph));
+    }
 }
 
 #[cfg(test)]
