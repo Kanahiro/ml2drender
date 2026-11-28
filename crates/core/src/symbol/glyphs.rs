@@ -134,6 +134,32 @@ impl Glyphs {
 
     /// URLs of the ranges with code points in `deps` not looked up yet.
     pub fn needs(&self, deps: &Dependencies) -> Vec<(String, RangeNeed)> {
+        // A presentation form its range turned out not to have is drawn as the letters it stands for
+        // (`shape_text`), which are only asked for then, so fonts that have the forms fetch nothing more.
+        let mut fallback = Dependencies::new();
+        for (stack, cps) in deps {
+            for &cp in cps.range(0xFB50..=0xFEFF) {
+                let missing = self
+                    .ranges
+                    .get(&(stack.clone(), cp / 256))
+                    .is_some_and(|r| r.failed || (r.looked_up.contains(&cp) && !r.glyphs.contains_key(&cp)));
+                if let Some((a, b)) = char::from_u32(cp).filter(|_| missing).and_then(super::arabic::unshaped) {
+                    let to = fallback.entry(stack.clone()).or_default();
+                    to.extend(std::iter::once(a).chain(b).map(|c| c as u32));
+                }
+            }
+        }
+        let merged;
+        let deps = if fallback.is_empty() {
+            deps
+        } else {
+            let mut all = deps.clone();
+            for (stack, cps) in fallback {
+                all.entry(stack).or_default().extend(cps);
+            }
+            merged = all;
+            &merged
+        };
         let mut out: Vec<(String, RangeNeed)> = Vec::new();
         for (stack, cp) in deps.iter().flat_map(|(stack, cps)| cps.iter().map(move |cp| (stack, cp))) {
             let key = (stack.clone(), cp / 256);
@@ -186,6 +212,23 @@ impl Glyphs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_letters_once_forms_are_missing() {
+        let mut glyphs = Glyphs::new(Some("{fontstack}/{range}.pbf"));
+        // بَ shaped: beh isolated and fatha isolated form.
+        let deps = Dependencies::from([("f".to_string(), BTreeSet::from([0xFE8F, 0xFE76]))]);
+        let urls = |g: &Glyphs| g.needs(&deps).into_iter().map(|(url, _)| url).collect::<Vec<_>>();
+        assert_eq!(urls(&glyphs), ["f/65024-65279.pbf"]);
+        // The range has beh's form but not the fatha's: the bare fatha is asked for next.
+        let range = glyphs.ranges.entry(("f".to_string(), 0xFE)).or_default();
+        range.looked_up.extend([0xFE8F, 0xFE76]);
+        range.glyphs.insert(0xFE8F, Rc::new(Glyph { bitmap: vec![], bw: 0, bh: 0, metrics: Metrics::default() }));
+        let needs = glyphs.needs(&deps);
+        assert_eq!(needs.len(), 1);
+        assert_eq!(needs[0].0, "f/1536-1791.pbf");
+        assert_eq!(needs[0].1.1, BTreeSet::from([0x064E]));
+    }
 
     #[test]
     fn parse_fixture_range() {

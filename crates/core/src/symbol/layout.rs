@@ -392,10 +392,6 @@ pub fn glyph_dependencies(
             };
             for c in s.text.chars() {
                 cps.insert(c as u32);
-                // The letters a presentation form falls back to when the font lacks it.
-                if let Some((a, b)) = arabic::unshaped(c) {
-                    cps.extend(std::iter::once(a).chain(b).map(|c| c as u32));
-                }
                 if let Some(v) = unicode::verticalized(c).filter(|_| vertical_forms) {
                     cps.insert(v as u32);
                 }
