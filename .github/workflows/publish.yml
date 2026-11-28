@@ -1,3 +1,4 @@
+# Runs on a published GitHub release (tag v<version>, publishes to both registries) or by hand.
 # Publish the version in the repository (all packages share it) to npm and PyPI.
 #   npm:  @ml2drender/wasm, @ml2drender/node and its platform packages (@ml2drender/node-<platform>-<arch>)
 #   PyPI: ml2drender (wheels only)
@@ -10,6 +11,8 @@
 name: Publish
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       npm:
@@ -36,13 +39,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: version
-        name: Check that the packages share a version
+        name: Check that the packages share a version (and match the release tag)
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           npm=$(node -p "require('./packages/ml2drender/package.json').version")
           node=$(node -p "require('./packages/ml2drender-node/package.json').version")
           python=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/python/Cargo.toml)
           echo "@ml2drender/wasm $npm, @ml2drender/node $node, python $python"
           test "$npm" = "$node" && test "$npm" = "$python"
+          if [ "$GITHUB_EVENT_NAME" = release ]; then test "$TAG" = "v$npm"; fi
           echo "version=$npm" >> "$GITHUB_OUTPUT"
 
   build:
@@ -50,7 +56,7 @@ jobs:
     uses: ./.github/workflows/build.yml
 
   npm:
-    if: inputs.npm
+    if: github.event_name == 'release' || inputs.npm
     needs: [version, build]
     runs-on: ubuntu-latest
     environment: npm
@@ -86,7 +92,7 @@ jobs:
           npm publish "./npm/ml2drender-wasm-$VERSION.tgz" $FLAGS
 
   pypi:
-    if: inputs.pypi
+    if: github.event_name == 'release' || inputs.pypi
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
