@@ -199,8 +199,17 @@ impl Transform {
 
     /// Tiles at `z` (unclamped, possibly wrapped x) intersecting the viewport.
     pub fn covering_tiles(&self, z: i32) -> Vec<(i32, i32, i32)> {
-        let corners = [[0.0, 0.0], [self.width, 0.0], [0.0, self.height], [self.width, self.height]]
-            .map(|[x, y]| self.screen_to_world([x * self.pixel_ratio, y * self.pixel_ratio]));
+        let (w, h) = (self.width * self.pixel_ratio, self.height * self.pixel_ratio);
+        self.covering_tiles_of(z, [0.0, 0.0, w, h], [0.0; 2])
+    }
+
+    /// The tiles at zoom `z` under the box `b` ([x0, y0, x1, y1] device pixels), with its world positions
+    /// moved by `shift` (CSS pixels).
+    pub fn covering_tiles_of(&self, z: i32, b: [f64; 4], shift: [f64; 2]) -> Vec<(i32, i32, i32)> {
+        let corners = [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]].map(|p| {
+            let [x, y] = self.screen_to_world(p);
+            [x + shift[0], y + shift[1]]
+        });
         let scale = 2f64.powi(z) / self.world_size;
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
         for c in corners {

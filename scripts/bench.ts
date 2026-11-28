@@ -105,6 +105,8 @@ const cases: {name: string; style: string; view: View; crs?: object; then?: View
   {name: 'bright LAEA Europe z15', style: 'bright', crs: laea, view: {center: berlin, zoom: 15, width: 1024, height: 1024}},
   // Inside the middle tile (611 m of its 745 m) and reaching its neighbors with the margin.
   {name: 'bright LAEA Europe z15, margin 64', style: 'bright', crs: laea, view: {center: middle, zoom: 15, width: 256, height: 256, pixelRatio: 2, margin: 64}},
+  // One raster tile; its margin reaches the other three.
+  {name: 'raster tile 12/758/1608, margin 64', style: 'satellite', view: {center: tile(12, 758.5, 1608.5), zoom: 11, width: 256, height: 256, pixelRatio: 2, margin: 64}},
   {name: 'raster', style: 'satellite', view: {center: terrain, zoom: 13.5, bearing: 17, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON lines, 8 layers', style: 'lines', view: {center: berlin, zoom: 14, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON 10k labels', style: 'labels', view: {center: berlin, zoom: 14, width: 512, height: 512}},

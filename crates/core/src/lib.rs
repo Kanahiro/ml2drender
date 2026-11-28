@@ -805,8 +805,24 @@ impl Renderer {
         } else {
             maxzoom
         };
+        // A raster tile is drawn with its own texture (clamped at its edges) on the pixels whose center
+        // its quad covers, moved by the rasters' pixel alignment (`aligned_offset`). The margin is
+        // cropped, so a raster needs only the tiles under the centers of the pixels inside it. Not
+        // DEMs: they read their neighbors' edges.
+        let t = &self.transform;
+        let margin = (self.view.margin as f64 * t.pixel_ratio).round();
+        let tiles = if src.ty == "raster" && self.projected.is_none() && margin > 0.0 {
+            // Within a millionth of a pixel of the centers, in case one is on a tile's edge.
+            let e = margin + 0.5 - 1e-6;
+            // The target's size (`render`), whole pixels.
+            let (w, h) = ((t.width * t.pixel_ratio).round(), (t.height * t.pixel_ratio).round());
+            let off = t.aligned_offset();
+            t.covering_tiles_of(z, [e, e, w - e, h - e], [-off[0], -off[1]])
+        } else {
+            t.covering_tiles(z)
+        };
         let mut out = BTreeSet::new();
-        for (x, y, wrap) in self.transform.covering_tiles(z) {
+        for (x, y, wrap) in tiles {
             let id = TileId { z: z as u8, x: x as u32, y: y as u32 };
             let canonical = if z > maxzoom as i32 { id.parent_at(maxzoom) } else { id };
             if let Some(b) = bounds {
