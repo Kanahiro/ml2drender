@@ -112,6 +112,8 @@ pub struct Ctx<'a> {
     // A context borrows one immutable transform and lives for one render. Keeping the
     // cache here avoids stale masks after a camera clamp or a change in resolved tiles.
     masks: RefCell<HashMap<(usize, usize, Vec<RenderTile>), Rc<Vec<Mask>>>>,
+    /// `tiles_inside` by masks and area.
+    tiles_inside: RefCell<HashMap<(usize, usize, Vec<RenderTile>, [usize; 4]), Rc<Vec<bool>>>>,
     /// Backfilled DEM tiles by source id, aligned with the source's resolved tiles.
     dems: RefCell<HashMap<String, Rc<Vec<Option<dem::DemTile>>>>>,
     /// `rotations` by tile.
@@ -260,6 +262,7 @@ impl<'a> Ctx<'a> {
             global_state,
             images,
             masks: RefCell::new(HashMap::default()),
+            tiles_inside: RefCell::new(HashMap::default()),
             dems: RefCell::new(HashMap::default()),
             rotations: RefCell::default(),
         }
@@ -352,6 +355,19 @@ impl<'a> Ctx<'a> {
         );
         self.masks.borrow_mut().insert(key, Rc::clone(&masks));
         masks
+    }
+
+    /// Whether each tile's mask (`masks`) has a pixel in the area `inside`. A tile with none cannot
+    /// change a pixel there in the layers clipped to the masks (fill, line), e.g. a tile read only
+    /// for the labels of a margin.
+    pub fn tiles_inside(&self, tiles: &[RenderTile], w: usize, h: usize, inside: [usize; 4]) -> Rc<Vec<bool>> {
+        let key = (w, h, tiles.to_vec(), inside);
+        if let Some(cached) = self.tiles_inside.borrow().get(&key) {
+            return Rc::clone(cached);
+        }
+        let found = Rc::new(self.masks(tiles, w, h).iter().map(|m| m.has_pixel_inside(inside)).collect::<Vec<_>>());
+        self.tiles_inside.borrow_mut().insert(key, Rc::clone(&found));
+        found
     }
 
     pub fn canonical(tile: &RenderTile) -> CanonicalTileId {

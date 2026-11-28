@@ -264,6 +264,8 @@ pub struct Warp {
     central_x: Option<f64>,
     /// `pixel_world`, computed once.
     pixels: std::cell::OnceCell<Vec<[f64; 2]>>,
+    /// `inner_world_box`, computed once.
+    inner: std::cell::OnceCell<Option<[f64; 4]>>,
     /// Device pixels per CSS pixel of the output.
     pub pixel_ratio: f64,
     /// Device pixels per CSS pixel of the Mercator picture (rasters and DEMs): the output's, or
@@ -318,6 +320,7 @@ impl Warp {
             reference_lng: 0.0,
             central_x: None,
             pixels: Default::default(),
+            inner: Default::default(),
             pixel_ratio: view.pixel_ratio,
             picture_ratio: view.pixel_ratio,
         };
@@ -738,10 +741,31 @@ impl Warp {
         rings
     }
 
-    /// Draws the Mercator picture `src` (rendered with `t`) over `dst`, then clears `src`.
+    /// The box ([x0, y0, x1, y1], Mercator, world = 1) of `pixel_world` inside the margin; `None` where
+    /// none of it is on the map.
+    pub fn inner_world_box(&self) -> Option<[f64; 4]> {
+        *self.inner.get_or_init(|| {
+            let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+            for (_, p) in self.inner_pixels().filter(|(_, p)| !p[0].is_nan()) {
+                b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])];
+            }
+            (b[0] <= b[2]).then_some(b)
+        })
+    }
+
+    /// `pixel_world` inside the margin (the pixels kept when it is cropped), with their indices.
+    fn inner_pixels(&self) -> impl Iterator<Item = (usize, &[f64; 2])> {
+        // The output is at least a pixel wider and higher than its margins (`new`).
+        let ([w, h], m) = (self.size, self.margin);
+        let world = self.pixel_world();
+        (m..h - m).flat_map(move |y| (y * w + m..y * w + w - m).map(move |i| (i, &world[i])))
+    }
+
+    /// Draws the Mercator picture `src` (rendered with `t`) over `dst` inside the margin, which is
+    /// cropped, then clears `src`.
     pub fn composite(&self, src: &mut Target, t: &Transform, dst: &mut Target) {
         let ws = t.world_size;
-        for (i, m) in self.pixel_world().iter().enumerate() {
+        for (i, m) in self.inner_pixels() {
             if m[0].is_nan() {
                 continue;
             }

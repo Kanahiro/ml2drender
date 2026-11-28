@@ -35,9 +35,10 @@ if (variants.length < 2) throw new Error('usage: node scripts/bench.ts base=<che
 
 interface View {center: [number, number]; zoom: number; bearing?: number; width: number; height: number; pixelRatio?: number; margin?: number}
 // Base checkouts may predate RenderedImage.toPng() and renderView().
-interface Renderer {renderView?(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; render?(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; renderPng?(view: View): Promise<Uint8Array>}
-const draw = (r: Renderer, view: View) => r.renderView ? r.renderView(view) : r.render!(view);
-interface Api {MapRenderer: {init(style: object, options: object): Promise<Renderer>}}
+interface Renderer {renderView?(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; render?(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>; renderPng?(view: View): Promise<Uint8Array>; projected?(crs: object): {renderView(view: View): Promise<{data: Uint8ClampedArray; toPng?(): Uint8Array}>}}
+// With `crs`, a projected view (`MapRenderer.projected(crs).renderView`) of the same camera.
+const draw = (r: Renderer, view: View, crs?: object) => crs ? r.projected!(crs).renderView(view) : r.renderView ? r.renderView(view) : r.render!(view);
+interface Api {MapRenderer: {init(style: object, options: object): Promise<Renderer>; prototype: Renderer}}
 
 // Synthetic styles. Fixture resources are local://<path under assets>.
 const tile = (z: number, x: number, y: number): [number, number] =>
@@ -71,6 +72,12 @@ const styles: Record<string, object> = {
     layers: [{id: 'icons', type: 'symbol', source: 'data', layout: {'icon-image': 'cafe-15', 'icon-allow-overlap': true, 'icon-ignore-placement': true}}]},
 };
 const terrain = tile(12, 759, 1609);
+// Preset CRSs on a GL JS grid whose zoom has Web Mercator's scale at the equator (so the style's zoom is the same).
+const presets: {label: string; projjson: object}[] = JSON.parse(readFileSync(join(root, 'examples/browser/src/projjson-presets.json'), 'utf8'));
+const crs = (code: string) => ({projjson: presets.find((p) => p.label.includes(code))!.projjson, tileMatrixSet: {origin: [-2e7, 2e7], extentAtZoom0: 2 * Math.PI * 6378137}});
+const laea = crs('EPSG:3035');
+// A z15 tile in the middle of the dense tiles: all its neighbors have data.
+const middle = tile(15, 17605.5, 10749.5);
 // `center` moved by (dx, dy) CSS px at `zoom`.
 const shift = ([lng, lat]: [number, number], zoom: number, dx: number, dy: number): [number, number] => {
   const size = 512 * 2 ** zoom;
@@ -84,14 +91,23 @@ const quadrants = (view: View): View[] => [[-1, -1], [1, -1], [-1, 1], [1, 1]].m
 // The fixture sprites are 1x only, so cases with icons use DPR 1. The dense tiles span 1024 px at z15.
 // With `then`, one renderer renders `view` untimed and then `then` (timed, per view), as a tile
 // server or map client does with `set_view`.
-const cases: {name: string; style: string; view: View; then?: View[]}[] = [
+const cases: {name: string; style: string; view: View; crs?: object; then?: View[]}[] = [
   {name: 'bright z14', style: 'bright', view: {center: berlin, zoom: 14, width: 512, height: 512}},
   {name: 'bright z15', style: 'bright', view: {center: berlin, zoom: 15, width: 1024, height: 1024}},
   {name: 'bright z16.5 bearing 17°', style: 'bright', view: {center: berlin, zoom: 16.5, bearing: 17, width: 1024, height: 1024}},
   {name: 'basic z15', style: 'basic', view: {center: berlin, zoom: 15, width: 1024, height: 1024}},
   {name: 'hillshade + color-relief', style: 'dem', view: {center: terrain, zoom: 13, width: 512, height: 512, pixelRatio: 2}},
   {name: 'hillshade + color-relief, margin 64', style: 'dem', view: {center: terrain, zoom: 13, width: 512, height: 512, pixelRatio: 2, margin: 64}},
-  {name: 'bright z14, margin 64', style: 'bright', view: {center: berlin, zoom: 14, width: 512, height: 512, margin: 64}},
+  // Margins: one tile, whose margin reads its neighbors only for labels.
+  {name: 'bright tile 15/17605/10749, margin 64', style: 'bright', view: {center: middle, zoom: 15, width: 512, height: 512, margin: 64}},
+  {name: 'bright tile 15/17605/10749 bearing 17°, margin 64', style: 'bright', view: {center: middle, zoom: 15, bearing: 17, width: 512, height: 512, margin: 64}},
+  {name: 'bright LAEA Europe z15', style: 'bright', crs: laea, view: {center: berlin, zoom: 15, width: 1024, height: 1024}},
+  // Inside the middle tile (611 m of its 745 m) and reaching its neighbors with the margin.
+  {name: 'bright LAEA Europe z15, margin 64', style: 'bright', crs: laea, view: {center: middle, zoom: 15, width: 256, height: 256, pixelRatio: 2, margin: 64}},
+  // One raster tile; its margin reaches the other three.
+  {name: 'raster tile 12/758/1608, margin 64', style: 'satellite', view: {center: tile(12, 758.5, 1608.5), zoom: 11, width: 256, height: 256, pixelRatio: 2, margin: 64}},
+  // The same in NAD83 Conus Albers: 128 px (3.7 km) inside the tile (7.9 km), and 3.7 km more each side.
+  {name: 'raster Conus Albers, margin 128', style: 'satellite', crs: crs('EPSG:5070'), view: {center: tile(12, 758.5, 1608.5), zoom: 11.4, width: 128, height: 128, pixelRatio: 2, margin: 128}},
   {name: 'raster', style: 'satellite', view: {center: terrain, zoom: 13.5, bearing: 17, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON lines, 8 layers', style: 'lines', view: {center: berlin, zoom: 14, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON 10k labels', style: 'labels', view: {center: berlin, zoom: 14, width: 512, height: 512}},
@@ -140,17 +156,21 @@ const rows = [head, `|---|${loaded.map(() => '---:|').join('')}---:|---:|---|`];
 const memory = loaded.map(() => 0);
 let regressions = 0;
 for (const c of cases) {
+  if (c.crs && loaded.some((v) => typeof v.api.MapRenderer.prototype.projected !== 'function')) {
+    rows.push(`| ${c.name} | ${loaded.map(() => '-').join(' | ')} | 投影ビューのないチェックアウトあり | | |`);
+    continue;
+  }
   const runs = loaded.map((v) => ({v, renderer: undefined as Renderer | undefined, times: [] as number[], hash: ''}));
   for (let i = 0; i < samples + 2; i++) {
     // Alternate the order to spread warm-up, JIT and thermal effects; the first two rounds warm up.
     for (const run of i % 2 ? [...runs].reverse() : runs) {
       // A new renderer each time: renderers keep decoded tiles, and this measures a cold render.
       run.renderer = await run.v.api.MapRenderer.init(styles[c.style], {wasm: run.v.module, cache: {ttlMs: Infinity}});
-      if (c.then) await draw(run.renderer, c.view);
+      if (c.then) await draw(run.renderer, c.view, c.crs);
       const views = c.then ?? [c.view];
       const start = performance.now();
       let image!: {data: Uint8ClampedArray};
-      for (const view of views) image = await draw(run.renderer, view);
+      for (const view of views) image = await draw(run.renderer, view, c.crs);
       const ms = (performance.now() - start) / views.length;
       if (i >= 2) run.times.push(ms);
       run.hash ||= createHash('sha256').update(image.data).digest('hex');
@@ -165,7 +185,7 @@ for (const c of cases) {
     const view = (c.then ?? [c.view]).at(-1)!;
     for (const [i, run] of runs.entries()) {
       const r = run.renderer!;
-      const png = r.renderPng ? await r.renderPng(view) : (await draw(r, view)).toPng!();
+      const png = r.renderPng && !c.crs ? await r.renderPng(view) : (await draw(r, view, c.crs)).toPng!();
       writeFileSync(join(pngDir, `${c.name.replace(/[^\w.-]+/g, '_')}.${loaded[i].name}.png`), png);
     }
   }

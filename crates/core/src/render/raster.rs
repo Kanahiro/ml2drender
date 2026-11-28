@@ -241,6 +241,21 @@ impl Mask {
         }
     }
 
+    /// Whether the mask has a pixel in the area `[x0, y0, x1, y1)`, such as the pixels kept inside a
+    /// margin (`Target::clip`).
+    pub fn has_pixel_inside(&self, [x0, y0, x1, y1]: [usize; 4]) -> bool {
+        let (x1, y1) = (x1.min(self.w), y1.min(self.h));
+        if x0 >= x1 || y0 >= y1 {
+            return false;
+        }
+        let rows = |r: usize| r * self.w + x0..r * self.w + x1;
+        match &self.coverage {
+            Coverage::Rectangle { x, y } => x[0].max(x0) < x[1].min(x1) && y[0].max(y0) < y[1].min(y1),
+            Coverage::Pixels(bits) => (y0..y1).any(|r| bits[rows(r)].contains(&true)),
+            Coverage::Owner(owners, i) => (y0..y1).any(|r| owners[rows(r)].contains(i)),
+        }
+    }
+
     #[inline]
     pub fn get(&self, x: usize, y: usize) -> bool {
         match &self.coverage {
@@ -593,6 +608,33 @@ pub fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn has_pixel_inside_matches_pixels() {
+        let (w, h) = (40, 30);
+        let read =
+            |m: &Mask, [x0, y0, x1, y1]: [usize; 4]| (y0..y1.min(h)).any(|y| (x0..x1.min(w)).any(|x| m.get(x, y)));
+        let quad = |c: [f64; 2], r: f64, a: f64| {
+            [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]
+                .map(|[x, y]| [c[0] + r * (a.cos() * x - a.sin() * y), c[1] + r * (a.sin() * x + a.cos() * y)])
+        };
+        let mut masks = vec![
+            Mask::from_quad(w, h, quad([10.0, 10.0], 4.0, 0.0)),
+            Mask::from_quad(w, h, quad([30.0, 20.0], 6.0, 0.4)),
+            Mask::from_quad(w, h, quad([-3.0, 15.0], 4.0, 0.7)),
+        ];
+        let mut holed = Mask::from_quad(w, h, quad([20.0, 15.0], 9.0, 0.3));
+        holed.subtract(&Mask::from_quad(w, h, quad([20.0, 15.0], 5.0, 0.0)));
+        masks.push(holed);
+        let owners = (0..w * h).map(|p| if p % w < 9 { u32::MAX } else { (p % w >= 25) as u32 }).collect();
+        masks.extend(Mask::from_owners(w, h, owners, 3));
+        let areas = [[0, 0, 40, 30], [4, 4, 36, 26], [17, 12, 23, 18], [0, 0, 8, 30], [35, 25, 99, 99], [7, 7, 7, 20]];
+        for (i, m) in masks.iter().enumerate() {
+            for a in areas {
+                assert_eq!(m.has_pixel_inside(a), read(m, a), "mask {i}, {a:?}");
+            }
+        }
+    }
 
     #[test]
     fn round_matches_std() {
