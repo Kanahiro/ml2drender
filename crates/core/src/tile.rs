@@ -117,11 +117,6 @@ impl Transform {
         self.warp.as_ref().map(|w| w.pixel_world())
     }
 
-    /// Device pixels cropped from each side of a projected output (0 otherwise).
-    pub fn output_margin(&self) -> usize {
-        self.warp.as_ref().map_or(0, |w| w.margin)
-    }
-
     /// See `Warp::pixel_grid`.
     pub fn pixel_grid(&self) -> Option<crate::reproject::PixelGrid> {
         self.warp.as_ref().map(|w| w.pixel_grid())
