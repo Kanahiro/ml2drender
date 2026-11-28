@@ -811,7 +811,7 @@ impl Renderer {
         // DEMs: they read their neighbors' edges.
         let t = &self.transform;
         let margin = (self.view.margin as f64 * t.pixel_ratio).round();
-        let tiles = if src.ty == "raster" && self.projected.is_none() && margin > 0.0 {
+        let mut tiles = if src.ty == "raster" && self.projected.is_none() && margin > 0.0 {
             // Within a millionth of a pixel of the centers, in case one is on a tile's edge.
             let e = margin + 0.5 - 1e-6;
             // The target's size (`render`), whole pixels.
@@ -821,6 +821,23 @@ impl Renderer {
         } else {
             t.covering_tiles(z)
         };
+        // A projected view's rasters are drawn in the Mercator picture, and `composite` reads it within
+        // a pixel (bilinearly) of the Mercator position of each output pixel: the tiles there, for the
+        // pixels inside the margin. The pad (CSS pixels) has room for the picture's turn by a bearing.
+        if let Some((_, warp)) = self.projected.as_ref().filter(|(_, w)| src.ty == "raster" && w.margin > 0) {
+            let inner = warp.inner_world_box();
+            let (ws, off, pad) = (t.world_size, t.aligned_offset(), 2.0 / t.pixel_ratio);
+            let s = ws / (1u64 << z) as f64;
+            tiles.retain(|&(x, y, wrap)| {
+                let (x0, y0) = ((wrap as f64 * (1u64 << z) as f64 + x as f64) * s + off[0], y as f64 * s + off[1]);
+                inner.is_some_and(|b| {
+                    x0 <= b[2] * ws + pad
+                        && x0 + s >= b[0] * ws - pad
+                        && y0 <= b[3] * ws + pad
+                        && y0 + s >= b[1] * ws - pad
+                })
+            });
+        }
         let mut out = BTreeSet::new();
         for (x, y, wrap) in tiles {
             let id = TileId { z: z as u8, x: x as u32, y: y as u32 };

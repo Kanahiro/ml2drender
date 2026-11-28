@@ -72,11 +72,10 @@ const styles: Record<string, object> = {
     layers: [{id: 'icons', type: 'symbol', source: 'data', layout: {'icon-image': 'cafe-15', 'icon-allow-overlap': true, 'icon-ignore-placement': true}}]},
 };
 const terrain = tile(12, 759, 1609);
-// LAEA Europe on a GL JS grid whose zoom has Web Mercator's scale at the equator (so the style's zoom is the same).
-const laea = {
-  projjson: JSON.parse(readFileSync(join(root, 'examples/browser/src/projjson-presets.json'), 'utf8')).find((p: {label: string}) => p.label.includes('EPSG:3035')).projjson,
-  tileMatrixSet: {origin: [0, 8e6], extentAtZoom0: 2 * Math.PI * 6378137},
-};
+// Preset CRSs on a GL JS grid whose zoom has Web Mercator's scale at the equator (so the style's zoom is the same).
+const presets: {label: string; projjson: object}[] = JSON.parse(readFileSync(join(root, 'examples/browser/src/projjson-presets.json'), 'utf8'));
+const crs = (code: string) => ({projjson: presets.find((p) => p.label.includes(code))!.projjson, tileMatrixSet: {origin: [-2e7, 2e7], extentAtZoom0: 2 * Math.PI * 6378137}});
+const laea = crs('EPSG:3035');
 // A z15 tile in the middle of the dense tiles: all its neighbors have data.
 const middle = tile(15, 17605.5, 10749.5);
 // `center` moved by (dx, dy) CSS px at `zoom`.
@@ -107,6 +106,8 @@ const cases: {name: string; style: string; view: View; crs?: object; then?: View
   {name: 'bright LAEA Europe z15, margin 64', style: 'bright', crs: laea, view: {center: middle, zoom: 15, width: 256, height: 256, pixelRatio: 2, margin: 64}},
   // One raster tile; its margin reaches the other three.
   {name: 'raster tile 12/758/1608, margin 64', style: 'satellite', view: {center: tile(12, 758.5, 1608.5), zoom: 11, width: 256, height: 256, pixelRatio: 2, margin: 64}},
+  // The same in NAD83 Conus Albers: 128 px (3.7 km) inside the tile (7.9 km), and 3.7 km more each side.
+  {name: 'raster Conus Albers, margin 128', style: 'satellite', crs: crs('EPSG:5070'), view: {center: tile(12, 758.5, 1608.5), zoom: 11.4, width: 128, height: 128, pixelRatio: 2, margin: 128}},
   {name: 'raster', style: 'satellite', view: {center: terrain, zoom: 13.5, bearing: 17, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON lines, 8 layers', style: 'lines', view: {center: berlin, zoom: 14, width: 512, height: 512, pixelRatio: 2}},
   {name: 'GeoJSON 10k labels', style: 'labels', view: {center: berlin, zoom: 14, width: 512, height: 512}},
